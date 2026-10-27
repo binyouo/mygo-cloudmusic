@@ -34,13 +34,16 @@ type Album struct {
 }
 
 type Track struct {
-	ID       int64    `json:"id"`
-	Name     string   `json:"name"`
-	Artists  []Artist `json:"ar"`
-	Album    Album    `json:"al"`
-	Duration int64    `json:"dt"` // milliseconds
-	Fee      int      `json:"fee"`
-	Alias    []string `json:"alia"`
+	LocalPath       string   `json:"localPath,omitempty"`
+	LocalLyrics     string   `json:"localLyrics,omitempty"`
+	LocalLyricsPath string   `json:"localLyricsPath,omitempty"`
+	ID              int64    `json:"id"`
+	Name            string   `json:"name"`
+	Artists         []Artist `json:"ar"`
+	Album           Album    `json:"al"`
+	Duration        int64    `json:"dt"` // milliseconds
+	Fee             int      `json:"fee"`
+	Alias           []string `json:"alia"`
 	// Reason says why a daily recommendation was picked.
 	Reason string `json:"reason"`
 	// Privilege is what the listener may do with the track, if known.
@@ -483,6 +486,9 @@ func Lyrics(id int64) (lrc, translation, yrc string, err error) {
 
 // Sized asks the image CDN for a picture of n×n pixels.
 func Sized(pic string, n int) string {
+	if strings.HasPrefix(pic, "file:") {
+		return pic
+	}
 	if pic == "" {
 		return ""
 	}
@@ -492,6 +498,9 @@ func Sized(pic string, n int) string {
 
 // Fetch returns what is at url, as a cover the image CDN serves.
 func Fetch(url string) ([]byte, error) {
+	if strings.HasPrefix(url, "file:") {
+		return readLocalArtwork(url)
+	}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err

@@ -124,6 +124,10 @@ type backdropCache struct {
 
 // backdrop paints the backdrop behind Now Playing, still or fog.
 func (a *app) backdrop(c *ui.Context, art *artwork, tint ui.Color) {
+	a.backdropWithState(c, art, tint, &a.backdropCache)
+}
+
+func (a *app) backdropWithState(c *ui.Context, art *artwork, tint ui.Color, bd *backdropCache) {
 	pl := a.pl
 	fog, still := a.settings.Fog, c.Preferences().ReduceMotion
 	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
@@ -135,7 +139,6 @@ func (a *app) backdrop(c *ui.Context, art *artwork, tint ui.Color) {
 			div = 2
 		}
 		cw, ch := int(r.W/div)+1, int(r.H/div)+1
-		bd := &a.backdropCache
 		if bd.canvas != nil {
 			if w, h := bd.canvas.Size(); w != cw || h != ch {
 				bd.canvas, bd.before = nil, nil

@@ -19,11 +19,15 @@ func (a *app) setMenu() {
 	name := mygo.App.Name()
 	appMenu := []*mygo.MenuItem{
 		{Role: mygo.RoleAbout, Label: "关于" + name},
-		{Label: "检查更新…", Click: run(checkForUpdates)},
-		mygo.Separator(),
-		{Label: "设置…", Accelerator: "CmdOrCtrl+,", Click: run(a.openSettings)},
-		mygo.Separator(),
 	}
+	if a.updates {
+		appMenu = append(appMenu, &mygo.MenuItem{Label: "检查更新…", Click: run(checkForUpdates)})
+	}
+	appMenu = append(appMenu,
+		mygo.Separator(),
+		&mygo.MenuItem{Label: "设置…", Accelerator: "CmdOrCtrl+,", Click: run(a.openSettings)},
+		mygo.Separator(),
+	)
 	// Services and hiding are macOS's alone. Elsewhere MyGo leaves their
 	// items out but keeps the separators around them, which then stack.
 	if runtime.GOOS == "darwin" {
@@ -40,6 +44,8 @@ func (a *app) setMenu() {
 	mygo.App.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
 		{Label: name, Submenu: appMenu},
 		{Label: "文件", Submenu: []*mygo.MenuItem{
+			{Label: "导入音乐或歌词…", Accelerator: "CmdOrCtrl+O", Click: run(a.chooseLocalAudio)},
+			mygo.Separator(),
 			{Label: "新建歌单…", Accelerator: "CmdOrCtrl+N", Click: run(func() {
 				a.showMain()
 				a.nowPlaying = false
@@ -56,9 +62,11 @@ func (a *app) setMenu() {
 			{Role: mygo.RoleSelectAll, Label: "全选"},
 		}},
 		{Label: "控制", Submenu: []*mygo.MenuItem{
+			{Label: "播放屏保", Accelerator: "CmdOrCtrl+T", Click: run(a.toggleWallpaper)},
+			mygo.Separator(),
 			{Label: "播放/暂停", Click: run(func() { a.pl.TogglePlay() })},
-			{Label: "下一首", Accelerator: "CmdOrCtrl+Right", Click: run(func() { a.pl.Next() })},
-			{Label: "上一首", Accelerator: "CmdOrCtrl+Left", Click: run(func() { a.pl.Prev() })},
+			{Label: "下一首", Accelerator: a.shortcutConfig().Local[2].accelerator(), Click: run(func() { a.pl.Next() })},
+			{Label: "上一首", Accelerator: a.shortcutConfig().Local[1].accelerator(), Click: run(func() { a.pl.Prev() })},
 			mygo.Separator(),
 			{Label: "喜欢/取消喜欢", Accelerator: "CmdOrCtrl+D", Click: run(a.likeCurrent)},
 			mygo.Separator(),
@@ -67,6 +75,7 @@ func (a *app) setMenu() {
 			mygo.Separator(),
 			{Label: "正在播放", Accelerator: "CmdOrCtrl+L", Click: run(func() {
 				a.showMain()
+				a.leaveWallpaper()
 				a.nowPlaying = !a.nowPlaying && a.pl.Current() != nil
 			})},
 		}},

@@ -102,6 +102,9 @@ func (a *app) nowPlayingView(c *ui.Context) {
 
 func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, accent ui.Color, w, h float32, pointerIn bool) {
 	pl := a.pl
+	if tr.LocalPath != "" && a.npPane == paneComments {
+		a.npPane = paneLyrics
+	}
 	a.commentsFor(tr)
 	// An episode has what it is about and its captions in place of lyrics;
 	// a song, lyrics in place of those.
@@ -130,7 +133,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 		ui.Row(c).Height(topBar(c)).Justify(ui.Center).AlignItems(ui.Center).DragWindow().Children(func() {
 			reveal(ui.Box(c.Key("close-reveal")), pointerIn).Children(func() {
 				if iconButton(c.Key("close"), iconDown, 22, white.Alpha(0.7), "关闭").Clicked() {
-					a.nowPlaying = false
+					a.closeNowPlaying()
 				}
 			})
 		})
@@ -280,7 +283,11 @@ func (a *app) npTabs() []npTab {
 		}
 		return append(tabs, npTab{paneQueue, "待播清单"}, npTab{paneComments, "评论"})
 	}
-	return []npTab{{paneLyrics, "歌词"}, {paneStage, "律动"}, {paneQueue, "待播清单"}, {paneWall, "选歌"}, {paneComments, "评论"}}
+	tabs := []npTab{{paneLyrics, "歌词"}, {paneStage, "律动"}, {paneQueue, "待播清单"}, {paneWall, "选歌"}}
+	if tr := a.pl.Current(); tr != nil && tr.LocalPath == "" {
+		tabs = append(tabs, npTab{paneComments, "评论"})
+	}
+	return tabs
 }
 
 func (a *app) paneTabs(c *ui.Context) {
@@ -395,15 +402,35 @@ func (a *app) paneTab(c *ui.Context, i int, label string) {
 	}
 }
 
+type lyricPaneState struct {
+	lyricScroll ui.ScrollState
+	lyricGlide  lyricGlide
+	lyricAt     int
+	lyricTrack  int64
+}
+
 func (a *app) lyricsPane(c *ui.Context, tr *netease.Track, h float32) {
+	a.lyricsPaneWithState(c, tr, h, &a.lyricPaneState, true)
+}
+
+func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, state *lyricPaneState, comments bool) {
 	pl := a.pl
 	lines, loaded := pl.Lyrics()
+	if loaded && len(lines) == 0 && tr.LocalLyrics != "" {
+		ui.Scroll(c.Key("plain-lyrics")).Grow(1).Padding(24, 8).Children(func() {
+			ui.Text(c, tr.LocalLyrics).FontSize(24).FontWeight(600).LineHeight(1.8).TextColor(white.Alpha(0.75))
+		})
+		return
+	}
 	if len(lines) == 0 {
 		col := ui.Column(c).Grow(1)
 		if loaded {
 			col.Center()
 		}
-		dim, _ := a.quietShown(c, col, tr, lines, loaded)
+		var dim float32
+		if comments {
+			dim, _ = a.quietShown(c, col, tr, lines, loaded)
+		}
 		quietUnder(col, dim)
 		col.Children(func() {
 			if !loaded {
@@ -412,7 +439,9 @@ func (a *app) lyricsPane(c *ui.Context, tr *netease.Track, h float32) {
 			}
 			ui.Text(c, "纯音乐，请欣赏").FontSize(24).FontWeight(700).TextColor(white.Alpha(0.4))
 		})
-		a.quietCard(c, dim, h*0.18)
+		if comments {
+			a.quietCard(c, dim, h*0.18)
+		}
 		return
 	}
 	pos := pl.Position()
@@ -421,25 +450,30 @@ func (a *app) lyricsPane(c *ui.Context, tr *netease.Track, h float32) {
 	if pl.Playing() && cur+1 < len(lines) {
 		c.After(lines[cur+1].At - pos + 20*time.Millisecond)
 	}
-	if a.lyricTrack != tr.ID {
-		a.lyricTrack, a.lyricAt = tr.ID, -2
-		a.lyricScroll, a.lyricGlide = ui.ScrollState{}, lyricGlide{}
+	if state.lyricTrack != tr.ID {
+		state.lyricTrack, state.lyricAt = tr.ID, -2
+		state.lyricScroll, state.lyricGlide = ui.ScrollState{}, lyricGlide{}
 	}
-	lag := a.lyricGlide.step(c, &a.lyricScroll)
+	lag := state.lyricGlide.step(c, &state.lyricScroll)
 
-	scroll := ui.Scroll(c.Key("lyrics")).Grow(1).TrackScroll(&a.lyricScroll).Padding(0, 8, h*0.5, 0)
-	dim, quiet := a.quietShown(c, scroll, tr, lines, loaded)
+	scroll := ui.Scroll(c.Key("lyrics")).Grow(1).TrackScroll(&state.lyricScroll).Padding(0, 8, h*0.5, 0)
+	var dim float32
+	var quiet bool
+	if comments {
+		dim, quiet = a.quietShown(c, scroll, tr, lines, loaded)
+		defer a.quietCard(c, dim, h*0.18)
+	}
 	if dim > 0.98 {
 		// Under the hot comment, gone, not drawn faint.
 		scroll.Invisible()
 	}
-	defer a.quietCard(c, dim, h*0.18)
-	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 30, weight: 800, lineHeight: 1.25, quiet: quiet}, nil)
+	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 30, weight: 800, lineHeight: 1.25, quiet: quiet, state: state}, nil)
 }
 
 // linesStyle is how timedLines sets its lines: the size, weight and
 // leading of their type; quiet nearly hides them, under a hot comment.
 type linesStyle struct {
+	state      *lyricPaneState
 	size       float32
 	weight     int
 	lineHeight float32
@@ -453,6 +487,10 @@ type linesStyle struct {
 // lit has still to go (lyricGlide). foot, if set, follows the lines.
 func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, pos time.Duration, cur int, lag float32, st linesStyle, foot func()) {
 	pl := a.pl
+	state := st.state
+	if state == nil {
+		state = &a.lyricPaneState
+	}
 	var active ui.Element
 	scroll.Children(func() {
 		ui.Column(c).Gap(6).Translate(0, -lag).Children(func() {
@@ -516,19 +554,19 @@ func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, 
 		}
 	})
 	// Bring the line sung to a third of the way down, once it changed.
-	if cur != a.lyricAt {
+	if cur != state.lyricAt {
 		box := scroll.Bounds()
 		target := float32(0)
 		if active.Valid() {
 			// Where the glide is going, without where it still is.
 			if lb := active.LayoutBounds(); lb.H > 0 && box.H > 0 {
-				target = lb.Y - box.Y + a.lyricScroll.Y - box.H*0.3
+				target = lb.Y - box.Y + state.lyricScroll.Y - box.H*0.3
 			} else {
 				return // not laid out yet: the next frame scrolls
 			}
 		}
-		a.lyricAt = cur
-		a.lyricGlide.to(c, &a.lyricScroll, min(max(0, target), a.lyricScroll.MaxY))
+		state.lyricAt = cur
+		state.lyricGlide.to(c, &state.lyricScroll, min(max(0, target), state.lyricScroll.MaxY))
 	}
 }
 
@@ -643,7 +681,7 @@ func (a *app) queuePane(c *ui.Context) {
 			})
 			ui.Text(c, clock(tr.Length())).FontSize(12).FontFeatures("tnum").TextColor(white.Alpha(0.4))
 		})
-		if row.Clicked() && tr.Playable() && !playing {
+		if row.Clicked() && !playing {
 			pl.Jump(i)
 		}
 	}).Grow(1).Padding(8, 0, 40, 0).Gap(2)

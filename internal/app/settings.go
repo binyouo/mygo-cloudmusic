@@ -11,6 +11,11 @@ import (
 // settings are the listener's choices, kept in settings.json in the user
 // data directory.
 type settings struct {
+	WallpaperIdleSeconds int `json:"wallpaperIdleSeconds"`
+	// MenuBarLyrics shows the current lyric and playback controls in macOS's menu bar.
+	MenuBarLyrics bool `json:"menuBarLyrics"`
+	// MenuBarWidth is the space for lyrics in points, excluding controls.
+	MenuBarWidth float64 `json:"menuBarWidth"`
 	// Notch shows the quick player around the notch: the listener turns
 	// it on.
 	Notch bool `json:"notch"`
@@ -62,13 +67,14 @@ type settings struct {
 	// keeps none.
 	CacheMB int `json:"cacheMB"`
 	// SearchHistory keeps submitted keywords, most recent first.
-	SearchHistory []string `json:"searchHistory,omitempty"`
+	SearchHistory []string        `json:"searchHistory,omitempty"`
+	Shortcuts     *shortcutConfig `json:"shortcuts,omitempty"`
 
 	path string // where they were loaded from, and are saved to
 }
 
 func defaultSettings() settings {
-	return settings{NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true}
+	return settings{WallpaperIdleSeconds: 120, MenuBarWidth: 180, NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true}
 }
 
 func settingsPath() (string, error) {

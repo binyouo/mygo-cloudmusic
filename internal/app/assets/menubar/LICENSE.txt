@@ -1,0 +1,4 @@
+cloudmusic.svg: adapted from Simple Icons, CC0-1.0; circular background removed and viewBox fitted to the Cloud Music glyph
+Source: https://github.com/simple-icons/simple-icons/blob/develop/icons/neteasecloudmusic.svg
+Brand mark belongs to NetEase.
+Other icons are drawn for this project.

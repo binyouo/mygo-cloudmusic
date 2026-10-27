@@ -31,18 +31,19 @@ type Word struct {
 }
 
 var lrcTime = regexp.MustCompile(`\[(\d+):(\d+)(?:[.:](\d+))?\]`)
+var lrcWordTime = regexp.MustCompile(`<(\d+):(\d+)(?:[.:](\d+))?>`)
 
 // parseLRC reads lyrics in the LRC format, as NetEase serves them: a line
 // may carry several times, and credits come as lines of their own.
 func parseLRC(lrc string) []Line {
 	var out []Line
-	for _, raw := range strings.Split(lrc, "\n") {
+	for _, raw := range strings.Split(strings.ReplaceAll(lrc, "\r", "\n"), "\n") {
 		times := lrcTime.FindAllStringSubmatchIndex(raw, -1)
 		if len(times) == 0 {
 			continue
 		}
-		text := strings.TrimSpace(raw[times[len(times)-1][1]:])
-		for _, m := range times {
+		var pending []time.Duration
+		for index, m := range times {
 			min, _ := strconv.Atoi(raw[m[2]:m[3]])
 			sec, _ := strconv.Atoi(raw[m[4]:m[5]])
 			var frac time.Duration
@@ -55,7 +56,19 @@ func parseLRC(lrc string) []Line {
 				}
 			}
 			at := time.Duration(min)*time.Minute + time.Duration(sec)*time.Second + frac
-			out = append(out, Line{At: at, Text: text})
+			pending = append(pending, at)
+			end := len(raw)
+			if index+1 < len(times) {
+				end = times[index+1][0]
+			}
+			text := strings.TrimSpace(lrcWordTime.ReplaceAllString(raw[m[1]:end], ""))
+			if text == "" && index+1 < len(times) {
+				continue
+			}
+			for _, timestamp := range pending {
+				out = append(out, Line{At: timestamp, Text: text})
+			}
+			pending = nil
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].At < out[j].At })

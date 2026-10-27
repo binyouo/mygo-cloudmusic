@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -25,6 +27,7 @@ const (
 	pageUser
 	pagePodcast
 	pagePodcasts
+	pageLocal
 )
 
 type route struct {
@@ -39,12 +42,13 @@ type route struct {
 // app is the state both windows show. Everything in it is read and changed
 // on the main thread: by the views, and by goroutines through post.
 type app struct {
-	win   *mygo.Window
-	notch *notch
-	tray  *mygo.Tray // the icon in the menu bar or notification area, while it shows
-	art   *artCache
-	pl    *player.Player
-	pal   palette
+	win     *mygo.Window
+	notch   *notch
+	tray    *mygo.Tray // the icon in the menu bar or notification area, while it shows
+	art     *artCache
+	pl      *player.Player
+	pal     palette
+	menuBar *menuBar
 
 	route   route
 	history []route
@@ -103,15 +107,12 @@ type app struct {
 	npChangedAt time.Time // when it last opened or closed
 	npPane      int       // paneLyrics, paneQueue, paneStage, paneComments, paneProgram or paneCaptions
 	npPaneTop   float32   // how far the cover beside the pane starts below its top
-	npTabsH     float32   // how tall the pane's tabs were, last laid out
-	lyricScroll ui.ScrollState
-	lyricGlide  lyricGlide
-	lyricAt     int
-	lyricTrack  int64
-	queueList   ui.ListState
-	queueAt     int // the row of the queue pane last scrolled to, -1 while it is hidden
-	comments    commentState
-	tabCount    rollState // the count on the comments' tab, as it rolls
+	npTabsH     float32
+	lyricPaneState
+	queueList ui.ListState
+	queueAt   int // the row of the queue pane last scrolled to, -1 while it is hidden
+	comments  commentState
+	tabCount  rollState // the count on the comments' tab, as it rolls
 
 	fmMode        int    // the FM mode chosen, in fmModes
 	radioStarting string // the radio asked for its first songs, or ""
@@ -137,10 +138,18 @@ type app struct {
 	sig                   playerSig
 	quitting              bool
 
-	settings    settings
-	settingsWin *mygo.Window
-	cacheUsed   int64 // the bytes the song cache takes, -1 until measured
-	updates     bool  // the update plugin is used (useUpdater)
+	settings        settings
+	settingsWin     *mygo.Window
+	cacheUsed       int64 // the bytes the song cache takes, -1 until measured
+	updates         bool  // the update plugin is used (useUpdater)
+	globalKeys      []string
+	shortcutErrors  []string
+	shortcutEdit    shortcutEdit
+	shortcutHandles [6]ui.Handle
+	wallpaper       wallpaperState
+	localTracks     []netease.Track
+	localImporting  bool
+	localError      string
 
 	restored     bool   // playback picked up where it was left
 	savedSession string // the session as last kept
@@ -160,8 +169,12 @@ func (a *app) post(fn func()) {
 }
 
 func (a *app) redraw() {
+	a.syncMenuBar()
 	if a.win != nil {
 		a.win.Invalidate()
+	}
+	if a.wallpaper.win != nil {
+		a.wallpaper.win.Invalidate()
 	}
 	if a.notch != nil && a.notch.win != nil {
 		a.notch.win.Invalidate()
@@ -183,24 +196,64 @@ func (a *app) showMain() {
 	}
 }
 
+// localBuild is set by build-local-macos.py. Official builds retain the
+// upstream data migration and updater; local builds have their own identity.
+var localBuild string
+
+// Keep the local profile stable when its visible app name changes.
+func setLocalPaths() error {
+	const profile = "MyGo 云音乐（本地）"
+	config, err := os.UserConfigDir()
+	if err != nil {
+		return err
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	for name, base := range map[mygo.PathName]string{
+		mygo.PathUserData: config,
+		mygo.PathCache:    cache,
+		mygo.PathLogs:     filepath.Join(home, "Library", "Logs"),
+	} {
+		path := filepath.Join(base, profile)
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return err
+		}
+		mygo.App.SetPath(name, path)
+	}
+	return nil
+}
+
 // Run runs the app until it quits.
 func Run() error {
-	a := &app{
-		playlists:  map[int64]*netease.Playlist{},
-		loadingPl:  map[int64]bool{},
-		plErr:      map[int64]string{},
-		artists:    map[int64]*artistData{},
-		albums:     map[int64]*albumData{},
-		users:      map[int64]*userData{},
-		podcasts:   map[int64]*podcastData{},
-		podcastTab: &podcastTab{},
-		searches:   map[route]*searchData{},
-		lyricAt:    -1,
-		queueAt:    -1,
-		cacheUsed:  -1,
+	if localBuild == "1" {
+		if err := setLocalPaths(); err != nil {
+			return err
+		}
 	}
-	moveOldData()
-	a.useUpdater()
+	a := &app{
+		playlists:      map[int64]*netease.Playlist{},
+		loadingPl:      map[int64]bool{},
+		plErr:          map[int64]string{},
+		artists:        map[int64]*artistData{},
+		albums:         map[int64]*albumData{},
+		users:          map[int64]*userData{},
+		podcasts:       map[int64]*podcastData{},
+		podcastTab:     &podcastTab{},
+		searches:       map[route]*searchData{},
+		lyricPaneState: lyricPaneState{lyricAt: -1},
+		queueAt:        -1,
+		cacheUsed:      -1,
+	}
+	if localBuild != "1" {
+		moveOldData()
+		a.useUpdater()
+	}
 	mygo.App.WhenReady(func() {
 		a.settings = loadSettings()
 		a.settings.applyAppearance()
@@ -213,7 +266,12 @@ func Run() error {
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
 		a.pl.Changed = func() {
+			a.wallpaperPlaybackChanged()
 			a.keepSession()
+			if a.menuBar != nil {
+				a.menuBar.stopTimer()
+			}
+			a.syncMenuBar()
 			a.syncCaptions()
 		}
 		a.volume = a.settings.Volume
@@ -236,6 +294,10 @@ func Run() error {
 			Content:              ui.View(a.view),
 		})
 		a.setMenu()
+		a.loadLocalLibrary()
+		a.watchWallpaper()
+		a.win.OnFileDrop(func(e *mygo.FileDropEvent) { a.importLocalFiles(e.Paths) })
+		a.registerPlaybackShortcuts()
 		a.boot()
 		// The notch player is macOS's, over its menu bar: elsewhere it would
 		// hang at the top of the screen as a black box.
@@ -250,6 +312,7 @@ func Run() error {
 		// Shown or switched to the morning after, it shows the new day's.
 		a.win.OnFocus(a.freshenHome)
 		a.applyTray()
+		a.syncMenuBar()
 		if shotHook != nil {
 			shotHook(a)
 		}
@@ -261,6 +324,7 @@ func Run() error {
 				return
 			}
 			e.PreventDefault()
+			a.leaveWallpaper()
 			if runtime.GOOS == "darwin" || a.tray != nil {
 				a.win.Hide()
 			} else {
@@ -270,6 +334,9 @@ func Run() error {
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
+		a.stopWallpaper()
+		a.unregisterPlaybackShortcuts()
+		a.syncMenuBar()
 		a.settings.Volume = a.volume
 		a.settings.save()
 		a.saveSession()

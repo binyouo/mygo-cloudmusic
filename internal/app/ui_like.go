@@ -40,6 +40,9 @@ func (a *app) loadLiked(uid int64) {
 // and then with NetEase, which may refuse: the heart goes back then. Signed
 // out, it asks the listener to sign in.
 func (a *app) toggleLike(tr *netease.Track) {
+	if tr.LocalPath != "" {
+		return
+	}
 	if a.profile == nil {
 		a.showMain()
 		a.openLogin()
@@ -101,7 +104,7 @@ func (a *app) isLiked(tr *netease.Track) bool {
 // keyboard (⌘D), which shows no heart: a toast says which it did.
 func (a *app) likeCurrent() {
 	tr := a.pl.Current()
-	if tr == nil {
+	if tr == nil || tr.LocalPath != "" {
 		return
 	}
 	a.toggleLike(tr)
@@ -193,7 +196,7 @@ func (a *app) likeButton(c *ui.Context, tr *netease.Track, size float32, color u
 	// The burst goes on a wrapper, which the heart's pop does not scale.
 	wrap := ui.Box(c).Center()
 	var b ui.Element
-	wrap.Children(func() { b = iconButton(c, icon, size, color, label) })
+	wrap.Children(func() { b = iconButton(c, icon, size, color, label).Disabled(tr.LocalPath != "") })
 	scale := b.AnimateTo("pop", 1, ui.Animation{Spring: ui.SpringOptions{Duration: 550 * time.Millisecond, Bounce: 0.55}})
 	b.Scale(scale, scale)
 	burst := ui.Local(wrap, "burst", func() time.Time { return time.Time{} })

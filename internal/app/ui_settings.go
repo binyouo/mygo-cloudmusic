@@ -33,6 +33,7 @@ func (a *app) openSettings() {
 		Content:         ui.View(a.settingsView),
 	})
 	a.settingsWin.OnClosed(func() {
+		a.cancelShortcutEdit()
 		a.settingsWin = nil
 		a.syncDock()
 	})
@@ -41,6 +42,8 @@ func (a *app) openSettings() {
 
 // changed applies the settings everywhere and keeps them.
 func (a *app) changed() {
+	a.wallpaperInput()
+	a.resetWallpaperTimer()
 	a.settings.save()
 	a.settings.applyAppearance()
 	if a.notch != nil {
@@ -55,7 +58,9 @@ func (a *app) settingsView(c *ui.Context) {
 	t.Accent, t.AccentText = p.accent, p.onAccent
 	c.SetTheme(&t)
 	c.Root().Background(p.sidebar)
-	c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.settingsWin.Close() })
+	if !a.shortcutEdit.active {
+		c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.settingsWin.Close() })
+	}
 	s := &a.settings
 
 	ui.Scroll(c).Fill().Padding(24, 28, 32, 28).Gap(8).Children(func() {
@@ -99,6 +104,46 @@ func (a *app) settingsView(c *ui.Context) {
 					}
 				})
 			})
+		}
+		if runtime.GOOS == "darwin" {
+			group("播放屏保", func() {
+				row("闲置后显示屏保", "前台播放时全屏渐显，移动鼠标或按键退出；⌘T 手动开关", func() {
+					choices := []string{"关闭", "30 秒", "1 分钟", "2 分钟", "5 分钟", "10 分钟"}
+					seconds := []int{0, 30, 60, 120, 300, 600}
+					chosen := choices[0]
+					for index, value := range seconds {
+						if value == s.WallpaperIdleSeconds {
+							chosen = choices[index]
+						}
+					}
+					if ui.Select(c.Key("wallpaper-idle"), &chosen, choices).Label("屏保等待时间").Width(115).Changed() {
+						for index, label := range choices {
+							if chosen == label {
+								s.WallpaperIdleSeconds = seconds[index]
+							}
+						}
+						a.changed()
+					}
+				})
+			})
+			group("菜单栏", func() {
+				row("菜单栏歌词", "在菜单栏显示当前歌词，可切歌、暂停和喜欢歌曲", func() {
+					if ui.Switch(c.Key("menu-bar-lyrics"), &s.MenuBarLyrics).Label("显示菜单栏歌词").Changed() {
+						s.save()
+						a.syncMenuBar()
+					}
+				})
+				row("展示宽度", "短句居中显示，长句自动滚动", func() {
+					ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+						if ui.StepSlider(c.Key("menu-bar-width"), &s.MenuBarWidth, 100, 300, 1).Width(140).Label("歌词展示宽度").Disabled(!s.MenuBarLyrics).Changed() {
+							s.save()
+							a.syncMenuBar()
+						}
+						ui.Textf(c, "%.0f", s.MenuBarWidth).FontSize(12).TextColor(p.muted).FontFeatures("tnum").Width(28)
+					})
+				})
+			})
+			group("快捷键", func() { a.shortcutSettings(c, p) })
 		}
 
 		// Only on macOS, the one with a notch player.

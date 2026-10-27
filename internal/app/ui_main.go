@@ -31,10 +31,13 @@ func (a *app) view(c *ui.Context) {
 		// the container around everything, it comes before a button the
 		// pointer focused, which would take Space as a click; on the
 		// window, it would come after.
-		root.OnShortcut(0, ui.KeySpace, a.pl.TogglePlay)
-		// And where nothing has the focus, as once Now Playing covers the
-		// button that had it.
-		c.OnShortcut(0, ui.KeySpace, a.pl.TogglePlay)
+		play := a.shortcutConfig().Local[0]
+		if play.Key != ui.KeyUnknown {
+			root.OnShortcut(play.Mods, play.Key, a.pl.TogglePlay)
+			// And where nothing has the focus, as once Now Playing covers the
+			// button that had it.
+			c.OnShortcut(play.Mods, play.Key, a.pl.TogglePlay)
+		}
 	}
 	npOpen, npSettled := a.npState(c)
 	root.Children(func() {
@@ -72,9 +75,19 @@ func (a *app) view(c *ui.Context) {
 		a.toast = ""
 	}
 	a.syncWindows()
+	a.ensureWallpaperTimer()
 }
 
 func (a *app) shortcuts(c *ui.Context) {
+	c.OnShortcut(ui.Cmd, ui.KeyT, a.toggleWallpaper)
+	c.OnShortcut(ui.Cmd, ui.KeyO, a.chooseLocalAudio)
+	local := a.shortcutConfig().Local
+	if local[1].Key != ui.KeyUnknown {
+		c.OnShortcut(local[1].Mods, local[1].Key, a.pl.Prev)
+	}
+	if local[2].Key != ui.KeyUnknown {
+		c.OnShortcut(local[2].Mods, local[2].Key, a.pl.Next)
+	}
 	// The side buttons of a mouse, the keys of keyboards that have them
 	// and swipes between pages, and the keys of Music.
 	c.OnShortcut(0, ui.KeyBack, a.back)
@@ -82,11 +95,14 @@ func (a *app) shortcuts(c *ui.Context) {
 	c.OnShortcut(ui.Cmd, ui.KeyBracketLeft, a.back)
 	c.OnShortcut(ui.Cmd, ui.KeyBracketRight, a.goForward)
 	c.OnShortcut(ui.Cmd, ui.KeyF, func() {
+		a.leaveWallpaper()
 		a.nowPlaying = false
 		a.searchBox.Focus(c)
 	})
-	if a.nowPlaying {
-		c.OnShortcut(0, ui.KeyEscape, func() { a.nowPlaying = false })
+	if a.wallpaper.active {
+		c.OnShortcut(0, ui.KeyEscape, a.leaveWallpaper)
+	} else if a.nowPlaying {
+		c.OnShortcut(0, ui.KeyEscape, a.closeNowPlaying)
 		// ⌘ and a number choose Now Playing's tab of that place.
 		if a.pl.Current() != nil {
 			for i, t := range a.npTabs() {
@@ -99,6 +115,7 @@ func (a *app) shortcuts(c *ui.Context) {
 // go opens a page, remembering the one before for the back button, and
 // closes Now Playing over it, though it is the page open.
 func (a *app) open(r route) {
+	a.leaveWallpaper()
 	a.nowPlaying = false
 	if r == a.route {
 		return
@@ -142,7 +159,7 @@ func (a *app) load(r route) {
 // closes Now Playing, which covers the pages.
 func (a *app) back() {
 	if a.nowPlaying {
-		a.nowPlaying = false
+		a.closeNowPlaying()
 		return
 	}
 	if len(a.history) == 0 {
@@ -157,6 +174,7 @@ func (a *app) back() {
 // goForward goes to the page back left, as the forward button of a mouse
 // does.
 func (a *app) goForward() {
+	a.leaveWallpaper()
 	if len(a.forward) == 0 {
 		return
 	}
@@ -184,6 +202,7 @@ func (a *app) sidebar(c *ui.Context) {
 			a.navItem(c, iconDaily, "每日推荐", route{page: pageDaily})
 			a.navItem(c, iconRadio, "私人 FM", route{page: pageFM})
 			a.navItem(c, iconCharts, "排行榜", route{page: pageCharts})
+			a.navItem(c, iconNote, "本地音乐", route{page: pageLocal})
 			a.navItem(c, iconPodcast, "播客", route{page: pagePodcasts})
 			if a.searched.query != "" {
 				a.navItem(c, iconSearch, "搜索结果", a.searched)
@@ -371,6 +390,8 @@ func (a *app) content(c *ui.Context) {
 		a.podcastPage(c)
 	case pagePodcasts:
 		a.podcastsPage(c)
+	case pageLocal:
+		a.localPage(c)
 	}
 }
 

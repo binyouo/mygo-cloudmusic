@@ -33,7 +33,7 @@ func sessionFile() (string, error) {
 
 func readSession() ([]byte, error) {
 	if !mygo.IsDev() {
-		return mygo.Secrets.Get(sessionSecret)
+		return getStoredSession()
 	}
 	path, err := sessionFile()
 	if err != nil {
@@ -44,7 +44,7 @@ func readSession() ([]byte, error) {
 
 func writeSession(b []byte) error {
 	if !mygo.IsDev() {
-		return mygo.Secrets.Set(sessionSecret, b)
+		return setStoredSession(b)
 	}
 	path, err := sessionFile()
 	if err != nil {
@@ -58,7 +58,7 @@ func writeSession(b []byte) error {
 
 func deleteSession() {
 	if !mygo.IsDev() {
-		mygo.Secrets.Delete(sessionSecret)
+		deleteStoredSession()
 		return
 	}
 	if path, err := sessionFile(); err == nil {

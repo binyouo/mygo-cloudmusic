@@ -296,7 +296,7 @@ func (a *app) wall(c *ui.Context, y, w, h, top, foot, frost float32) {
 				})
 			}
 		})
-		if plane.Clicked() && hover >= 0 && hover != playing && queue[hover].Playable() {
+		if plane.Clicked() && hover >= 0 && hover != playing {
 			pl.Jump(hover)
 		}
 	})

@@ -35,6 +35,12 @@ func (a *app) songItems(tr *netease.Track, pid int64) func(m *ui.Menu) {
 		if m.Item("复制歌名和歌手").Chosen() {
 			copyText(tr.Name + " - " + tr.ArtistNames())
 		}
+		if tr.LocalPath != "" {
+			if m.Item("复制文件路径").Chosen() {
+				copyText(tr.LocalPath)
+			}
+			return
+		}
 		m.Separator()
 		if m.Item("复制链接").Chosen() {
 			copyText(tr.URL())

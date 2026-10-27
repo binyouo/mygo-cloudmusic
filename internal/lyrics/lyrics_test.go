@@ -5,6 +5,22 @@ import (
 	"time"
 )
 
+// Compact LRC lines and enhanced word tags retain every lyric instead of dropping earlier timestamps or showing markup.
+func TestLRCCompactAndEnhancedLines(t *testing.T) {
+	lines := Build("[00:01.50]第一句[00:02.500]第二句\n[00:03][00:04]重复\n[00:05]<00:05.00>你<00:05.50>好", "", "")
+	if len(lines) != 5 {
+		t.Fatalf("lyric lines were dropped: %+v", lines)
+	}
+	for index, want := range []struct {
+		at   time.Duration
+		text string
+	}{{1500 * time.Millisecond, "第一句"}, {2500 * time.Millisecond, "第二句"}, {3 * time.Second, "重复"}, {4 * time.Second, "重复"}, {5 * time.Second, "你好"}} {
+		if lines[index].At != want.at || lines[index].Text != want.text {
+			t.Fatalf("line %d: %+v, want %+v", index, lines[index], want)
+		}
+	}
+}
+
 func TestParseLRC(t *testing.T) {
 	lines := mergeLyrics("[00:01.000] 作词 : 某人\n[00:30.54]故事的小黄花\n[00:34.165][01:10.1]从出生那年就飘着\n[00:40.00]\n",
 		"[00:30.54]The little yellow flower\n")
