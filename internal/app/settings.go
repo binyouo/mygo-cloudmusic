@@ -34,6 +34,12 @@ type settings struct {
 	// LyricsStage shows lyrics on the stage, Folia's style, in Now
 	// Playing, rather than scrolling.
 	LyricsStage bool `json:"lyricsStage"`
+	// StageStyle is how the stage sets its lyrics (stageStyles): empty for
+	// Folia's classic, or the id of another of its visualizers.
+	StageStyle string `json:"stageStyle,omitempty"`
+	// StageSparks throws sparks off each word on the stage as it is sung,
+	// whatever its style.
+	StageSparks bool `json:"stageSparks,omitempty"`
 	// Volume is where the volume was left, from 0 to 1.
 	Volume float64 `json:"volume"`
 	// Normalize evens out the loudness of tracks, by what NetEase
@@ -46,15 +52,23 @@ type settings struct {
 	// rising and swelling with the bass: an experiment the listener turns
 	// on.
 	Fog bool `json:"fog"`
+	// AppIcon is where the app's icon shows on macOS (appIcons); elsewhere
+	// it is always in the notification area.
+	AppIcon string `json:"appIcon"`
+	// Captions writes down episodes as they play, for their captions,
+	// once the listener has downloaded the model.
+	Captions bool `json:"captions"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`
+	// SearchHistory keeps submitted keywords, most recent first.
+	SearchHistory []string `json:"searchHistory,omitempty"`
 
 	path string // where they were loaded from, and are saved to
 }
 
 func defaultSettings() settings {
-	return settings{NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, CacheMB: 2048}
+	return settings{NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true}
 }
 
 func settingsPath() (string, error) {

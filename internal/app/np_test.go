@@ -72,3 +72,92 @@ func TestQueueStaysAsATrackIsPlayed(t *testing.T) {
 		}
 	}
 }
+
+// The app chooses Now Playing's pane before it makes the player: it
+// crashed on start when the choice asked the player what played.
+func TestLyricsPaneBeforePlayer(t *testing.T) {
+	a := &app{settings: settings{LyricsStage: true}}
+	if pane := a.lyricsPaneChosen(); pane != paneStage {
+		t.Errorf("pane %d", pane)
+	}
+}
+
+// 上一首 plays the song before, however far this one has played: a few
+// seconds in, it went back to this one's start, and took a second click.
+func TestPrevGoesBackASong(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: 1, Name: "一", Duration: 200000}, {ID: 2, Name: "二", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.pl.Hold(30 * time.Second)
+	a.nowPlaying = true
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	tt.Advance(time.Second)
+	tt.Frame()
+	if err := tt.Click("上一首"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if id := a.pl.Current().ID; id != 2 {
+		t.Errorf("playing %d, want the one before, 2", id)
+	}
+}
+
+// Now Playing holds still as the quality's badge goes, while the next song
+// loads, and comes back: the row of times grew with it, moving the column.
+func TestNowPlayingHoldsStillWithoutBadge(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: 1, Name: "一", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.nowPlaying = true
+	tt := ui.NewTester(a.view, 1200, 800)
+	var at []float32
+	for _, st := range []*netease.Stream{{Level: "lossless"}, nil} {
+		a.pl.SetStream(st)
+		tt.Frame()
+		tt.Advance(time.Second)
+		tt.Frame()
+		r, ok := tt.Find("专辑封面")
+		if !ok {
+			t.Fatal("no cover")
+		}
+		at = append(at, r.Y)
+	}
+	if at[0] != at[1] {
+		t.Errorf("the cover moved from %v to %v as the badge went", at[0], at[1])
+	}
+}
+
+// ⌘ and a number choose Now Playing's tab in that place, for a song and
+// for an episode, whose tabs are others: its last is the comments, wherever
+// the captions it may have put it.
+func TestCmdNumberChoosesTab(t *testing.T) {
+	for _, c := range []struct {
+		track netease.Track
+		keys  []int // from 1, 0 for the last tab
+		panes []int
+	}{
+		{netease.Track{ID: 1, Name: "宝船", Duration: 200000}, []int{4, 2, 1}, []int{paneWall, paneStage, paneLyrics}},
+		{netease.Track{ID: 2, Name: "节目", ProgramID: 9, Duration: 200000}, []int{0, 1}, []int{paneComments, paneProgram}},
+	} {
+		a := newTestApp()
+		a.settings = defaultSettings()
+		a.pl.Cue([]netease.Track{c.track})
+		a.pl.SetLyrics(nil)
+		a.nowPlaying = true
+		tt := ui.NewTester(a.view, 1200, 800)
+		tt.Frame()
+		for i, n := range c.keys {
+			if n == 0 {
+				n = len(a.npTabs())
+			}
+			tt.Key(ui.Cmd, ui.Key1+ui.Key(n-1))
+			tt.Frame()
+			if a.npPane != c.panes[i] {
+				t.Errorf("%s: ⌘%d chose pane %d, want %d", c.track.Name, n, a.npPane, c.panes[i])
+			}
+		}
+	}
+}

@@ -2,7 +2,6 @@ package app
 
 import (
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/egoist/mygo/plugins/glass"
@@ -88,25 +87,54 @@ func (a *app) shortcuts(c *ui.Context) {
 	})
 	if a.nowPlaying {
 		c.OnShortcut(0, ui.KeyEscape, func() { a.nowPlaying = false })
+		// ⌘ and a number choose Now Playing's tab of that place.
+		if a.pl.Current() != nil {
+			for i, t := range a.npTabs() {
+				c.OnShortcut(ui.Cmd, ui.Key1+ui.Key(i), func() { a.choosePane(t.pane) })
+			}
+		}
 	}
 }
 
-// go opens a page, remembering the one before for the back button.
+// go opens a page, remembering the one before for the back button, and
+// closes Now Playing over it, though it is the page open.
 func (a *app) open(r route) {
+	a.nowPlaying = false
 	if r == a.route {
 		return
 	}
 	a.history, a.forward = append(a.history, a.route), nil
-	a.nowPlaying = false
 	a.show(r)
 }
 
 // show shows the page of r.
 func (a *app) show(r route) {
 	a.route = r
-	a.trackList, a.pageScroll = ui.ListState{}, ui.ScrollState{}
-	if r.page == pagePlaylist {
-		a.loadPlaylist(r.playlist, false)
+	if r.page == pageSearch {
+		a.query, a.searched = r.query, r
+	}
+	a.load(r)
+}
+
+// load loads what the page of r shows, unless it has.
+func (a *app) load(r route) {
+	switch r.page {
+	case pageHome:
+		a.freshenHome()
+	case pagePlaylist:
+		a.loadPlaylist(r.id, false)
+	case pageSearch:
+		a.loadSearch(r, false)
+	case pageArtist:
+		a.loadArtist(r.id)
+	case pageAlbum:
+		a.loadAlbum(r.id)
+	case pageUser:
+		a.loadUser(r.id)
+	case pagePodcast:
+		a.loadPodcast(r.id)
+	case pagePodcasts:
+		a.loadPodcastTab()
 	}
 }
 
@@ -140,7 +168,6 @@ func (a *app) goForward() {
 }
 
 func (a *app) sidebar(c *ui.Context) {
-	p := a.pal
 	// Under the window buttons where they sit over the sidebar, as the
 	// traffic lights do; elsewhere, as close to the top as to the sides.
 	top := float32(14)
@@ -150,33 +177,19 @@ func (a *app) sidebar(c *ui.Context) {
 	// Where nothing in it takes the press, the sidebar moves the window, as
 	// the title bar it reaches up into would.
 	ui.Column(c).Fill().Padding(top, 14, 14, 14).Gap(4).DragWindow().Children(func() {
-		// The search field.
-		field := ui.Row(c).Height(32).PaddingX(10).Gap(7).Radius(9).AlignItems(ui.Center).Margin(0, 0, 14, 0)
-		focused := c.Focused(a.searchBox)
-		if focused {
-			field.Background(p.bg).Shadow(0, 0, 0, 3, p.accent.Alpha(0.25)).Border(1, p.accent.Alpha(0.6))
-		} else {
-			field.Background(p.hover).Border(1, p.hairline)
-		}
-		field.Children(func() {
-			ui.Icon(c, iconSearch).Size(14, 14).TextColor(p.muted)
-			in := ui.TextInputBase(c.Key("search"), &a.query).Bind(&a.searchBox).Grow(1).
-				Placeholder("搜索歌曲、歌手").FontSize(13).Label("搜索")
-			if in.Submitted() && strings.TrimSpace(a.query) != "" {
-				a.search(strings.TrimSpace(a.query))
-			}
-		})
+		a.searchField(c)
 
 		ui.Scroll(c.Key("nav")).TrackScroll(&a.navScroll).Grow(1).Margin(0, -6).Padding(0, 6).Gap(4).Children(func() {
 			a.navItem(c, iconHome, "为你推荐", route{page: pageHome})
 			a.navItem(c, iconDaily, "每日推荐", route{page: pageDaily})
 			a.navItem(c, iconRadio, "私人 FM", route{page: pageFM})
 			a.navItem(c, iconCharts, "排行榜", route{page: pageCharts})
-			if a.searched != "" {
-				a.navItem(c, iconSearch, "搜索结果", route{page: pageSearch})
+			a.navItem(c, iconPodcast, "播客", route{page: pagePodcasts})
+			if a.searched.query != "" {
+				a.navItem(c, iconSearch, "搜索结果", a.searched)
 			}
-			a.myPlaylists(c, "我的歌单", a.mine, true)
-			a.myPlaylists(c, "收藏的歌单", a.saved, false)
+			a.myPlaylists(c, "我的歌单", a.mine, true, &a.mineCollapsed)
+			a.myPlaylists(c, "收藏的歌单", a.saved, false, &a.savedCollapsed)
 		})
 
 		// What plays, as a card at the foot of the sidebar, over who listens.
@@ -224,7 +237,7 @@ func (a *app) sidebarNowPlaying(c *ui.Context, tr *netease.Track) {
 		a.cover(c, tr.Album.PicURL, 96, 40, 6).Shadow(0, 2, 6, 0, p.cardShade)
 		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
 			ui.Text(c, tr.Name).FontSize(12.5).FontWeight(600).SingleLine()
-			ui.Text(c, tr.ArtistNames()).FontSize(11.5).TextColor(p.muted).SingleLine()
+			a.artistLinks(c, tr, p.muted, p.text).FontSize(11.5).SingleLine()
 		})
 	})
 	if card.Clicked() {
@@ -328,6 +341,11 @@ func (a *app) pageTop(c *ui.Context) {
 }
 
 func (a *app) content(c *ui.Context) {
+	// A new page starts at its top. Not as it is opened: a control in a
+	// list, as a page's tabs in its header, opens it as the list builds.
+	if a.scrolled != a.route {
+		a.trackList, a.pageScroll, a.scrolled = ui.ListState{}, ui.ScrollState{}, a.route
+	}
 	// Pages mark where their content is, as they scroll.
 	a.underTop, a.underBottom = false, false
 	switch a.route.page {
@@ -343,6 +361,16 @@ func (a *app) content(c *ui.Context) {
 		a.searchPage(c)
 	case pageFM:
 		a.fmPage(c)
+	case pageArtist:
+		a.artistPage(c)
+	case pageAlbum:
+		a.albumPage(c)
+	case pageUser:
+		a.userPage(c)
+	case pagePodcast:
+		a.podcastPage(c)
+	case pagePodcasts:
+		a.podcastsPage(c)
 	}
 }
 
@@ -363,6 +391,7 @@ func (a *app) centered(c *ui.Context, err string, retry func()) {
 func (a *app) loadHome() {
 	a.homeLoading, a.homeErr = true, ""
 	signedIn := a.profile != nil
+	at := time.Now()
 	go func() {
 		featured, err1 := netease.FeaturedPlaylists(30)
 		charts, err2 := netease.Charts()
@@ -373,12 +402,40 @@ func (a *app) loadHome() {
 		}
 		a.post(func() {
 			a.homeLoading = false
-			a.featured, a.charts, a.daily, a.recPlaylists = featured, charts, daily, rec
 			if err1 != nil && err2 != nil {
-				a.homeErr = "无法连接网易云音乐，请检查网络"
+				// Loading the new day's again, what shows stays, to try
+				// once more.
+				if len(a.featured) == 0 && len(a.charts) == 0 {
+					a.homeErr = "无法连接网易云音乐，请检查网络"
+				}
+				return
 			}
+			a.featured, a.charts, a.daily, a.recPlaylists = featured, charts, daily, rec
+			a.homeAt = at
 		})
 	}()
+}
+
+// freshenHome loads the home page again once NetEase has picked the day's
+// songs anew since it last did: the app may stay open overnight.
+func (a *app) freshenHome() {
+	if !a.homeLoading && !a.homeAt.IsZero() && dailyRenewed(a.homeAt, time.Now()) {
+		a.loadHome()
+	}
+}
+
+// beijing is NetEase's time, without daylight saving.
+var beijing = time.FixedZone("CST", 8*60*60)
+
+// dailyRenewed reports whether NetEase has picked new daily songs between
+// loaded and now. It does at 6:00, Beijing time.
+func dailyRenewed(loaded, now time.Time) bool {
+	b := now.In(beijing)
+	six := time.Date(b.Year(), b.Month(), b.Day(), 6, 0, 0, 0, beijing)
+	if b.Before(six) {
+		six = six.AddDate(0, 0, -1)
+	}
+	return loaded.Before(six)
 }
 
 func (a *app) loadPlaylist(id int64, thenPlay bool) {
@@ -416,30 +473,4 @@ func firstPlayable(tracks []netease.Track) int {
 		}
 	}
 	return 0
-}
-
-func (a *app) search(q string) {
-	a.history, a.forward = append(a.history, a.route), nil
-	a.route = route{page: pageSearch}
-	a.trackList, a.pageScroll = ui.ListState{}, ui.ScrollState{}
-	a.nowPlaying = false
-	a.runSearch(q)
-}
-
-// runSearch loads the results of q, wherever the listener is.
-func (a *app) runSearch(q string) {
-	a.searched, a.searching, a.searchErr, a.results = q, true, "", nil
-	go func() {
-		res, err := netease.Search(q, 60)
-		a.post(func() {
-			if q != a.searched {
-				return
-			}
-			a.searching = false
-			a.results = res
-			if err != nil {
-				a.searchErr = "搜索失败，请稍后再试"
-			}
-		})
-	}()
 }

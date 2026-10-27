@@ -55,11 +55,18 @@ func startDownload(url string, size int64, part *os.File, keep func(string, int6
 	case part != nil:
 		d.file, d.part, d.keep = part, part.Name(), keep
 	case size > 0:
-		d.data = make([]byte, 0, size)
+		d.data = make([]byte, 0, prealloc(size))
 	}
 	go d.run(ctx, url)
 	return d
 }
+
+// maxPrealloc is the most memory set aside for a song before its bytes
+// come in: the size it is said to be is the API's word, which a song that
+// turns out longer only outgrows.
+const maxPrealloc = 32 << 20
+
+func prealloc(size int64) int64 { return min(size, maxPrealloc) }
 
 // downloaded returns a download that has all of b in already.
 func downloaded(b []byte) *download {
@@ -143,7 +150,7 @@ func (d *download) write(b []byte) {
 func (d *download) toMemory() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.data = make([]byte, d.n, max(d.size, d.n))
+	d.data = make([]byte, d.n, max(prealloc(d.size), d.n))
 	got, _ := d.file.ReadAt(d.data, 0)
 	d.data = d.data[:got]
 	d.n = int64(got)
@@ -186,6 +193,18 @@ func (d *download) Close() {
 	if !closed {
 		d.release()
 	}
+}
+
+// share counts one more user of the song, as a second stream decoding
+// it, unless it is gone already.
+func (d *download) share() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.users <= 0 {
+		return false
+	}
+	d.users++
+	return true
 }
 
 // release lets the song go for one of its users. With none left, nothing
@@ -315,6 +334,27 @@ func openStream(dl *download, durationMs int64) (stream, error) {
 	return openMP3Stream(dl, durationMs)
 }
 
+// openShared opens a second stream of what dl fetches, for decoding apart
+// from what plays: it measures no spectrum, and closing it lets the song
+// go for it alone, leaving the download to the stream that plays.
+func openShared(dl *download, durationMs int64) (stream, error) {
+	if !dl.share() {
+		return nil, errors.New("player: the song is gone")
+	}
+	s, err := openStream(dl, durationMs)
+	if err != nil {
+		dl.release()
+		return nil, err
+	}
+	switch s := s.(type) {
+	case *mp3Stream:
+		s.spec, s.drop = nil, dl.release
+	case *flacStream:
+		s.spec, s.drop = nil, dl.release
+	}
+	return s, nil
+}
+
 // mp3Stream decodes a download for package audio, seeking by bytes: songs
 // are encoded at a constant bit rate, so time and bytes are in proportion.
 // It also measures the spectrum of what it decodes, for the visualizers.
@@ -328,6 +368,7 @@ type mp3Stream struct {
 	skip                  int   // bytes of decoded audio to drop after a seek
 	buf                   []byte
 	spec                  *spectrum
+	drop                  func()
 	closeMu               sync.Once
 	trim                  bool
 	lead, samplesPerFrame int64
@@ -335,7 +376,7 @@ type mp3Stream struct {
 }
 
 func openMP3Stream(dl *download, durationMs int64) (*mp3Stream, error) {
-	s := &mp3Stream{dl: dl, start: id3Size(dl)}
+	s := &mp3Stream{dl: dl, start: id3Size(dl), drop: dl.Close}
 	audioStart, lead, length, spf, trim := mp3Gapless(dl, s.start)
 	if trim {
 		s.start, s.lead, s.frames, s.samplesPerFrame, s.trim = audioStart, lead, length, spf, true
@@ -452,7 +493,7 @@ func (s *mp3Stream) SetPosition(frame int64) error {
 func (s *mp3Stream) source() (*download, *spectrum) { return s.dl, s.spec }
 
 func (s *mp3Stream) Close() error {
-	s.closeMu.Do(s.dl.Close)
+	s.closeMu.Do(s.drop)
 	return nil
 }
 
@@ -552,8 +593,12 @@ func newSpectrum(rate int, frames int64) *spectrum {
 	return s
 }
 
-// feed takes stereo samples decoded from frame at.
+// feed takes stereo samples decoded from frame at, unless the stream
+// measures no spectrum.
 func (s *spectrum) feed(at int64, stereo []float32) {
+	if s == nil {
+		return
+	}
 	if s.accAt < 0 || at != s.accAt+int64(len(s.acc)) {
 		// The start, or a seek: begin a chunk at a chunk's boundary.
 		s.acc = s.acc[:0]

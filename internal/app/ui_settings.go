@@ -1,6 +1,7 @@
 package app
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -31,7 +32,11 @@ func (a *app) openSettings() {
 		BackgroundColor: "light-dark(#f4f4f6, #1c1c1f)",
 		Content:         ui.View(a.settingsView),
 	})
-	a.settingsWin.OnClosed(func() { a.settingsWin = nil })
+	a.settingsWin.OnClosed(func() {
+		a.settingsWin = nil
+		a.syncDock()
+	})
+	a.syncDock()
 }
 
 // changed applies the settings everywhere and keeps them.
@@ -67,6 +72,32 @@ func (a *app) settingsView(c *ui.Context) {
 					}
 				})
 				control()
+			})
+		}
+
+		// Only on macOS: elsewhere the icon is always in the notification
+		// area.
+		if runtime.GOOS == "darwin" {
+			group("通用", func() {
+				row("应用图标", "显示在菜单栏时，关闭窗口后可从菜单栏图标打开", func() {
+					labels := make([]string, len(appIcons))
+					chosen := appIcons[0].label
+					for i, ic := range appIcons {
+						labels[i] = ic.label
+						if ic.id == s.AppIcon {
+							chosen = ic.label
+						}
+					}
+					if ui.Select(c.Key("app-icon"), &chosen, labels).Label("应用图标").Width(150).Changed() {
+						for _, ic := range appIcons {
+							if ic.label == chosen {
+								s.AppIcon = ic.id
+							}
+						}
+						a.changed()
+						a.changeAppIcon()
+					}
+				})
 			})
 		}
 
@@ -122,6 +153,10 @@ func (a *app) settingsView(c *ui.Context) {
 				}
 			})
 		})
+
+		if a.captionsShown() {
+			group("播客", func() { a.captionSettings(row, c) })
+		}
 
 		group("缓存", func() {
 			row("歌曲缓存", "听过的歌曲保存在本机，再次播放无需等待，也不耗流量；"+a.cacheUsage(), func() {

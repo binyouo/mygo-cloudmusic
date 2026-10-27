@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,11 @@ type Track struct {
 	Reason string `json:"reason"`
 	// Privilege is what the listener may do with the track, if known.
 	Privilege *Privilege `json:"privilege"`
+	// A podcast's episode plays as a track of its audio, ID, with the
+	// episode's ProgramID, the PodcastID it is in, and what it is about.
+	ProgramID   int64  `json:"programId,omitempty"`
+	PodcastID   int64  `json:"podcastId,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // Privilege is what NetEase lets the listener signed in, or nobody, do
@@ -80,6 +86,11 @@ func (t *Track) ArtistNames() string {
 // privilege says, or else as its fee does for anyone, VIP songs (1) and
 // paid albums (4) giving only a preview.
 func (t *Track) Playable() bool {
+	if t.ProgramID > 0 {
+		// An episode's audio has no privilege: whether it streams, as a
+		// paid one bought, is up to its stream.
+		return true
+	}
 	if t.Privilege != nil {
 		return t.Privilege.St >= 0 && t.Privilege.Pl > 0
 	}
@@ -89,7 +100,21 @@ func (t *Track) Playable() bool {
 func (t *Track) Length() time.Duration { return time.Duration(t.Duration) * time.Millisecond }
 
 // URL is the track's page on the NetEase website.
-func (t *Track) URL() string { return apiBase + "/song?id=" + strconv.FormatInt(t.ID, 10) }
+func (t *Track) URL() string {
+	if t.ProgramID > 0 {
+		return apiBase + "/program?id=" + strconv.FormatInt(t.ProgramID, 10)
+	}
+	return apiBase + "/song?id=" + strconv.FormatInt(t.ID, 10)
+}
+
+// Thread names the track's comments, and what NetEase likes it by, for an
+// episode: the episode's, not its audio's.
+func (t *Track) Thread() string {
+	if t.ProgramID > 0 {
+		return programThread(t.ProgramID)
+	}
+	return "R_SO_4_" + strconv.FormatInt(t.ID, 10)
+}
 
 type Playlist struct {
 	ID          int64   `json:"id"`
@@ -101,7 +126,9 @@ type Playlist struct {
 	TrackCount  int     `json:"trackCount"`
 	UpdateFreq  string  `json:"updateFrequency"`
 	SpecialType int     `json:"specialType"` // 5: the listener's liked songs
+	Privacy     int     `json:"privacy"`     // 10: only its creator sees it
 	Creator     struct {
+		UserID   int64  `json:"userId"`
 		Nickname string `json:"nickname"`
 	} `json:"creator"`
 	Tracks   []Track `json:"tracks"`
@@ -256,6 +283,9 @@ func PlaylistDetail(id int64) (*Playlist, error) {
 	}
 	p := &res.Playlist
 	withPrivileges(p.Tracks, res.Privileges)
+	// Its privileges mark VIP songs as taken down that a subscriber may
+	// play, as Stan's: the songs' details say right.
+	detailPrivileges(p.Tracks)
 	// Long playlists list only their first tracks in full: the rest by id.
 	if len(p.Tracks) < len(p.TrackIDs) {
 		var ids []int64
@@ -270,7 +300,9 @@ func PlaylistDetail(id int64) (*Playlist, error) {
 	return p, nil
 }
 
-// SongDetails returns the tracks of ids, in their order.
+// SongDetails returns the tracks of ids, in their order. It goes through
+// the eapi: the web API's privileges call some VIP songs taken down for
+// subscribers, whom the eapi streams them to.
 func SongDetails(ids []int64) ([]Track, error) {
 	var out []Track
 	for len(ids) > 0 {
@@ -282,11 +314,15 @@ func SongDetails(ids []int64) ([]Track, error) {
 		}
 		b, _ := json.Marshal(c)
 		var res struct {
+			Code       int         `json:"code"`
 			Songs      []Track     `json:"songs"`
 			Privileges []Privilege `json:"privileges"`
 		}
-		if err := post("/api/v3/song/detail", url.Values{"c": {string(b)}}, &res); err != nil {
+		if err := eapiPost("/api/v3/song/detail", map[string]any{"c": string(b)}, &res); err != nil {
 			return out, err
+		}
+		if res.Code != 200 {
+			return out, fmt.Errorf("netease: song detail: code %d", res.Code)
 		}
 		withPrivileges(res.Songs, res.Privileges)
 		out = append(out, res.Songs...)
@@ -294,21 +330,58 @@ func SongDetails(ids []int64) ([]Track, error) {
 	return out, nil
 }
 
-// Search returns the songs matching a query.
-func Search(query string, limit int) ([]Track, error) {
+// ArtistProfile is who an artist is, as their page shows them, with the
+// songs they are best known for.
+type ArtistProfile struct {
+	Artist
+	Avatar    string   `json:"img1v1Url"` // square
+	PicURL    string   `json:"picUrl"`    // wide
+	Alias     []string `json:"alias"`
+	Trans     string   `json:"trans"`
+	BriefDesc string   `json:"briefDesc"`
+	MusicSize int      `json:"musicSize"`
+	AlbumSize int      `json:"albumSize"`
+	Followed  bool     `json:"followed"` // by the listener signed in
+	// AccountID is the artist's own account, which posts their events, or 0.
+	AccountID int64   `json:"accountId"`
+	Songs     []Track `json:"-"`
+}
+
+// ArtistDetail returns an artist with their 50 most popular songs.
+func ArtistDetail(id int64) (*ArtistProfile, error) {
 	var res struct {
-		Result struct {
-			Songs []Track `json:"songs"`
-		} `json:"result"`
+		Artist   ArtistProfile `json:"artist"`
+		HotSongs []Track       `json:"hotSongs"`
 	}
-	q := url.Values{"s": {query}, "type": {"1"}, "limit": {strconv.Itoa(limit)}, "offset": {"0"}}
-	if err := get("/api/cloudsearch/pc", q, &res); err != nil {
+	if err := get("/api/v1/artist/"+strconv.FormatInt(id, 10), nil, &res); err != nil {
 		return nil, err
 	}
-	// Search marks whole catalogues as taken down that the listener may
-	// play, as YOASOBI's for a subscriber: the songs' details say right.
-	detailPrivileges(res.Result.Songs)
-	return res.Result.Songs, nil
+	ar := &res.Artist
+	ar.Songs = res.HotSongs
+	detailPrivileges(ar.Songs)
+	return ar, nil
+}
+
+// ArtistLatestSongs returns up to limit of an artist's songs, the newest
+// first.
+func ArtistLatestSongs(id int64, limit int) ([]Track, error) {
+	var res struct {
+		Songs []struct {
+			ID int64 `json:"id"`
+		} `json:"songs"`
+	}
+	form := url.Values{"id": {strconv.FormatInt(id, 10)}, "order": {"time"}, "limit": {strconv.Itoa(limit)}, "offset": {"0"}}
+	if err := post("/api/v1/artist/songs", form, &res); err != nil {
+		return nil, err
+	}
+	// Some artists' songs come in the old shape (artists, album, duration)
+	// that Track doesn't read: their details have them in the new one, as
+	// the listener's privileges.
+	ids := make([]int64, len(res.Songs))
+	for i, s := range res.Songs {
+		ids[i] = s.ID
+	}
+	return SongDetails(ids)
 }
 
 var ErrUnavailable = errors.New("this song isn't available to stream")
@@ -371,7 +444,9 @@ func SongURL(id int64, level string) (*Stream, error) {
 	if d.Peak != nil {
 		s.Peak = *d.Peak
 	}
-	if s.Level == "" {
+	// The level names the song's file in the cache: one not of Levels is
+	// taken for the one asked for.
+	if !slices.Contains(Levels, s.Level) {
 		s.Level = level
 	}
 	s.URL = strings.Replace(d.URL, "http://", "https://", 1)

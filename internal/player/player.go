@@ -1,6 +1,7 @@
 package player
 
 import (
+	"errors"
 	"math"
 	"math/rand/v2"
 	"time"
@@ -362,6 +363,30 @@ func (p *Player) Downloaded() (float64, bool) {
 	return dl.Progress(), true
 }
 
+// Audio is the current track's sound decoded apart from what plays, as
+// OpenAudio opens it: interleaved stereo at its rate, read as it
+// downloads.
+type Audio interface {
+	SampleRate() int
+	Channels() int
+	Read(dst []float32) (int, error)
+	// SetPosition goes to a frame, of SampleRate a second.
+	SetPosition(frame int64) error
+	Close() error
+}
+
+// OpenAudio opens the current track's sound again, for decoding apart
+// from what plays, as for transcribing an episode. It reads the same
+// download, waiting for what has not come in, and fails once the track
+// changes. It works on any goroutine once opened; close it when done.
+func (p *Player) OpenAudio() (Audio, error) {
+	if p.stream == nil || p.track == nil {
+		return nil, errors.New("player: nothing loaded")
+	}
+	dl, _ := p.stream.source()
+	return openShared(dl, p.track.Duration)
+}
+
 // PlayOrder returns the queue's indices in play order, and where the
 // current track is among them, -1 for none.
 func (p *Player) PlayOrder() ([]int, int) { return p.order, p.at }
@@ -382,21 +407,10 @@ func (p *Player) Next() {
 	p.load(at)
 }
 
+// Prev plays the track before this one, however far this one has played:
+// once a few seconds in, going back to its start only kept the listener
+// pressing twice.
 func (p *Player) Prev() {
-	if len(p.order) == 0 {
-		return
-	}
-	// As every player does: the start of this track, then the one before.
-	if p.Position() > 3*time.Second {
-		p.Seek(0)
-		return
-	}
-	p.PrevTrack()
-}
-
-// PrevTrack plays the track before this one, however far this one has
-// played, as flicking the cover back does.
-func (p *Player) PrevTrack() {
 	if len(p.order) == 0 {
 		return
 	}
@@ -659,7 +673,11 @@ func (p *Player) loadAudio(t netease.Track, at, skipped int) {
 		if job.err != nil {
 			p.err = job.err.Error()
 			if job.err == netease.ErrUnavailable {
-				p.err = "这首歌需要 VIP 才能播放"
+				if t.ProgramID != 0 {
+					p.err = "这期节目需要购买才能收听"
+				} else {
+					p.err = "这首歌需要 VIP 才能播放"
+				}
 			}
 			// Skip what cannot play, unless nothing in the queue can.
 			if skipped+1 < len(p.order) {

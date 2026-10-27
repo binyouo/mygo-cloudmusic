@@ -247,3 +247,114 @@ func TestMP3GaplessLengthAndRestart(t *testing.T) {
 		}
 	}
 }
+
+// A second stream of the song, as transcribing an episode opens, decodes
+// it as the one that plays does. Closing it leaves the download to the
+// one that plays, and the one that plays closing leaves it what is in.
+func TestSharedStream(t *testing.T) {
+	b, err := os.ReadFile("testdata/seek.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(b) }))
+	defer srv.Close()
+	c := NewCache(t.TempDir(), 1<<30)
+	ref := decodeAll(t, b)
+	ms := int64(len(ref)/2) * 1000 / 44100
+	readAll := func(s stream) []float32 {
+		var got []float32
+		buf := make([]float32, 4096)
+		for {
+			n, err := s.Read(buf)
+			got = append(got, buf[:n]...)
+			if err != nil || n == 0 {
+				return got
+			}
+		}
+	}
+
+	dl := c.download(1, &netease.Stream{URL: srv.URL, Size: int64(len(b)), Level: "exhigh", Type: "mp3"})
+	playing, err := openStream(dl, ms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := openShared(dl, ms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared.Close()
+	if got := readAll(playing); len(got) != len(ref) || maxDiff(got, ref) != 0 {
+		t.Errorf("played %d of %d samples after the second stream closed", len(got), len(ref))
+	}
+	playing.Close()
+
+	kept, _, ok := c.lookup(1, "exhigh")
+	if !ok {
+		t.Fatal("not kept")
+	}
+	playing, _ = openStream(kept, ms)
+	shared, err = openShared(kept, ms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playing.Close()
+	if got := readAll(shared); len(got) != len(ref) || maxDiff(got, ref) != 0 {
+		t.Errorf("decoded %d of %d samples after the stream playing closed", len(got), len(ref))
+	}
+	shared.Close()
+	if _, err := openShared(kept, ms); err == nil {
+		t.Error("shared a song let go")
+	}
+}
+
+// A stream whose level would lead out of the cache's folder is played but
+// not kept. The level named the file, taken as the API sent it, so a level
+// of "/../../x" wrote the song and its JSON beside the cache instead.
+func TestCacheKeepsOnlyKnownLevels(t *testing.T) {
+	b, err := os.ReadFile("testdata/seek.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(b) }))
+	defer srv.Close()
+	root := t.TempDir()
+	dir := filepath.Join(root, "cache")
+	c := NewCache(dir, 1<<30)
+
+	dl := c.download(1, &netease.Stream{URL: srv.URL, Size: int64(len(b)), Level: "/../../pwned", Type: "mp3"})
+	dl.waitFor(int64(len(b)))
+	dl.Close()
+	for start := time.Now(); time.Since(start) < 2*time.Second; time.Sleep(10 * time.Millisecond) {
+		if parts, _ := filepath.Glob(filepath.Join(dir, "*.part")); len(parts) == 0 {
+			break
+		}
+	}
+	var outside []string
+	filepath.WalkDir(root, func(path string, e os.DirEntry, err error) error {
+		if err == nil && !e.IsDir() && filepath.Dir(path) != dir {
+			outside = append(outside, path)
+		}
+		return nil
+	})
+	if len(outside) != 0 {
+		t.Errorf("wrote %v outside the cache", outside)
+	}
+	if songs := c.songs(); len(songs) != 0 {
+		t.Errorf("kept %v", songs)
+	}
+}
+
+// A song the cache won't keep sets aside no more memory than maxPrealloc,
+// whatever size the API says it is, which it set aside in full before.
+func TestStreamSizeIsNotTrusted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("short")) }))
+	defer srv.Close()
+	dl := startDownload(srv.URL, 1<<40, nil, nil)
+	defer dl.Close()
+	dl.mu.Lock()
+	n := cap(dl.data)
+	dl.mu.Unlock()
+	if n > maxPrealloc {
+		t.Errorf("set aside %d bytes", n)
+	}
+}
