@@ -161,3 +161,46 @@ func TestCmdNumberChoosesTab(t *testing.T) {
 		}
 	}
 }
+
+// Now Playing's tabs stay where they are going from one pane to another,
+// and as the comments' count changes: the lyrics, the queue and the
+// comments had them over the pane, and the stage and the wall at the top
+// on the right, where a longer count pushed the others along.
+func TestNowPlayingTabsStayPut(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: 1, Name: "一", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.nowPlaying = true
+	tt := ui.NewTester(a.view, 1200, 800)
+	settle := func() {
+		tt.Frame()
+		tt.Advance(time.Second)
+		tt.Frame()
+	}
+	settle()
+	first, ok := tt.Find("歌词")
+	if !ok {
+		t.Fatal("no 歌词 tab")
+	}
+	for _, tab := range []string{"律动", "待播清单", "选歌", "歌词"} {
+		tt.Click(tab)
+		settle()
+		if a.npPane == paneLyrics && tab != "歌词" {
+			t.Fatalf("%s was not chosen", tab)
+		}
+		if r, _ := tt.Find("歌词"); r.X != first.X || r.Y != first.Y {
+			t.Errorf("on %s the 歌词 tab is at %v,%v, was at %v,%v", tab, r.X, r.Y, first.X, first.Y)
+		}
+	}
+	for _, pane := range []int{paneStage, paneLyrics} {
+		a.npPane = pane
+		a.comments.loaded, a.comments.total = true, 0
+		settle()
+		a.comments.total = 12345678
+		settle()
+		if r, _ := tt.Find("歌词"); r.X != first.X || r.Y != first.Y {
+			t.Errorf("in pane %d, with the count, the 歌词 tab is at %v,%v, was at %v,%v", pane, r.X, r.Y, first.X, first.Y)
+		}
+	}
+}

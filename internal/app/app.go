@@ -107,7 +107,6 @@ type app struct {
 	npChangedAt time.Time // when it last opened or closed
 	npPane      int       // paneLyrics, paneQueue, paneStage, paneComments, paneProgram or paneCaptions
 	npPaneTop   float32   // how far the cover beside the pane starts below its top
-	npTabsH     float32
 	lyricPaneState
 	queueList ui.ListState
 	queueAt   int // the row of the queue pane last scrolled to, -1 while it is hidden
