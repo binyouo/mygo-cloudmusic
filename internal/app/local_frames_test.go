@@ -34,7 +34,7 @@ func TestLocalWallpaperFrames(t *testing.T) {
 	a.pl.Cue(a.localTracks)
 	a.pl.SetLyrics(lyrics.Build(track.LocalLyrics, "", ""))
 	a.pl.Hold(30 * time.Second)
-	bmp, cover, err := loadArt(track.Album.PicURL)
+	bmp, cover, _, err := loadArt(track.Album.PicURL)
 	if err != nil {
 		t.Fatal(err)
 	}
