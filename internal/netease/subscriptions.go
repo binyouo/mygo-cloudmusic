@@ -6,6 +6,15 @@ import (
 	"strconv"
 )
 
+// SubscribeAlbum collects an album for the listener, or removes it.
+func SubscribeAlbum(id int64, subscribe bool) error {
+	path := "/api/album/unsub"
+	if subscribe {
+		path = "/api/album/sub"
+	}
+	return post(path, url.Values{"id": {strconv.FormatInt(id, 10)}}, &struct{}{})
+}
+
 // SubscribePodcast subscribes the listener to a podcast, or unsubscribes
 // them.
 func SubscribePodcast(id int64, subscribe bool) error {

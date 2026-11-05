@@ -20,22 +20,6 @@ var (
 	programsLiked = netease.ProgramsLiked
 )
 
-// loadLiked loads the listener's liked songs.
-func (a *app) loadLiked(uid int64) {
-	go func() {
-		ids, err := netease.LikedIDs(uid)
-		a.post(func() {
-			if err != nil || a.profile == nil || a.profile.UserID != uid {
-				return
-			}
-			a.liked = make(map[int64]bool, len(ids))
-			for _, id := range ids {
-				a.liked[id] = true
-			}
-		})
-	}()
-}
-
 // toggleLike likes a song or an episode, or unlikes it, at once in the app
 // and then with NetEase, which may refuse: the heart goes back then. Signed
 // out, it asks the listener to sign in.
@@ -44,7 +28,9 @@ func (a *app) toggleLike(tr *netease.Track) {
 		return
 	}
 	if a.profile == nil {
-		a.showMain()
+		if !a.wallpaper.active {
+			a.showMain()
+		}
 		a.openLogin()
 		return
 	}
@@ -52,30 +38,7 @@ func (a *app) toggleLike(tr *netease.Track) {
 		a.toggleProgramLike(tr.ProgramID)
 		return
 	}
-	if a.liked == nil {
-		a.liked = map[int64]bool{}
-	}
-	id, like := tr.ID, !a.liked[tr.ID]
-	a.setLiked(id, like)
-	go func() {
-		err := likeSong(id, like)
-		a.post(func() {
-			if err != nil {
-				a.setLiked(id, !like)
-				a.toast = "操作失败，请稍后再试"
-				return
-			}
-			// The liked songs' playlist changed: load it anew when shown.
-			for _, pl := range a.mine {
-				if pl.SpecialType == 5 {
-					delete(a.playlists, pl.ID)
-					if a.route.page == pagePlaylist && a.route.id == pl.ID {
-						a.loadPlaylist(pl.ID, false)
-					}
-				}
-			}
-		})
-	}()
+	a.toggleSongLike(tr.ID)
 }
 
 func (a *app) toggleProgramLike(id int64) {

@@ -370,13 +370,13 @@ func (a *app) artistHeader(c *ui.Context, d *artistData) {
 					if a.pl.Shuffle() {
 						a.pl.ToggleShuffle()
 					}
-					a.pl.PlayQueue(songs, firstPlayable(songs))
+					a.pl.PlayQueue(songs, 0)
 				}
 				if pillButton(c.Key("shuffle"), iconShuffle, "随机播放", p.hover.Over(p.bg), p.text).Clicked() {
 					if !a.pl.Shuffle() {
 						a.pl.ToggleShuffle()
 					}
-					a.pl.PlayQueue(songs, firstPlayable(songs))
+					a.pl.PlayQueue(songs, 0)
 				}
 				icon, label := iconPlus, "关注"
 				if ar.Followed {

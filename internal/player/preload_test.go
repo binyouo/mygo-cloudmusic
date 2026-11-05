@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/audio"
 
@@ -227,9 +228,154 @@ func TestPreparationFailureWaitsForSelection(t *testing.T) {
 	}
 	p.stop()
 	p.at, p.track, p.loading = 1, &p.queue[1], true
-	// All other songs have already failed in this attempted traversal.
-	p.loadAudio(*p.track, p.at, 1)
+	p.loadAudio(*p.track, p.at, 0)
+	retry := <-requests
+	if retry.track.ID != 2 || !p.loading || p.err != "" {
+		t.Fatal("did not retry the selected song's failed preparation")
+	}
+	retry.result <- errors.New("download failed")
+	next(t, posts)
 	if p.loading || p.playing || p.err != "download failed" {
 		t.Fatal("did not report the selected song's error")
+	}
+}
+
+// Skipping during the new foreground retry must cancel it so a late success cannot replace the chosen song.
+func TestPreparationRetryOvertaken(t *testing.T) {
+	p, posts, requests := preparationPlayer(t, 1, 2, 3)
+	p.prepareNext()
+	first := <-requests
+	first.result <- errors.New("temporary download failure")
+	next(t, posts)
+	p.stop()
+	p.at, p.track, p.loading = 1, &p.queue[1], true
+	p.loadAudio(*p.track, p.at, 0)
+	retry := <-requests
+	p.stop()
+	p.at, p.track, p.loading = 2, &p.queue[2], true
+	p.loadAudio(*p.track, p.at, 0)
+	chosen := <-requests
+	chosenJob := p.loadJob
+	retry.result <- nil
+	next(t, posts)
+	<-retry.stream.closed
+	if p.Current().ID != 3 || p.loadJob != chosenJob || p.out != nil || !p.loading {
+		t.Fatal("the retry replaced the newer song")
+	}
+	chosen.result <- nil
+	next(t, posts)
+	if p.loading || p.stream != chosen.stream || p.out.Playing() {
+		t.Fatal("the newer selection did not load paused")
+	}
+}
+
+// A failed speculative open used to skip a playable song on both Next and EOF, including when it failed after selection.
+func TestFailedPreparationRetriesSelectedTrack(t *testing.T) {
+	old := fetchLyrics
+	fetchLyrics = func(int64) (string, string, string, error) { return "", "", "", nil }
+	defer func() { fetchLyrics = old }()
+	for _, automatic := range []bool{false, true} {
+		for _, ready := range []bool{false, true} {
+			name := "manual"
+			if automatic {
+				name = "automatic"
+			}
+			if ready {
+				name += "/already-failed"
+			} else {
+				name += "/in-flight"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, posts, requests := preparationPlayer(t, 1, 2, 3)
+				p.prepareNext()
+				first := <-requests
+				if ready {
+					first.result <- errors.New("temporary download failure")
+					next(t, posts)
+				}
+				if automatic {
+					p.ended()
+				} else {
+					p.Next()
+				}
+				if !ready {
+					first.result <- errors.New("temporary download failure")
+				}
+				deadline := time.After(2 * time.Second)
+				var retry openRequest
+			waitRetry:
+				for {
+					select {
+					case fn := <-posts:
+						fn()
+					case retry = <-requests:
+						break waitRetry
+					case <-deadline:
+						t.Fatal("did not retry the failed preparation")
+					}
+				}
+				if retry.track.ID != 2 || p.Current().ID != 2 || p.at != 1 {
+					retry.result <- errors.New("test cleanup")
+					t.Fatalf("skipped song 2: opened %d, current %d at %d", retry.track.ID, p.Current().ID, p.at)
+				}
+				// Keep playback paused so a device clock cannot advance the test.
+				p.playing = false
+				retry.result <- nil
+				for p.loading {
+					next(t, posts)
+				}
+				if p.Current().ID != 2 || p.stream != retry.stream || p.err != "" {
+					t.Fatal("the recovered song did not become ready")
+				}
+				successor := <-requests
+				if successor.track.ID != 3 {
+					t.Fatalf("prepared %d after recovery", successor.track.ID)
+				}
+				successor.result <- nil
+				for p.nextJob != nil && !p.nextJob.ready {
+					next(t, posts)
+				}
+			})
+		}
+	}
+}
+
+// Foreground network and decoder errors used to cascade through the queue; only confirmed unavailability may skip a song.
+func TestLoadFailureKeepsSelectedTrack(t *testing.T) {
+	old := fetchLyrics
+	fetchLyrics = func(int64) (string, string, string, error) { return "", "", "", nil }
+	defer func() { fetchLyrics = old }()
+	for _, tc := range []struct {
+		name string
+		err  error
+		skip bool
+	}{
+		{"network", errors.New("connection reset"), false},
+		{"decode", errors.New("invalid audio header"), false},
+		{"unavailable", netease.ErrUnavailable, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, posts, requests := preparationPlayer(t, 1, 2, 3)
+			p.stop()
+			p.at, p.track, p.loading, p.playing = 1, &p.queue[1], true, true
+			p.loadAudio(*p.track, p.at, 0)
+			request := <-requests
+			request.result <- tc.err
+			next(t, posts)
+			if tc.skip {
+				if p.Current().ID != 3 || !p.loading {
+					t.Fatal("confirmed unavailability did not advance the queue")
+				}
+				following := <-requests
+				job := p.loadJob
+				p.stop()
+				following.result <- nil
+				for !job.ready {
+					next(t, posts)
+				}
+			} else if p.Current().ID != 2 || p.at != 1 || p.playing || p.loading || p.err != tc.err.Error() {
+				t.Fatalf("failure skipped or hid the selected song: at %d, error %q", p.at, p.err)
+			}
+		})
 	}
 }

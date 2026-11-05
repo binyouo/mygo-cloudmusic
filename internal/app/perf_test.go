@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +10,54 @@ import (
 	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
 )
+
+// A ten-thousand-song playlist and its cached search stay idle after their initial layout.
+func TestPlaylistSearchFrameBudget(t *testing.T) {
+	for _, query := range []string{"", "歌手 0999"} {
+		a, _ := playlistSearchApp(10000)
+		a.playlistFilter.query = query
+		tt := ui.NewTester(a.view, 1200, 800)
+		tt.Frame()
+		tt.Advance(time.Second)
+		tt.Frame()
+		tt.Advance(time.Second)
+		if tt.FramePending() {
+			t.Fatalf("playlist with query %q keeps requesting frames", query)
+		}
+	}
+}
+
+func BenchmarkPlaylistList(b *testing.B) {
+	for _, n := range []int{1000, 10000} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			a, _ := playlistSearchApp(n)
+			tt := ui.NewTester(a.view, 1200, 800)
+			tt.Frame()
+			tt.Advance(time.Second)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				tt.Frame()
+			}
+		})
+	}
+}
+
+// An album's loaded comments and unfocused composer stay idle once shown.
+func TestAlbumCommentsFrameBudget(t *testing.T) {
+	a, d := albumApp()
+	a.profile = &netease.Profile{UserID: 1}
+	d.tab = 1
+	d.comments.appendPage(&netease.Comments{Latest: []netease.Comment{{ID: 1, Content: "好听"}}, Total: 1})
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	tt.Advance(time.Second)
+	tt.Frame()
+	tt.Advance(time.Second)
+	if tt.FramePending() {
+		t.Fatal("loaded album comments keep requesting frames")
+	}
+}
 
 // playingApp is an app playing a track with lyrics, at a position the test
 // sets with pl.Seek, and the number of times its view was built.

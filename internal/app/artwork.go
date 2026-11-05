@@ -22,12 +22,17 @@ import (
 // artwork is a cover, decoded and ready to draw, with what the player
 // derives from it: its color, and a blurred copy to fill a backdrop.
 type artwork struct {
-	bmp      *ui.Bitmap
-	backdrop *ui.Bitmap
-	tint     ui.Color // the cover's most vivid color
-	failed   bool
-	used     time.Time // when it was last asked for
-	size     int       // the bytes it keeps: its data, and the backdrop's pixels
+	bmp       *ui.Bitmap // original full-size still; animation owns its own bitmap.
+	backdrop  *ui.Bitmap
+	tint      ui.Color // the cover's most vivid color
+	palette   [4]ui.Color
+	animation *coverAnimation
+	motion    artworkClock
+	failed    bool
+	retryAt   time.Time
+	failures  int
+	used      time.Time // when it was last asked for
+	size      int       // the bytes it keeps: its data, and the backdrop's pixels
 }
 
 // artCache loads covers on goroutines and keeps them, up to artLimit
@@ -39,13 +44,16 @@ type artCache struct {
 	// gone are the covers dropped, for as long as something else holds
 	// them: Now Playing keeps the cover it shows, which comes back as it
 	// was rather than loading again.
-	gone  map[string]weak.Pointer[artwork]
-	busy  map[string]bool
-	sem   chan struct{}
-	post  func(func())
-	now   func() time.Time
-	size  int // the bytes the covers in art keep
-	limit int
+	gone    map[string]weak.Pointer[artwork]
+	busy    map[string]bool
+	sem     chan struct{}
+	pending []artRequest
+	fetch   func(string) ([]byte, error)
+	after   func(time.Duration, func())
+	post    func(func())
+	now     func() time.Time
+	size    int // the bytes the covers in art keep
+	limit   int
 }
 
 // artLimit is how many bytes of covers the cache keeps. A cover keeps its
@@ -54,8 +62,17 @@ type artCache struct {
 // however long ago it showed them, rather than loading them again.
 const artLimit = 64 << 20
 
+const artPendingLimit = 64
+
+type artRequest struct {
+	key, url string
+	backdrop bool
+	failures int
+}
+
 func newArtCache(post func(func())) *artCache {
-	return &artCache{art: map[string]*artwork{}, gone: map[string]weak.Pointer[artwork]{}, busy: map[string]bool{}, sem: make(chan struct{}, 8), post: post, now: time.Now, limit: artLimit}
+	return &artCache{art: map[string]*artwork{}, gone: map[string]weak.Pointer[artwork]{}, busy: map[string]bool{}, sem: make(chan struct{}, 8), post: post, now: time.Now, limit: artLimit,
+		fetch: netease.Fetch, after: func(d time.Duration, fn func()) { time.AfterFunc(d, fn) }}
 }
 
 // add keeps a cover, and drops those asked for least recently once the
@@ -98,50 +115,107 @@ func (c *artCache) get(url string, backdrop bool) *artwork {
 		key += "#backdrop"
 	}
 	now := c.now()
+	failures := 0
 	if a, ok := c.art[key]; ok {
-		a.used = now
-		return a
+		if !a.failed || now.Before(a.retryAt) {
+			a.used = now
+			return a
+		}
+		failures = a.failures
+		delete(c.art, key)
+		c.size -= a.size
 	}
 	if a := c.gone[key].Value(); a != nil {
 		delete(c.gone, key)
-		a.used = now
-		c.add(key, a)
-		return a
+		if !a.failed || now.Before(a.retryAt) {
+			a.used = now
+			c.add(key, a)
+			return a
+		}
+		failures = max(failures, a.failures)
 	}
 	if c.busy[key] {
+		// A queued cover asked for again is still visible. Put it ahead of
+		// requests left behind by an earlier scroll position.
+		for i, request := range c.pending {
+			if request.key == key {
+				c.pending = append(append(c.pending[:i], c.pending[i+1:]...), request)
+				break
+			}
+		}
 		return nil
 	}
 	c.busy[key] = true
-	go func() {
-		c.sem <- struct{}{}
-		bmp, img, size, err := loadArt(url)
-		<-c.sem
-		var blurred *image.RGBA
-		var tint ui.Color
-		if err == nil {
-			tint = dominantColor(img)
-			if backdrop {
-				blurred = blurImage(img)
-			}
-		}
-		c.post(func() {
-			delete(c.busy, key)
-			if err != nil {
-				c.add(key, &artwork{failed: true, used: c.now()})
-				return
-			}
-			a := &artwork{bmp: bmp, tint: tint, used: c.now(), size: size}
-			if blurred != nil {
-				a.backdrop = ui.NewBitmap(blurred)
-				a.size += len(blurred.Pix)
-			}
-			c.add(key, a)
-			// Shown by the frame post draws, the cover drops its pixels,
-			// which its data decodes again if they are needed.
-			time.AfterFunc(artRelease, func() { mygo.RunOnMain(bmp.ReleasePixels) })
-		})
-	}()
+	c.pending = append(c.pending, artRequest{key, url, backdrop, failures})
+	if len(c.pending) > artPendingLimit {
+		delete(c.busy, c.pending[0].key)
+		c.pending = c.pending[1:]
+	}
+	c.startPending()
 	return nil
+}
+
+// Only running requests own goroutines; newly visible covers go first.
+func (c *artCache) startPending() {
+	for len(c.pending) > 0 && len(c.sem) < cap(c.sem) {
+		i := len(c.pending) - 1
+		request := c.pending[i]
+		c.pending = c.pending[:i]
+		c.sem <- struct{}{}
+		fetch := c.fetch
+		go c.load(request, fetch)
+	}
+}
+
+func (c *artCache) load(request artRequest, fetch func(string) ([]byte, error)) {
+	key, url, backdrop := request.key, request.url, request.backdrop
+	data, err := fetch(url)
+	var bmp *ui.Bitmap
+	var img image.Image
+	if err == nil {
+		bmp, img, err = decodeArt(data)
+	}
+	size := len(data)
+	var animation *coverAnimation
+	if err == nil && backdrop {
+		animation = decodeCoverAnimation(data)
+	}
+	var blurred *image.RGBA
+	var tint ui.Color
+	var palette [4]ui.Color
+	if err == nil {
+		tint = dominantColor(img)
+		palette = albumPalette(img)
+		if backdrop {
+			blurred = blurImage(img)
+		}
+	}
+	c.post(func() {
+		<-c.sem
+		defer c.startPending()
+		delete(c.busy, key)
+		if err != nil {
+			failures := request.failures + 1
+			delay := min(5*time.Second*time.Duration(1<<min(failures-1, 4)), time.Minute)
+			c.add(key, &artwork{failed: true, used: c.now(), retryAt: c.now().Add(delay), failures: failures})
+			// Wake an idle window once. Visible covers retry on that frame;
+			// offscreen failures stay dormant until they are asked for again.
+			c.after(delay, func() { c.post(func() {}) })
+			return
+		}
+		a := &artwork{bmp: bmp, tint: tint, palette: palette, animation: animation, used: c.now(), size: size}
+		if animation != nil {
+			a.size += animation.memory
+		}
+		if blurred != nil {
+			a.backdrop = ui.NewBitmap(blurred)
+			a.size += len(blurred.Pix)
+		}
+		c.add(key, a)
+		// Shown by the frame post draws, the cover drops its pixels,
+		// which its data decodes again if they are needed.
+		time.AfterFunc(artRelease, func() { mygo.RunOnMain(bmp.ReleasePixels) })
+	})
 }
 
 // artRelease is how long a cover keeps its pixels once loaded: past the

@@ -2,7 +2,10 @@
 
 package app
 
-import "github.com/egoist/mygo"
+import (
+	"github.com/egoist/mygo"
+	"time"
+)
 
 type wallpaperNative struct{ win *mygo.Window }
 
@@ -25,4 +28,4 @@ func (n *wallpaperNative) fade(show bool, done func()) {
 
 func (n *wallpaperNative) close() {}
 
-func watchWallpaperInput(func(bool, bool) bool) func() { return func() {} }
+func wallpaperSystemIdle() time.Duration { return -1 }

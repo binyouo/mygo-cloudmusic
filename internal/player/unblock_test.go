@@ -2,10 +2,12 @@ package player
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"netease-music-mygo/internal/netease"
 )
@@ -45,4 +47,51 @@ func TestOpenAlternative(t *testing.T) {
 	if !errors.Is(err, networkErr) || calls != 1 {
 		t.Fatalf("network: calls=%d err=%v", calls, err)
 	}
+}
+
+// VIP and unavailable collaborative songs must decode fully through the real stream and fallback path.
+func TestVIPPlaybackLive(t *testing.T) {
+	if os.Getenv("LIVE") == "" {
+		t.Skip("set LIVE to call NetEase and the alternative music source")
+	}
+	for _, track := range []netease.Track{
+		{ID: 1901371647, Name: "孤勇者", Artists: []netease.Artist{{Name: "陈奕迅"}}, Duration: 256000, Fee: 1},
+		{ID: 531051217, Name: "等你下课 (with 杨瑞代)", Artists: []netease.Artist{{Name: "周杰伦"}, {Name: "杨瑞代"}}, Duration: 270000},
+	} {
+		t.Run(track.Name, func(t *testing.T) { checkFullPlayback(t, track) })
+	}
+}
+
+func checkFullPlayback(t *testing.T, track netease.Track) {
+	t.Helper()
+	old := resolveAlternative
+	defer func() { resolveAlternative = old }()
+	alternative := false
+	resolveAlternative = func(track netease.Track) (*netease.Stream, error) {
+		alternative = true
+		return old(track)
+	}
+	p := &Player{}
+	info, decoded, err := p.open(track, "exhigh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoded.Close()
+	buf := make([]float32, 32<<10)
+	var samples int64
+	for {
+		n, err := decoded.Read(buf)
+		samples += int64(n)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	duration := time.Duration(samples) * time.Second / time.Duration(decoded.SampleRate()*decoded.Channels())
+	if delta := duration - track.Length(); delta < -5*time.Second || delta > 5*time.Second {
+		t.Fatalf("decoded %v, expected about %v", duration, track.Length())
+	}
+	t.Logf("%s: alternative=%v format=%s decoded=%v", track.Name, alternative, info.Type, duration)
 }

@@ -104,7 +104,7 @@ var fogShader = sync.OnceValue(func() *shader.Shader { return shader.MustCompile
 const backdropFrame = time.Second / 30
 
 // backdropFade is how long another song's backdrop takes to fade in.
-const backdropFade = 700 * time.Millisecond
+const backdropFade = artworkTransition
 
 // backdropCache is the backdrop as last painted, and where the fog's
 // drift and its pulse are.
@@ -115,6 +115,7 @@ type backdropCache struct {
 	art    *artwork
 	tint   ui.Color
 	fog    bool
+	flow   bool
 	at     time.Time // when it was painted
 	drift  float64   // the clouds' time, in seconds, which stops on pause
 	speed  float64   // how fast drift goes: 1 playing, 0 paused
@@ -130,6 +131,7 @@ func (a *app) backdrop(c *ui.Context, art *artwork, tint ui.Color) {
 func (a *app) backdropWithState(c *ui.Context, art *artwork, tint ui.Color, bd *backdropCache) {
 	pl := a.pl
 	fog, still := a.settings.Fog, c.Preferences().ReduceMotion
+	flow := a.settings.MotionArtwork && art != nil && !fog
 	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
 		// The CPU, drawing the fog for want of a GPU, paints far fewer
 		// pixels, and those once a song: the fog stays still.
@@ -137,6 +139,8 @@ func (a *app) backdropWithState(c *ui.Context, art *artwork, tint ui.Color, bd *
 		div := float32(8)
 		if fog && gpu {
 			div = 2
+		} else if flow && gpu {
+			div = 4
 		}
 		cw, ch := int(r.W/div)+1, int(r.H/div)+1
 		if bd.canvas != nil {
@@ -149,20 +153,23 @@ func (a *app) backdropWithState(c *ui.Context, art *artwork, tint ui.Color, bd *
 			// Another song: the last one's stays as it was, fading out.
 			bd.canvas, bd.before, bd.fadeAt = bd.before, bd.canvas, now
 		}
-		moving := fog && gpu && !still
+		moving := (fog || flow) && gpu && !still
 		lv, live := pl.Levels()
 		moved := bd.step(now, pl.Playing() && moving, lv, live && moving)
 		due := now.Sub(bd.at) >= backdropFrame-2*time.Millisecond
-		if bd.canvas == nil || bd.art != art || bd.tint != tint || bd.fog != fog || moved && due {
+		if bd.canvas == nil || bd.art != art || bd.tint != tint || bd.fog != fog || bd.flow != flow || moved && due {
 			if bd.canvas == nil {
 				bd.canvas = ui.NewCanvas(cw, ch)
 			}
 			bd.art, bd.tint, bd.fog, bd.at = art, tint, fog, now
+			bd.flow = flow
 			bass := bd.level.group(0, 6)
 			bd.canvas.Draw(p, func(cp *ui.Painter) {
 				box := ui.Rect{W: float32(cw), H: float32(ch)}
 				if fog {
 					drawFog(cp, box, tint, float32(bd.drift), bass)
+				} else if flow {
+					drawAlbumMesh(cp, box, art, tint, float32(bd.drift))
 				} else {
 					drawBackdrop(cp, box, art, tint)
 				}
@@ -170,11 +177,16 @@ func (a *app) backdropWithState(c *ui.Context, art *artwork, tint ui.Color, bd *
 		}
 		p.Image(bd.canvas.Bitmap(), r, ui.FillBox)
 		if bd.before != nil {
-			if k := float32(now.Sub(bd.fadeAt)) / float32(backdropFade); k < 1 {
-				// Eased out, as it fades.
-				k = 1 - (1-k)*(1-k)*(1-k)
+			k := clamp01(float32(now.Sub(bd.fadeAt)) / float32(backdropFade))
+			mixing := false
+			if a.npVisual.current == art && a.npVisual.before != nil {
+				k, mixing = a.visualProgress(now)
+			}
+			if k < 1 {
 				p.ImageRegion(bd.before.Bitmap(), ui.Rect{}, r, ui.ImageOptions{Tint: white.Alpha(1 - k)})
-				p.AnimationFrame()
+				if !mixing || pl.Playing() {
+					p.AnimationFrame()
+				}
 			} else {
 				bd.before = nil
 			}
@@ -298,9 +310,11 @@ func (a *app) backdropOver(p *ui.Painter, win, band ui.Rect, alpha func(t float3
 	// Its song's fading in over the song before's, as the backdrop.
 	before := float32(0)
 	if bd.before != nil {
-		if k := float32(p.Now().Sub(bd.fadeAt)) / float32(backdropFade); k < 1 {
-			before = (1 - k) * (1 - k) * (1 - k)
+		k := clamp01(float32(p.Now().Sub(bd.fadeAt)) / float32(backdropFade))
+		if a.npVisual.current == bd.art && a.npVisual.before != nil {
+			k, _ = a.visualProgress(p.Now())
 		}
+		before = 1 - k
 	}
 	const strip = 2
 	for y := float32(0); y < band.H; y += strip {

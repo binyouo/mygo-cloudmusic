@@ -27,15 +27,17 @@ import (
 // NeteaseCloudMusicApi project's does.
 
 const (
-	eapiDomain = "https://interfacepc.music.163.com"
-	eapiKey    = "e82ckenh8dichen8"
-	eapiUA     = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)"
+	eapiDomain     = "https://interfacepc.music.163.com"
+	eapiKey        = "e82ckenh8dichen8"
+	eapiAppVersion = "3.1.17.204416"
+	// Keep the HTTP identity consistent with the PC identity in header and cookies.
+	eapiUA = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/" + eapiAppVersion
 )
 
 // The desktop client this app speaks as.
 var eapiClient = map[string]string{
 	"os":      "pc",
-	"appver":  "3.1.17.204416",
+	"appver":  eapiAppVersion,
 	"osver":   "Microsoft-Windows-10-Professional-build-19045-64bit",
 	"channel": "netease",
 }

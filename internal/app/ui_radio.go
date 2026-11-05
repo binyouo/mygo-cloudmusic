@@ -36,15 +36,7 @@ func radioLabel(name string) string {
 	return "私人 FM"
 }
 
-func playable(tracks []netease.Track) []netease.Track {
-	var out []netease.Track
-	for _, t := range tracks {
-		if t.Playable() {
-			out = append(out, t)
-		}
-	}
-	return out
-}
+var fetchHeartMode = netease.HeartMode
 
 // likedPlaylist returns the ID of the listener's liked songs, or 0.
 func (a *app) likedPlaylist() int64 {
@@ -74,21 +66,21 @@ func (a *app) radioFeed(name string) func(got func([]netease.Track)) {
 				return
 			}
 			start, last := q[0].ID, q[len(q)-1].ID
-			fetch = func() ([]netease.Track, error) { return netease.HeartMode(last, start, pid) }
+			fetch = func() ([]netease.Track, error) { return fetchHeartMode(last, start, pid) }
 		default:
 			got(nil)
 			return
 		}
 		go func() {
-			// The FM gives a song or three at a time, some of them VIP
-			// songs the listener may not play: ask again for those.
+			// Retry empty batches, and let the player try alternative
+			// streams for songs NetEase marks unavailable.
 			var tracks []netease.Track
 			for tries := 0; tries < 3 && len(tracks) == 0; tries++ {
 				more, err := fetch()
 				if err != nil {
 					break
 				}
-				tracks = playable(more)
+				tracks = more
 			}
 			a.post(func() { got(tracks) })
 		}()
@@ -174,16 +166,15 @@ func (a *app) startHeartMode() {
 			if liked == nil {
 				liked, _ = netease.PlaylistDetail(pid)
 			}
-			if liked != nil {
-				if ok := playable(liked.Tracks); len(ok) > 0 {
-					seed = &ok[rand.IntN(len(ok))]
-				}
+			if liked != nil && len(liked.Tracks) > 0 {
+				track := liked.Tracks[rand.IntN(len(liked.Tracks))]
+				seed = &track
 			}
 		}
 		var more []netease.Track
 		var err error
 		if seed != nil {
-			more, err = netease.HeartMode(seed.ID, seed.ID, pid)
+			more, err = fetchHeartMode(seed.ID, seed.ID, pid)
 		}
 		a.post(func() {
 			if a.radioStarting != heartRadio {
@@ -194,7 +185,6 @@ func (a *app) startHeartMode() {
 				a.toast = "心动模式暂时无法开启，请稍后再试"
 				return
 			}
-			more = playable(more)
 			if fromPlaying && a.pl.Current() != nil && a.pl.Current().ID == seed.ID {
 				a.pl.RadioFrom(heartRadio, more, a.radioFeed(heartRadio))
 				return

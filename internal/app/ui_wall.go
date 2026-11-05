@@ -300,6 +300,9 @@ func (a *app) wall(c *ui.Context, y, w, h, top, foot, frost float32) {
 		if plane.Clicked() && hover >= 0 && hover != playing {
 			pl.Jump(hover)
 		}
+		if a.wallpaper.active && plane.DoubleClicked() && hover < 0 {
+			a.leaveWallpaper()
+		}
 	})
 }
 

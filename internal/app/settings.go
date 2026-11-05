@@ -49,7 +49,10 @@ type settings struct {
 	Volume float64 `json:"volume"`
 	// Normalize evens out the loudness of tracks, by what NetEase
 	// measured of each.
-	Normalize bool `json:"normalize"`
+	Normalize   bool `json:"normalize"`
+	AdaptiveMix bool `json:"adaptiveMix"`
+	// MotionArtwork enables animated covers and the flowing album-color background.
+	MotionArtwork bool `json:"motionArtwork"`
 	// HotComments shows a song's hot comments in its quiet parts, in
 	// place of the lyrics (quietComment): the listener turns it on.
 	HotComments bool `json:"hotComments"`
@@ -74,7 +77,7 @@ type settings struct {
 }
 
 func defaultSettings() settings {
-	return settings{WallpaperIdleSeconds: 120, MenuBarWidth: 180, NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true}
+	return settings{AdaptiveMix: true, MotionArtwork: true, WallpaperIdleSeconds: 120, MenuBarWidth: 180, NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true}
 }
 
 func settingsPath() (string, error) {
@@ -127,9 +130,28 @@ func loadSettings() settings {
 	s := defaultSettings()
 	if path, err := settingsPath(); err == nil {
 		if b, err := os.ReadFile(path); err == nil {
-			json.Unmarshal(b, &s)
+			s = parseSettings(b)
 		}
 		s.path = path
+	}
+	return s
+}
+
+func parseSettings(b []byte) settings {
+	s := defaultSettings()
+	json.Unmarshal(b, &s)
+	// Retired fixed-duration choices become AutoMix. Preserve explicit gapless,
+	// including preferences saved before adaptiveMix was introduced.
+	var previous struct {
+		AdaptiveMix      *bool `json:"adaptiveMix"`
+		CrossfadeSeconds *int  `json:"crossfadeSeconds"`
+	}
+	if json.Unmarshal(b, &previous) == nil && previous.CrossfadeSeconds != nil {
+		if *previous.CrossfadeSeconds > 0 {
+			s.AdaptiveMix = true
+		} else if previous.AdaptiveMix == nil && *previous.CrossfadeSeconds == 0 {
+			s.AdaptiveMix = false
+		}
 	}
 	return s
 }

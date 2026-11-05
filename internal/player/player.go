@@ -35,6 +35,11 @@ type Player struct {
 	// Normalize reports whether to even out the loudness of tracks, as
 	// the settings say.
 	Normalize func() bool
+	// AutoMix chooses a different handoff from each pair's measured intro/outro.
+	AutoMix func() bool
+	// PreloadMetadata warms lyrics alongside the prepared next track.
+	PreloadMetadata bool
+	Prepared        func(netease.Track)
 	// Cache keeps the songs played, if set.
 	Cache *Cache
 	// Changed, if set, hears that what plays, where it is or whether it
@@ -56,26 +61,32 @@ type Player struct {
 	feeding  bool // the feed is asked
 	awaiting bool // at the queue's end, for what the feed gives
 
-	track     *netease.Track
-	out       *audio.Player
-	sequence  *sequence
-	partStart int64
-	polling   bool
-	stream    stream
-	info      *netease.Stream // what the current track streams
-	fade      fader
-	gain      float64 // the current track's normalizing gain
-	loading   bool
-	playing   bool // what the listener wants: false while paused
-	err       string
-	gen       int // counts loads, to drop the results of stale ones
-	loadJob   *trackLoad
-	nextJob   *trackLoad // the next song, opened and decoding while this one plays
+	track      *netease.Track
+	out        *audio.Player
+	sequence   *sequence
+	partStart  int64
+	partOffset int64
+	polling    bool
+	stream     stream
+	info       *netease.Stream // what the current track streams
+	fade       fader
+	gain       float64 // the current track's normalizing gain
+	loading    bool
+	playing    bool // what the listener wants: false while paused
+	err        string
+	gen        int // counts loads, to drop the results of stale ones
+	loadJob    *trackLoad
+	nextJob    *trackLoad // the next song, opened and decoding while this one plays
 
-	lyrics       []lyrics.Line
-	lyricsLoaded bool
-	metadataGen  int
-	localLibrary []netease.Track
+	lyrics           []lyrics.Line
+	lyricsLoaded     bool
+	metadataGen      int
+	localLibrary     []netease.Track
+	prefetchedLyrics struct {
+		id    int64
+		lines []lyrics.Line
+		ready bool
+	}
 
 	// pending holds a seek asked for while the track loads.
 	pending time.Duration
@@ -500,6 +511,7 @@ func (p *Player) Seek(t time.Duration) {
 	// Paused, it jumps at once; but a seek on its way paused it only for
 	// the jump, and this one takes its place, playing on from there.
 	if !out.Playing() && !p.seeking {
+		p.prepareSongSeek(absolute, t)
 		out.Seek(absolute)
 		p.sync()
 		return
@@ -514,6 +526,7 @@ func (p *Player) Seek(t time.Duration) {
 				return
 			}
 			p.seeking = false
+			p.prepareSongSeek(absolute, t)
 			out.Seek(absolute)
 			if p.playing || !p.fade.silent() {
 				out.Play()
@@ -569,6 +582,10 @@ func (p *Player) Position() time.Duration {
 	case p.seeking:
 		return p.seekTo
 	}
+	if p.sequence != nil {
+		frame := int64(math.Round(p.out.Position().Seconds() * outputRate))
+		return time.Duration(float64(p.sequence.songPosition(p.partStart, frame)) * float64(time.Second) / outputRate)
+	}
 	return max(0, p.out.Position()-p.audioPosition(0))
 }
 
@@ -583,6 +600,11 @@ func (p *Player) Duration() time.Duration {
 func (p *Player) Levels() ([Bands]float32, bool) {
 	if p.stream == nil || p.out == nil || !p.playing {
 		return [Bands]float32{}, false
+	}
+	if p.sequence != nil {
+		if levels, ok := p.sequence.smartLevels(p.partStart, int64(math.Round(p.out.Position().Seconds()*outputRate))); ok {
+			return levels, true
+		}
 	}
 	_, spec := p.stream.source()
 	frame := int64(p.Position().Seconds() * float64(p.stream.SampleRate()))
@@ -599,6 +621,7 @@ func (p *Player) stop() {
 		p.sequence = nil
 	}
 	p.partStart, p.polling = 0, false
+	p.partOffset = 0
 	if p.loadJob != nil {
 		p.loadJob.close()
 		p.loadJob = nil
@@ -622,6 +645,7 @@ func (p *Player) load(at int) {
 // loadSkipping loads the track at order[at], to play or not, from from,
 // skipping those that cannot play: skipped of them so far.
 func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
+	tracePlayback("select", p.queue[p.order[at]].ID, nil)
 	p.stop()
 	p.gen++
 	gen := p.gen
@@ -677,6 +701,12 @@ func (p *Player) loadMetadata(t netease.Track, gen int) {
 		}
 	}()
 
+	if t.LocalPath == "" && t.LocalLyricsPath == "" && t.LocalLyrics == "" && p.prefetchedLyrics.id == t.ID && p.prefetchedLyrics.ready {
+		p.lyrics, p.lyricsLoaded = p.prefetchedLyrics.lines, true
+		p.prefetchedLyrics.ready = false
+		p.publishMixLyrics(t.ID, p.lyrics)
+		return
+	}
 	go func() {
 		lrc, trans, yrc := t.LocalLyrics, "", ""
 		var err error
@@ -705,6 +735,7 @@ func (p *Player) loadMetadata(t netease.Track, gen int) {
 				}
 				p.lyrics = lines
 				p.lyricsLoaded = true
+				p.publishMixLyrics(t.ID, lines)
 			}
 		})
 	}()
@@ -712,23 +743,32 @@ func (p *Player) loadMetadata(t netease.Track, gen int) {
 
 // loadAudio takes the prepared next song, even if it is still loading.
 func (p *Player) loadAudio(t netease.Track, at, skipped int) {
-	job := p.takeNext(t, p.quality())
+	job, prepared := p.takeNext(t, p.quality())
 	p.loadJob = job
 	job.use(func() {
+		tracePlayback("opened", t.ID, job.err)
 		p.loadJob = nil
+		if job.err != nil && prepared {
+			// A background attempt may have failed long before selection, or
+			// while being promoted. Give this song one foreground attempt.
+			job.close()
+			p.loadAudio(t, at, skipped)
+			return
+		}
 		p.loading = false
 		if job.err != nil {
 			p.err = job.err.Error()
-			if job.err == netease.ErrUnavailable {
+			if errors.Is(job.err, netease.ErrUnavailable) {
 				if t.ProgramID != 0 {
-					p.err = "这期节目需要购买才能收听"
+					p.err = "暂时无法获取这期节目的完整音源"
 				} else {
-					p.err = "这首歌需要 VIP 才能播放"
+					p.err = "暂时无法获取这首歌的完整音源"
 				}
 			}
-			// Skip what cannot play, unless nothing in the queue can.
-			if skipped+1 < len(p.order) {
-				next := at + 1
+			// A temporary network or decoder failure must not consume the
+			// queue. Only a confirmed missing source may advance automatically.
+			if errors.Is(job.err, netease.ErrUnavailable) && skipped+1 < len(p.order) {
+				next := p.at + 1
 				if next >= len(p.order) {
 					next = 0
 				}
@@ -749,6 +789,10 @@ func (p *Player) loadAudio(t netease.Track, at, skipped int) {
 			})
 		})
 		p.sequence = seq
+		if p.lyricsLoaded {
+			job.pcm.vocals.Store(mixHintsFromLyrics(p.lyrics))
+		}
+		p.ApplyTransitions()
 		seq.setNormalize(p.Normalize != nil && p.Normalize())
 		p.out = audio.NewPlayer(seq)
 		job.close()
@@ -812,8 +856,10 @@ func (p *Player) open(t netease.Track, level string) (*netease.Stream, stream, e
 	if !ok {
 		var err error
 		info, err = resolveSong(t.ID, level)
+		tracePlayback("resolve", t.ID, err)
 		if errors.Is(err, netease.ErrUnavailable) && t.ProgramID == 0 {
 			info, err = resolveAlternative(t)
+			tracePlayback("alternative", t.ID, err)
 		}
 		if err != nil {
 			return nil, nil, err

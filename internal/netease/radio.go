@@ -87,7 +87,7 @@ func HeartMode(song, start, pid int64) ([]Track, error) {
 	return tracks, nil
 }
 
-// Comment is what a listener wrote about a song or an episode.
+// Comment is what a listener wrote about a song, album or episode.
 type Comment struct {
 	ID   int64 `json:"commentId"`
 	User struct {
@@ -139,4 +139,25 @@ func LikeComment(thread string, id int64, like bool) error {
 		path = "/api/v1/comment/like"
 	}
 	return eapiOK(path, map[string]any{"threadId": thread, "commentId": strconv.FormatInt(id, 10)})
+}
+
+// SendComment publishes content to a thread, replying to reply when nonzero.
+func SendComment(thread, content string, reply int64) (*Comment, error) {
+	path := "/api/resource/comments/add"
+	data := map[string]any{"threadId": thread, "content": content}
+	if reply != 0 {
+		path = "/api/resource/comments/reply"
+		data["commentId"] = strconv.FormatInt(reply, 10)
+	}
+	var res struct {
+		apiError
+		Comment Comment `json:"comment"`
+	}
+	if err := eapiPost(path, data, &res); err != nil {
+		return nil, err
+	}
+	if res.Code != 200 {
+		return nil, fmt.Errorf("netease: %s: code %d %s %s", path, res.Code, res.Message, res.Msg)
+	}
+	return &res.Comment, nil
 }

@@ -102,6 +102,23 @@ func AlbumDetail(id int64) (*AlbumProfile, error) {
 	return al, nil
 }
 
+// AlbumActivity is the album's changing counts, separate from its songs.
+type AlbumActivity struct {
+	SubCount     int  `json:"subCount"`
+	CommentCount int  `json:"commentCount"`
+	IsSub        bool `json:"isSub"`
+}
+
+// AlbumDynamic returns an album's collection and comment counts.
+func AlbumDynamic(id int64) (*AlbumActivity, error) {
+	var res AlbumActivity
+	err := get("/api/album/detail/dynamic", url.Values{"id": {strconv.FormatInt(id, 10)}}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // ArtistAlbums returns limit of an artist's albums from offset, the newest
 // first, and whether they have more.
 func ArtistAlbums(id int64, limit, offset int) ([]AlbumProfile, bool, error) {

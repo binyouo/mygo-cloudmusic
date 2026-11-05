@@ -249,7 +249,15 @@ func (a *app) playlistPage(c *ui.Context) {
 		a.trackSkeleton(c, s, true, func(c *ui.Context) { a.playlistHeaderSkeleton(c, s) })
 		return
 	}
-	a.trackRows(c, pl.Tracks, true, func(c *ui.Context) { a.playlistHeader(c, pl) })
+	a.morePlaylistSongs(a.remainingPlaylist(pl))
+	// Its search is in the header's row of buttons (playlistSearch).
+	indices := a.playlistFilter.rows(pl)
+	a.trackRowsIndexed(c, pl.Tracks, indices, true, func(c *ui.Context) { a.playlistHeader(c, pl) }, func(c *ui.Context) {
+		if indices != nil && len(indices) == 0 {
+			a.empty(c, "没有找到匹配的歌曲")
+		}
+		a.playlistProgress(c, pl)
+	})
 }
 
 func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
@@ -269,7 +277,7 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 			if pl.Creator.Nickname != "" {
 				meta = append(meta, pl.Creator.Nickname)
 			}
-			meta = append(meta, fmt.Sprintf("%d 首", len(pl.Tracks)))
+			meta = append(meta, fmt.Sprintf("%d 首", max(len(pl.Tracks), len(pl.TrackIDs))))
 			if pl.PlayCount > 0 {
 				meta = append(meta, plays(pl.PlayCount)+" 次播放")
 			}
@@ -279,16 +287,10 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 			}
 			ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
 				if pillButton(c.Key("play"), iconPlay, "播放", p.accent, p.onAccent).Clicked() {
-					if a.pl.Shuffle() {
-						a.pl.ToggleShuffle()
-					}
-					a.pl.PlayQueue(pl.Tracks, firstPlayable(pl.Tracks))
+					a.playPlaylist(pl, 0, false)
 				}
 				if pillButton(c.Key("shuffle"), iconShuffle, "随机播放", p.hover.Over(p.bg), p.text).Clicked() {
-					if !a.pl.Shuffle() {
-						a.pl.ToggleShuffle()
-					}
-					a.pl.PlayQueue(pl.Tracks, firstPlayable(pl.Tracks))
+					a.playPlaylist(pl, 0, true)
 				}
 				if a.savable(pl) {
 					icon, label := iconPlus, "收藏"
@@ -326,6 +328,7 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 						a.startHeartMode()
 					}
 				}
+				a.playlistSearch(c)
 			})
 		})
 	})
@@ -334,6 +337,10 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 // trackRows lists tracks under a header, which scrolls with them; a click
 // plays the list from the track clicked.
 func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, header func(c *ui.Context), footer ...func(c *ui.Context)) {
+	a.trackRowsIndexed(c, tracks, nil, covers, header, footer...)
+}
+
+func (a *app) trackRowsIndexed(c *ui.Context, tracks []netease.Track, indices []int, covers bool, header func(c *ui.Context), footer ...func(c *ui.Context)) {
 	p := a.pal
 	cur := a.pl.Current()
 	// A song's menu can take it out of the playlist it is listed in.
@@ -348,7 +355,11 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 	// Rows out of view are not built, their marks with them: a list
 	// scrolled away from its start or end has content under the bars.
 	a.underTop, a.underBottom = true, true
-	rows := len(tracks) + 1 + len(footer)
+	count := len(tracks)
+	if indices != nil {
+		count = len(indices)
+	}
+	rows := count + 1 + len(footer)
 	ui.List(c.Key(a.route), &a.trackList, rows, func(i int) {
 		if i == 0 {
 			ui.Column(c).Children(func() {
@@ -360,11 +371,14 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 		if i == rows-1 {
 			defer a.endMark(c)
 		}
-		if i > len(tracks) {
-			footer[i-len(tracks)-1](c)
+		if i > count {
+			footer[i-count-1](c)
 			return
 		}
 		i--
+		if indices != nil {
+			i = indices[i]
+		}
 		tr := &tracks[i]
 		playing := cur != nil && cur.ID == tr.ID
 		row := ui.ButtonBase(c.Key(tr.ID)).Height(54).PaddingX(12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
@@ -434,7 +448,11 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 			ui.Text(c, clock(tr.Length())).FontSize(12.5).FontFeatures("tnum").TextColor(p.faint).Width(44).TextAlign(ui.End)
 		})
 		if row.Clicked() {
-			a.pl.PlayQueue(tracks, i)
+			if pid != 0 {
+				a.playPlaylist(a.playlists[pid], tr.ID, a.pl.Shuffle())
+			} else {
+				a.pl.PlayQueue(tracks, i)
+			}
 		}
 	}).Grow(1).Padding(top+pageGap, pagePad-12, bottom+32, pagePad-12).ScrollbarInsets(top, 0, bottom, 0)
 }

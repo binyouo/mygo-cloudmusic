@@ -34,6 +34,33 @@ func TestMatch(t *testing.T) {
 	}
 }
 
+// Wait For You was rejected because Bodian puts the featured artist in the title instead of the artist list.
+func TestMatchFeaturedArtist(t *testing.T) {
+	track := netease.Track{Name: "等你下课 (with 杨瑞代)", Artists: []netease.Artist{{Name: "周杰伦"}, {Name: "杨瑞代"}}, Duration: 270000}
+	for _, tc := range []struct {
+		name, artist string
+		want         bool
+	}{
+		{"等你下课(with 杨瑞代)", "周杰伦", true},
+		{"等你下课 （with 杨瑞代）", "周杰伦&杨瑞代", true},
+		{"等你下课 (with 杨瑞代)", "周杰伦&另一位歌手", false},
+		{"等你下课 (with 杨瑞代)", "杨瑞代", false},
+		{"等你下课 (with 杨瑞代)", "翻唱歌手", false},
+		{"等你下课 (with 另一位歌手)", "周杰伦", false},
+		{"等你下课 (with 杨瑞代) (Live)", "周杰伦", false},
+		{"等你下课 (with 杨瑞代) (COVER版)", "周杰伦", false},
+	} {
+		c := candidate{ID: "MUSIC_40079875", Name: tc.name, Artist: tc.artist, Duration: "270"}
+		if got := match(track, c); got != tc.want {
+			t.Errorf("%s by %s: matched=%v, want %v", tc.name, tc.artist, got, tc.want)
+		}
+	}
+	track.Name = "合唱"
+	if match(track, candidate{ID: "MUSIC_1", Name: "合唱", Artist: "周杰伦", Duration: "270"}) {
+		t.Error("accepted a missing collaborator with no title credit")
+	}
+}
+
 // An unavailable song resolves through its matching source and preserves its stream format.
 func TestSong(t *testing.T) {
 	old := client

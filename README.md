@@ -10,12 +10,14 @@
 - 私人 FM、心动模式，支持随机和循环播放
 - 边下边播、本地缓存、无损音质与音量均衡
 - 恢复上次的播放队列与进度
+- 原位封面叠化、多色流动背景与歌词景深，支持动态 WebP/GIF 封面
+- Smart Fades 式歌曲衔接：拍点规划、保持音高的渐进变速与分频交接；同专辑曲目与播客保留无缝衔接
 - 逐字歌词、翻译、律动视图与歌曲评论
 - 全屏播放屏保（⌘T）
 - 导入本地 MP3、FLAC 和 LRC（⌘O 或拖入）
 - 刘海播放器、macOS 菜单栏歌词与播放控制
 - 自定义应用内及全局播放快捷键（macOS）
-- 尝试从波点音乐匹配无法播放的歌曲
+- VIP 测试功能：歌曲无法完整播放时尝试匹配波点音源，支持歌单、FM 与最近播放
 - 浅色、深色及跟随系统
 
 ## 构建
@@ -34,6 +36,7 @@ go test ./...        # 运行测试
 - [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi)：登录与 API
 - [UnblockNeteaseMusic/server](https://github.com/UnblockNeteaseMusic/server)：波点音源，见 `LICENSE.unblock` 与 `LICENSE.unblock-GPL`
 - [folia-major](https://github.com/chthollyphile/folia-major)：歌词动画
+- [Apple Music-like Lyrics](https://github.com/amll-dev/applemusic-like-lyrics)：流动背景与歌词景深的设计参考；原生 Go 实现
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)、[Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) 与 [Silero VAD](https://github.com/snakers4/silero-vad)：本机语音识别
 - [Feishin](https://github.com/jeffvli/feishin/blob/8d12eae8a1551364442461bac02d99d78c185820/src/renderer/hooks/use-fullscreen-auto-open.ts)、[Matrix Screensaver](https://github.com/WadeSellers/matrix-screensaver)：播放屏保
 - [dhowden/tag](https://github.com/dhowden/tag/tree/3d75831295e8)、[APlayer](https://github.com/DIYgod/APlayer/blob/master/src/js/lrc.js)：本地音乐与歌词

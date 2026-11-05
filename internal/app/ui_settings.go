@@ -107,7 +107,7 @@ func (a *app) settingsView(c *ui.Context) {
 		}
 		if runtime.GOOS == "darwin" {
 			group("播放屏保", func() {
-				row("闲置后显示屏保", "前台播放时全屏渐显，移动鼠标或按键退出；⌘T 手动开关", func() {
+				row("闲置后显示屏保", "前台播放时全屏渐显，双击空白处或按 Esc 退出；⌘T 手动开关", func() {
 					choices := []string{"关闭", "30 秒", "1 分钟", "2 分钟", "5 分钟", "10 分钟"}
 					seconds := []int{0, 30, 60, 120, 300, 600}
 					chosen := choices[0]
@@ -168,6 +168,25 @@ func (a *app) settingsView(c *ui.Context) {
 		}
 
 		group("播放", func() {
+			row("歌曲过渡", "根据节拍、调性和人声选择衔接，保音高对拍并交接频段；不适合混音时保留自然衔接", func() {
+				labels := []string{"自动混音（AutoMix）", "无缝衔接"}
+				chosen := labels[0]
+				if !s.AdaptiveMix {
+					chosen = labels[1]
+				}
+				if ui.Select(c.Key("song-transition"), &chosen, labels).Label("歌曲过渡方式").Width(160).Changed() {
+					s.AdaptiveMix = chosen == labels[0]
+					a.pl.ApplyTransitions()
+					s.save()
+					a.redraw()
+				}
+			})
+			row("动态封面与背景", "播放时展示动态封面，让专辑配色缓慢流动；暂停后停留在当前画面", func() {
+				if ui.Switch(c.Key("motion-artwork"), &s.MotionArtwork).Label("动态封面与背景").Changed() {
+					s.save()
+					a.redraw()
+				}
+			})
 			row("音质", "无损与 Hi-Res 需要黑胶 VIP，没有时播放所能播放的最高音质；下一首歌曲开始生效", func() {
 				labels := make([]string, len(qualityLevels))
 				chosen := qualityLevels[2].label

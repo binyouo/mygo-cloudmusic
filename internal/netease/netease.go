@@ -135,8 +135,10 @@ type Playlist struct {
 		UserID   int64  `json:"userId"`
 		Nickname string `json:"nickname"`
 	} `json:"creator"`
-	Tracks   []Track `json:"tracks"`
-	TrackIDs []struct {
+	Tracks []Track `json:"tracks"`
+	// TrackOffset counts IDs resolved, including songs no longer available.
+	TrackOffset int `json:"-"`
+	TrackIDs    []struct {
 		ID int64 `json:"id"`
 	} `json:"trackIds"`
 	// Preview holds a chart's top songs, as its card shows them.
@@ -291,16 +293,33 @@ func PlaylistDetail(id int64) (*Playlist, error) {
 	// play, as Stan's: the songs' details say right.
 	detailPrivileges(p.Tracks)
 	// Long playlists list only their first tracks in full: the rest by id.
-	if len(p.Tracks) < len(p.TrackIDs) {
-		var ids []int64
-		for _, t := range p.TrackIDs[len(p.Tracks):min(len(p.TrackIDs), 1000)] {
-			ids = append(ids, t.ID)
-		}
-		more, err := SongDetails(ids)
-		if err == nil {
-			p.Tracks = append(p.Tracks, more...)
+	end := min(len(p.TrackIDs), 1000)
+	known := make(map[int64]Track, len(p.Tracks))
+	for _, tr := range p.Tracks {
+		known[tr.ID] = tr
+	}
+	var missing []int64
+	for _, tr := range p.TrackIDs[:end] {
+		if _, ok := known[tr.ID]; !ok {
+			missing = append(missing, tr.ID)
 		}
 	}
+	more, err := SongDetails(missing)
+	if err != nil {
+		return nil, err
+	}
+	for _, tr := range more {
+		known[tr.ID] = tr
+	}
+	if end > 0 {
+		p.Tracks = nil
+		for _, tr := range p.TrackIDs[:end] {
+			if song, ok := known[tr.ID]; ok {
+				p.Tracks = append(p.Tracks, song)
+			}
+		}
+	}
+	p.TrackOffset = end
 	return p, nil
 }
 
@@ -416,7 +435,7 @@ func Lossless(level string) bool { return level == "lossless" || level == "hires
 // the eapi, which carries the session, so VIP songs play for subscribers.
 func SongURL(id int64, level string) (*Stream, error) {
 	var res struct {
-		Code int `json:"code"`
+		apiError
 		Data []struct {
 			Stream
 			URL           string          `json:"url"`
@@ -431,6 +450,16 @@ func SongURL(id int64, level string) (*Stream, error) {
 	data := map[string]any{"ids": fmt.Sprintf("[%d]", id), "level": level, "encodeType": encode}
 	if err := eapiPost("/api/song/enhance/player/url/v1", data, &res); err != nil {
 		return nil, err
+	}
+	if res.Code != 200 {
+		message := res.Message
+		if message == "" {
+			message = res.Msg
+		}
+		if message == "" {
+			return nil, fmt.Errorf("获取音源失败（%d）", res.Code)
+		}
+		return nil, fmt.Errorf("获取音源失败（%d）：%s", res.Code, message)
 	}
 	if len(res.Data) == 0 || res.Data[0].URL == "" {
 		return nil, ErrUnavailable

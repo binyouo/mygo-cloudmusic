@@ -1,22 +1,26 @@
 package player
 
 import (
+	"netease-music-mygo/internal/localmedia"
+	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
 )
 
 // A trackLoad owns a song until playback takes it. Its fields, including
 // the completion callback, belong to the main thread.
 type trackLoad struct {
-	id        int64
-	level     string
-	info      *netease.Stream
-	stream    stream
-	pcm       *pcmTrack
-	released  bool
-	err       error
-	ready     bool
-	cancelled bool
-	done      func()
+	id             int64
+	level          string
+	info           *netease.Stream
+	stream         stream
+	pcm            *pcmTrack
+	released       bool
+	err            error
+	ready          bool
+	cancelled      bool
+	done           func()
+	mixLyrics      []lyrics.Line
+	mixLyricsReady bool
 }
 
 var openTrack = (*Player).open
@@ -67,16 +71,17 @@ func (j *trackLoad) close() {
 
 // takeNext transfers the prepared song into the foreground. A skip while
 // it is opening waits for that same request instead of starting another.
-func (p *Player) takeNext(t netease.Track, level string) *trackLoad {
+// The second result says it was speculative, so a failure can be retried.
+func (p *Player) takeNext(t netease.Track, level string) (*trackLoad, bool) {
 	j := p.nextJob
 	p.nextJob = nil
 	if j != nil {
 		if j.id == t.ID && j.level == level {
-			return j
+			return j, true
 		}
 		j.close()
 	}
-	return p.startLoad(t, level)
+	return p.startLoad(t, level), false
 }
 
 // prepareNext keeps just the next song ready, following the actual play
@@ -110,6 +115,53 @@ func (p *Player) prepareNext() {
 	}
 	p.nextJob = p.startLoad(t, level)
 	job := p.nextJob
+	if p.Prepared != nil {
+		p.Prepared(t)
+	}
+	if p.PreloadMetadata {
+		metadata := t
+		if metadata.LocalPath == "" {
+			metadata = localmedia.WithLocalMetadata(metadata, p.localLibrary)
+		}
+		cloud := metadata.LocalPath == "" && metadata.LocalLyricsPath == "" && metadata.LocalLyrics == ""
+		fetch := fetchLyrics
+		go func() {
+			lrc, trans, yrc := metadata.LocalLyrics, "", ""
+			var err error
+			switch {
+			case cloud:
+				lrc, trans, yrc, err = fetch(t.ID)
+			case metadata.LocalLyricsPath != "":
+				lrc, err = localmedia.ReadLyrics(metadata.LocalLyricsPath)
+			case metadata.LocalPath != "" && lrc == "":
+				lrc, err = localmedia.SidecarLyrics(metadata.LocalPath)
+			}
+			if err != nil {
+				return
+			}
+			lines := lyrics.Build(lrc, trans, yrc)
+			p.post(func() {
+				if p.nextJob != job || job.cancelled {
+					return
+				}
+				job.mixLyrics, job.mixLyricsReady = lines, true
+				if job.pcm != nil {
+					job.pcm.vocals.Store(mixHintsFromLyrics(lines))
+				}
+				if cloud {
+					p.prefetchedLyrics.id, p.prefetchedLyrics.lines, p.prefetchedLyrics.ready = t.ID, lines, true
+				}
+				if p.sequence != nil {
+					p.sequence.mu.Lock()
+					if p.sequence.smart == nil {
+						p.sequence.plan = nil
+						p.sequence.cancelSmartRender()
+					}
+					p.sequence.mu.Unlock()
+				}
+			})
+		}()
+	}
 	job.use(func() {
 		if job.err == nil {
 			p.queueAudio(job.pcm)

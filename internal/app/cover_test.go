@@ -94,18 +94,15 @@ func TestSwipeCover(t *testing.T) {
 	}
 }
 
-// Played from the menu or the keys, the next song's cover slides in from
-// the right and the one before's from the left, each coming to rest in its
-// place.
-func TestCoverSlidesWithTheSong(t *testing.T) {
+// Button and keyboard changes keep the cover in place while its images dissolve.
+func TestCoverTargetStaysWithTheSong(t *testing.T) {
 	a, tt, r := coverApp(t)
 	tt.SetPreferences(ui.Preferences{})
 	for _, step := range []struct {
 		name string
 		play func()
 		id   int64
-		dir  float32
-	}{{"next", a.pl.Next, 3, 1}, {"prev", a.pl.Prev, 2, -1}} {
+	}{{"next", a.pl.Next, 3}, {"prev", a.pl.Prev, 2}} {
 		step.play()
 		tt.Frame()
 		tt.Advance(60 * time.Millisecond)
@@ -113,8 +110,8 @@ func TestCoverSlidesWithTheSong(t *testing.T) {
 		if id := a.pl.Current().ID; id != step.id {
 			t.Fatalf("%s: playing %d", step.name, id)
 		}
-		if r2, _ := tt.Find("专辑封面"); (r2.X-r.X)*step.dir < r.W*0.1 {
-			t.Errorf("%s: the cover comes in at %v, from %v", step.name, r2.X, r.X)
+		if r2, _ := tt.Find("专辑封面"); r2.X != r.X || r2.Y != r.Y || r2.W != r.W {
+			t.Errorf("%s: cover moved from %v to %v", step.name, r, r2)
 		}
 		tt.Advance(time.Second)
 		tt.Frame()

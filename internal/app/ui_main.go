@@ -26,7 +26,7 @@ func (a *app) view(c *ui.Context) {
 		c.Root().Background(ui.Transparent)
 	}
 	root := ui.Box(c).Fill()
-	if !c.Focused(a.searchBox) {
+	if !c.Focused(a.searchBox) && !c.Focused(a.playlistSearchBox) {
 		// Space plays and pauses wherever the focus is, as in Music. On
 		// the container around everything, it comes before a button the
 		// pointer focused, which would take Space as a click; on the
@@ -43,7 +43,7 @@ func (a *app) view(c *ui.Context) {
 	root.Children(func() {
 		page := ui.Row(c).Fill().AlignItems(ui.Stretch)
 		page.Children(func() {
-			if npOpen && npSettled {
+			if npOpen && npSettled && !a.wallpaper.active {
 				// Covered by Now Playing: not built, which would cost each
 				// of its frames as much again as the stage itself. Where
 				// it is scrolled is the app's (pageScroll, navScroll,
@@ -67,12 +67,14 @@ func (a *app) view(c *ui.Context) {
 		})
 		a.nowPlayingLayer(c, npOpen, npSettled)
 	})
-	a.loginDialog(c)
-	a.playlistNameDialog(c)
-	a.deletePlaylistDialog(c)
-	if a.toast != "" {
-		c.Toast(a.toast)
-		a.toast = ""
+	if !a.wallpaper.active && !a.wallpaper.closing {
+		a.loginDialog(c)
+		a.playlistNameDialog(c)
+		a.deletePlaylistDialog(c)
+		if a.toast != "" {
+			c.Toast(a.toast)
+			a.toast = ""
+		}
 	}
 	a.syncWindows()
 	a.ensureWallpaperTimer()
@@ -97,7 +99,14 @@ func (a *app) shortcuts(c *ui.Context) {
 	c.OnShortcut(ui.Cmd, ui.KeyF, func() {
 		a.leaveWallpaper()
 		a.nowPlaying = false
-		a.searchBox.Focus(c)
+		if a.route.page == pagePlaylist {
+			// The search is in the header, which a scrolled list has not
+			// built: it waits there for the header to come back.
+			a.trackList.ScrollTo(0, ui.Start)
+			a.playlistSearchBox.Focus(c)
+		} else {
+			a.searchBox.Focus(c)
+		}
 	})
 	if a.wallpaper.active {
 		c.OnShortcut(0, ui.KeyEscape, a.leaveWallpaper)
@@ -118,6 +127,9 @@ func (a *app) open(r route) {
 	a.leaveWallpaper()
 	a.nowPlaying = false
 	if r == a.route {
+		if r.page == pagePlaylist && r.id == a.likedPlaylist() {
+			a.refreshLikedSongs()
+		}
 		return
 	}
 	a.history, a.forward = append(a.history, a.route), nil
@@ -139,7 +151,12 @@ func (a *app) load(r route) {
 	case pageHome:
 		a.freshenHome()
 	case pagePlaylist:
-		a.loadPlaylist(r.id, false)
+		if r.id == a.likedPlaylist() && a.profile != nil {
+			a.loadLiked(a.profile.UserID)
+			a.loadPlaylist(r.id, false, true)
+		} else {
+			a.loadPlaylist(r.id, false)
+		}
 	case pageSearch:
 		a.loadSearch(r, false)
 	case pageArtist:
@@ -459,10 +476,10 @@ func dailyRenewed(loaded, now time.Time) bool {
 	return loaded.Before(six)
 }
 
-func (a *app) loadPlaylist(id int64, thenPlay bool) {
-	if pl := a.playlists[id]; pl != nil {
+func (a *app) loadPlaylist(id int64, thenPlay bool, refresh ...bool) {
+	if pl := a.playlists[id]; pl != nil && !(len(refresh) > 0 && refresh[0]) {
 		if thenPlay {
-			a.pl.PlayQueue(pl.Tracks, firstPlayable(pl.Tracks))
+			a.playPlaylist(pl, 0, a.pl.Shuffle())
 		}
 		return
 	}
@@ -471,27 +488,33 @@ func (a *app) loadPlaylist(id int64, thenPlay bool) {
 	}
 	a.loadingPl[id] = true
 	delete(a.plErr, id)
+	fetch, profile, revision := playlistDetail, a.profile, a.likeSync.revision
 	go func() {
-		pl, err := netease.PlaylistDetail(id)
-		a.post(func() {
-			delete(a.loadingPl, id)
-			if err != nil {
-				a.plErr[id] = "歌单加载失败"
-				return
-			}
-			a.playlists[id] = pl
-			if thenPlay {
-				a.pl.PlayQueue(pl.Tracks, firstPlayable(pl.Tracks))
-			}
-		})
+		pl, err := fetch(id)
+		a.post(func() { a.playlistLoaded(id, profile, revision, thenPlay, pl, err) })
 	}()
 }
 
-func firstPlayable(tracks []netease.Track) int {
-	for i := range tracks {
-		if tracks[i].Playable() {
-			return i
-		}
+func (a *app) playlistLoaded(id int64, profile *netease.Profile, revision uint64, thenPlay bool, pl *netease.Playlist, err error) {
+	if a.profile != profile {
+		return
 	}
-	return 0
+	delete(a.loadingPl, id)
+	if id == a.likedPlaylist() && (revision != a.likeSync.revision || len(a.likeSync.changes) != 0) {
+		if len(a.likeSync.changes) == 0 {
+			a.loadPlaylist(id, thenPlay, true)
+		}
+		return
+	}
+	if err != nil {
+		a.plErr[id] = "歌单加载失败"
+		return
+	}
+	a.playlists[id] = pl
+	d := a.remainingPlaylist(pl)
+	if thenPlay {
+		a.playPlaylist(pl, 0, a.pl.Shuffle())
+	} else if a.route == (route{page: pagePlaylist, id: id}) {
+		a.morePlaylistSongs(d)
+	}
 }

@@ -1,0 +1,18 @@
+{
+  "beat-this-small0.ckpt": {
+    "url": "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/small0.ckpt",
+    "sha256": "6074be2c4d490c5f6101fcc374a1ec72ae93456e23bb6019783b849f5dc7d47b"
+  },
+  "skey.pt": {
+    "url": "https://raw.githubusercontent.com/music-assistant/server/e16a4688130e9779dbce091c62ed8625c86ee64b/music_assistant/providers/smart_fades/resources/skey.pt",
+    "sha256": "78dfd0ad4fa9434bf7cec70a25934b7c575bda9c80e994700140770ad3a5ead4"
+  },
+  "firered_aed.pt": {
+    "url": "https://raw.githubusercontent.com/music-assistant/server/e16a4688130e9779dbce091c62ed8625c86ee64b/music_assistant/providers/smart_fades/resources/firered_aed.pt",
+    "sha256": "b100cddc9f4eaf33ac183fe7dbd5bb6b5ba0ca6558c04e3983e1e0ea96a20b33"
+  },
+  "firered_aed_cmvn.npz": {
+    "url": "https://raw.githubusercontent.com/music-assistant/server/e16a4688130e9779dbce091c62ed8625c86ee64b/music_assistant/providers/smart_fades/resources/firered_aed_cmvn.npz",
+    "sha256": "78a8a6014775a565c555b72e358b420ae0bcf6a14e45ee7e383c190a9d10a6c7"
+  }
+}

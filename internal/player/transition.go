@@ -1,14 +1,30 @@
 package player
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 func (p *Player) audioPosition(t time.Duration) time.Duration {
-	return time.Duration(float64(p.partStart)*float64(time.Second)/outputRate) + t
+	if p.sequence != nil {
+		frame := p.sequence.outputPosition(p.partStart, int64(math.Round(t.Seconds()*outputRate)))
+		return time.Duration(float64(frame) * float64(time.Second) / outputRate)
+	}
+	return time.Duration(float64(p.partStart-p.partOffset)*float64(time.Second)/outputRate) + t
+}
+
+func (p *Player) prepareSongSeek(absolute, timeInSong time.Duration) {
+	if p.sequence != nil {
+		// Match audio.Player.Seek's conversion exactly; its decoder runs later.
+		frame := max(int64(math.Round(absolute.Seconds()*outputRate)), 0)
+		p.sequence.requestSongSeek(p.partStart, frame, max(0, int64(math.Round(timeInSong.Seconds()*outputRate))))
+	}
 }
 
 func (s *sequence) setNormalize(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.normalized = on
 	gain := func(p *pcmTrack) {
 		g := 1.0
 		if on {
@@ -22,6 +38,13 @@ func (s *sequence) setNormalize(on bool) {
 	if s.next != nil {
 		gain(s.next)
 	}
+	if s.blend != nil {
+		gain(s.blend.previous)
+	}
+	if s.smart != nil {
+		gain(s.smart.previous)
+		gain(s.smart.incoming)
+	}
 }
 
 // Queue edits may happen after the decoder read ahead into the next song.
@@ -32,6 +55,12 @@ func (p *Player) queueAudio(track *pcmTrack) {
 		return
 	}
 	if track != nil {
+		if p.nextJob != nil && p.nextJob.pcm == track && p.nextJob.mixLyricsReady {
+			track.vocals.Store(mixHintsFromLyrics(p.nextJob.mixLyrics))
+		}
+		if p.AutoMix != nil && p.AutoMix() {
+			startMixAnalysis(track)
+		}
 		g := 1.0
 		if p.Normalize != nil && p.Normalize() {
 			g = normGain(track.info)
@@ -54,6 +83,7 @@ func (p *Player) pollAudio(seq *sequence) {
 	part, pending, ended := seq.state(frame)
 	if part.start != p.partStart {
 		p.partStart = part.start
+		p.partOffset = part.offset
 		p.gen++
 		if p.nextJob != nil && p.nextJob.pcm == part.track {
 			p.nextJob.close()

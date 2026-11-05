@@ -1,6 +1,8 @@
 package app
 
 import (
+	"time"
+
 	"netease-music-mygo/internal/netease"
 	"netease-music-mygo/internal/player"
 )
@@ -15,5 +17,6 @@ func newTestApp() *app {
 	a.art = newArtCache(func(func()) {})
 	a.pl = player.New(func(func()) {})
 	a.pl.SetVolume(0.5)
+	a.scrob.report = func(int64, time.Duration) {}
 	return a
 }

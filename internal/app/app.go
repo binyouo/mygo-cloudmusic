@@ -63,8 +63,9 @@ type app struct {
 	naming       nameDialog     // the name of a playlist asked for
 	deleting     deleteDialog   // whether to delete a playlist, asked
 	liked        map[int64]bool // the songs the listener likes
-	toast        string         // a message to show once
-	picked       pickedUp       // the song a login picked up, waiting to play
+	likeSync     likeSyncState
+	toast        string   // a message to show once
+	picked       pickedUp // the song a login picked up, waiting to play
 
 	// The episodes the listener likes, and doesn't, as far as NetEase has
 	// answered, and those asked about: see ui_like.go.
@@ -94,6 +95,10 @@ type app struct {
 	pageScroll ui.ScrollState
 	navScroll  ui.ScrollState
 	scrolled   route // the page trackList and pageScroll are of
+
+	playlistMore      map[int64]*playlistRemainder
+	playlistFilter    songFilter
+	playlistSearchBox ui.Handle
 
 	mineCollapsed, savedCollapsed bool
 
@@ -131,10 +136,11 @@ type app struct {
 	npScrub               scrubState
 	backdropCache         backdropCache // the backdrop of Now Playing, as last painted
 	npArt                 *artwork      // the cover whose colors Now Playing shows
-	npCoverState          coverState    // the cover of Now Playing, as it is tilted and flicked
-	wallState             wallState     // the wall of the queue's covers, as it is dragged
-	quiet                 quietState    // the quiet parts of the song playing, for its hot comments
-	captions              captionState  // the episode playing's captions, and the model that writes them
+	npVisual              nowPlayingVisual
+	npCoverState          coverState   // the cover of Now Playing, as it is tilted and flicked
+	wallState             wallState    // the wall of the queue's covers, as it is dragged
+	quiet                 quietState   // the quiet parts of the song playing, for its hot comments
+	captions              captionState // the episode playing's captions, and the model that writes them
 	sig                   playerSig
 	quitting              bool
 
@@ -154,6 +160,9 @@ type app struct {
 	restored     bool   // playback picked up where it was left
 	savedSession string // the session as last kept
 	sessionDue   bool   // a save of the session is due
+
+	scrob       scrobbler // what plays, reported to NetEase's listening history
+	scrobbleDue bool      // a note of what plays is due
 }
 
 // post runs fn on the main thread and redraws both windows. Without a
@@ -264,10 +273,16 @@ func Run() error {
 		a.pl = player.New(a.post)
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
+		a.pl.AutoMix = func() bool { return a.settings.AdaptiveMix }
+		a.pl.PreloadMetadata = true
+		a.pl.Prepared = func(t netease.Track) { a.art.get(netease.Sized(t.Album.PicURL, 600), true) }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
+		a.scrob.report = a.postPlay
 		a.pl.Changed = func() {
 			a.wallpaperPlaybackChanged()
 			a.keepSession()
+			a.noteScrobble()
+			a.keepScrobble()
 			if a.menuBar != nil {
 				a.menuBar.stopTimer()
 			}
@@ -310,7 +325,11 @@ func Run() error {
 		a.win.OnShow(a.syncDock)
 		a.win.OnHide(a.syncDock)
 		// Shown or switched to the morning after, it shows the new day's.
-		a.win.OnFocus(a.freshenHome)
+		a.win.OnFocus(func() {
+			a.freshenHome()
+			a.refreshLikedSongs()
+		})
+		a.watchLikedSongs()
 		a.applyTray()
 		a.syncMenuBar()
 		if shotHook != nil {
@@ -334,12 +353,16 @@ func Run() error {
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 		a.quitting = true
+		if a.likeSync.timer != nil {
+			a.likeSync.timer.Stop()
+		}
 		a.stopWallpaper()
 		a.unregisterPlaybackShortcuts()
 		a.syncMenuBar()
 		a.settings.Volume = a.volume
 		a.settings.save()
 		a.saveSession()
+		a.scrob.stop()
 		if write := a.transcriptWrite(); write != nil {
 			write()
 		}

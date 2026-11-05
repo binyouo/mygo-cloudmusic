@@ -1,11 +1,129 @@
 package app
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"testing"
 	"time"
 )
+
+type artFetchCall struct {
+	url    string
+	result chan error
+}
+
+func controlledArtCache(t *testing.T) (*artCache, chan func(), chan artFetchCall) {
+	t.Helper()
+	data, err := os.ReadFile("testdata/animated.webp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := make(chan func(), 128)
+	calls := make(chan artFetchCall, 128)
+	stop := make(chan struct{})
+	c := newArtCache(func(fn func()) { posts <- fn })
+	c.sem = make(chan struct{}, 1)
+	c.after = func(time.Duration, func()) {}
+	c.fetch = func(url string) ([]byte, error) {
+		call := artFetchCall{url, make(chan error, 1)}
+		calls <- call
+		select {
+		case err := <-call.result:
+			return data, err
+		case <-stop:
+			return nil, errors.New("test finished")
+		}
+	}
+	t.Cleanup(func() { close(stop) })
+	return c, posts, calls
+}
+
+// Scrolling far ahead used to leave visible covers waiting behind every offscreen request.
+func TestArtCachePrioritizesNewVisibleCover(t *testing.T) {
+	c, posts, calls := controlledArtCache(t)
+	c.get("active", false)
+	active := wait(t, calls, "active cover")
+	for i := range 2000 {
+		c.get(fmt.Sprint("old-", i), false)
+	}
+	c.get("visible", false)
+	active.result <- nil
+	wait(t, posts, "active completion")()
+	visible := wait(t, calls, "visible cover")
+	if visible.url != "visible" {
+		t.Fatalf("offscreen request %s delayed visible cover", visible.url)
+	}
+	visible.result <- nil
+	wait(t, posts, "visible completion")()
+	if a := c.get("visible", false); a == nil || a.bmp == nil {
+		t.Fatal("visible cover was not published")
+	}
+}
+
+// Returning to a queued row must promote its existing request instead of opening it twice or keeping it behind stale rows.
+func TestArtCachePromotesQueuedCover(t *testing.T) {
+	c, posts, calls := controlledArtCache(t)
+	c.get("active", false)
+	active := wait(t, calls, "active cover")
+	c.get("return-to", false)
+	c.get("left-behind", false)
+	c.get("return-to", false)
+	active.result <- nil
+	wait(t, posts, "active completion")()
+	returned := wait(t, calls, "returned cover")
+	if returned.url != "return-to" {
+		t.Fatalf("loaded %q before the requested row", returned.url)
+	}
+	returned.result <- nil
+	wait(t, posts, "returned completion")()
+	other := wait(t, calls, "remaining cover")
+	if other.url != "left-behind" {
+		t.Fatalf("duplicated request %q", other.url)
+	}
+	other.result <- nil
+	wait(t, posts, "remaining completion")()
+	if len(calls) != 0 {
+		t.Fatal("opened the same queued cover twice")
+	}
+}
+
+// A transient image failure used to remain cached forever, leaving later playlist rows as permanent placeholders.
+func TestArtCacheRetriesFailureAfterWake(t *testing.T) {
+	c, posts, calls := controlledArtCache(t)
+	now := time.Unix(1e9, 0)
+	c.now = func() time.Time { return now }
+	var delay time.Duration
+	var wake func()
+	c.after = func(d time.Duration, fn func()) { delay, wake = d, fn }
+	c.get("cover", false)
+	first := wait(t, calls, "first cover attempt")
+	first.result <- errors.New("temporary network failure")
+	wait(t, posts, "failure completion")()
+	for range 5 {
+		if a := c.get("cover", false); a == nil || !a.failed {
+			t.Fatal("lost the failure while waiting to retry")
+		}
+	}
+	if len(calls) != 0 || wake == nil || delay <= 0 {
+		t.Fatal("retried in a tight loop or failed to wake the idle view")
+	}
+	now = now.Add(delay)
+	wake()
+	wait(t, posts, "retry redraw")()
+	c.get("cover", false)
+	c.get("cover", false)
+	retry := wait(t, calls, "cover retry")
+	retry.result <- nil
+	wait(t, posts, "retry completion")()
+	if a := c.get("cover", false); a == nil || a.failed || a.bmp == nil {
+		t.Fatal("recovered cover stayed a placeholder")
+	}
+	if len(calls) != 0 {
+		t.Fatal("duplicated the retry")
+	}
+}
 
 // An animated WebP cover, as some playlists have, shows its first frame,
 // in the bitmap too, which decodes its data again once it drops its pixels.

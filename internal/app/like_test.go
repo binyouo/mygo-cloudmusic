@@ -19,6 +19,9 @@ import (
 
 func TestLikeFromPlayerBar(t *testing.T) {
 	calls := make(chan bool, 4)
+	oldLiked := songsLiked
+	songsLiked = func(int64) ([]int64, error) { return []int64{7}, nil }
+	defer func() { songsLiked = oldLiked }()
 	likeSong = func(id int64, like bool) error { calls <- like; return nil }
 	defer func() { likeSong = netease.Like }()
 
@@ -41,6 +44,8 @@ func TestLikeFromPlayerBar(t *testing.T) {
 	if like := <-calls; !like {
 		t.Error("asked NetEase to unlike")
 	}
+	// Complete the request on the UI thread before the second click.
+	a.songLikeAnswered(a.likeSync.changes[7], true, nil)
 	tt.Frame()
 	if err := tt.Click("取消喜欢"); err != nil {
 		t.Fatal(err)

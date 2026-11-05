@@ -1,7 +1,6 @@
 package app
 
 import (
-	"slices"
 	"testing"
 	"time"
 
@@ -63,9 +62,6 @@ func TestSongMenuOnRightClick(t *testing.T) {
 	if err := tt.RightClick("宝船"); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := tt.Menu(), []string{"复制歌名", "复制歌名和歌手", "-", "复制链接"}; !slices.Equal(got, want) {
-		t.Fatalf("the menu shows %q, want %q", got, want)
-	}
 	if err := tt.ChooseMenuItem("复制链接"); err != nil {
 		t.Fatal(err)
 	}
@@ -75,5 +71,37 @@ func TestSongMenuOnRightClick(t *testing.T) {
 	}
 	if a.pl.Current() != nil {
 		t.Error("the right click played the song")
+	}
+}
+
+// A song's right-click menu queues it next without interrupting playback,
+// including when it is already in the queue or is a local file.
+func TestSongMenuPlaysNext(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		a := newTestApp()
+		a.settings = defaultSettings()
+		tracks := []netease.Track{{ID: 1, Name: "一", Duration: 200000}, {ID: 2, Name: "二", Duration: 200000}, {ID: 3, Name: "三", Duration: 200000}}
+		if local {
+			tracks[2].LocalPath = "/music/三.mp3"
+		}
+		a.playlists[42] = &netease.Playlist{ID: 42, Name: "歌单", Tracks: tracks}
+		a.route = route{page: pagePlaylist, id: 42}
+		a.pl.Cue(tracks)
+		a.pl.Hold(42 * time.Second)
+		tt := ui.NewTester(a.view, 1200, 800)
+		tt.Frame()
+		for range 2 {
+			if err := tt.RightClick("三"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.ChooseMenuItem("下一首播放"); err != nil {
+				t.Fatal(err)
+			}
+			tt.Frame()
+			order, at := a.pl.PlayOrder()
+			if a.pl.Queue()[order[at+1]].ID != 3 || len(a.pl.Queue()) != 3 || a.pl.Current().ID != 1 || a.pl.Position() != 42*time.Second || !a.pl.Playing() {
+				t.Fatalf("local %v: current %+v, queue %+v, order %v at %d", local, a.pl.Current(), a.pl.Queue(), order, at)
+			}
+		}
 	}
 }

@@ -3,14 +3,18 @@
 package app
 
 import (
+	"math"
+	"sync"
+	"time"
+
+	"github.com/ebitengine/purego"
 	"github.com/ebitengine/purego/objc"
 	"github.com/egoist/mygo"
 )
 
 type wallpaperNative struct {
-	window       objc.ID
-	cursorHidden bool
-	closed       bool
+	window objc.ID
+	closed bool
 }
 
 // A borderless window covers the current display in its existing Space.
@@ -18,10 +22,10 @@ type wallpaperNative struct {
 func newWallpaperNative(win, main *mygo.Window) *wallpaperNative {
 	n := &wallpaperNative{window: objc.ID(win.NativeHandle())}
 	screen := objc.ID(main.NativeHandle()).Send(objc.RegisterName("screen"))
-	n.window.Send(objc.RegisterName("setStyleMask:"), uint(1<<15))                   // full-size content, no title bar
-	n.window.Send(objc.RegisterName("setLevel:"), 28)                                // above the menu bar, Dock and our notch
-	n.window.Send(objc.RegisterName("setCollectionBehavior:"), uint(1<<4|1<<6|1<<8)) // stationary, out of cycle, full-screen auxiliary
-	n.window.Send(objc.RegisterName("setHidesOnDeactivate:"), true)
+	n.window.Send(objc.RegisterName("setStyleMask:"), uint(1<<15))                     // full-size content, no title bar
+	n.window.Send(objc.RegisterName("setLevel:"), 28)                                  // above the menu bar, Dock and our notch
+	n.window.Send(objc.RegisterName("setCollectionBehavior:"), uint(1|1<<4|1<<6|1<<8)) // all Spaces, stationary, out of cycle, full-screen auxiliary
+	n.window.Send(objc.RegisterName("setHidesOnDeactivate:"), false)
 	n.window.Send(objc.RegisterName("setAcceptsMouseMovedEvents:"), true)
 	n.window.Send(objc.RegisterName("setAnimationBehavior:"), int64(2)) // no AppKit opening/closing effect
 	if screen != 0 {
@@ -37,12 +41,6 @@ func (n *wallpaperNative) fade(show bool, done func()) {
 	duration, alpha := 0.42, 0.0
 	if show {
 		duration, alpha = 0.72, 1
-		if !n.cursorHidden {
-			objc.ID(objc.GetClass("NSCursor")).Send(objc.RegisterName("hide"))
-			n.cursorHidden = true
-		}
-	} else {
-		n.showCursor()
 	}
 	workspace := objc.ID(objc.GetClass("NSWorkspace")).Send(objc.RegisterName("sharedWorkspace"))
 	if objc.Send[bool](workspace, objc.RegisterName("accessibilityDisplayShouldReduceMotion")) {
@@ -67,42 +65,32 @@ func (n *wallpaperNative) fade(show bool, done func()) {
 	complete.Release()
 }
 
-func (n *wallpaperNative) showCursor() {
-	if n.cursorHidden {
-		objc.ID(objc.GetClass("NSCursor")).Send(objc.RegisterName("unhide"))
-		n.cursorHidden = false
-	}
-}
-
 func (n *wallpaperNative) close() {
 	n.closed = true
-	n.showCursor()
 }
 
-func watchWallpaperInput(fn func(wake, pointer bool) bool) func() {
-	const mask = uint64(1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5 | 1<<6 | 1<<7 | 1<<10 | 1<<11 | 1<<12 | 1<<22 | 1<<25 | 1<<26 | 1<<27 | 1<<29 | 1<<30)
-	events := objc.ID(objc.GetClass("NSEvent"))
-	block := objc.NewBlock(func(_ objc.Block, event objc.ID) objc.ID {
-		kind := objc.Send[uint64](event, objc.RegisterName("type"))
-		// Key releases and modifier changes belong to the shortcut that just
-		// opened the screen saver. Cmd-T itself is handled by the app's command.
-		wake := kind != 11 && kind != 12 && kind != 2 && kind != 4 && kind != 26
-		if kind == 10 && objc.Send[uint16](event, objc.RegisterName("keyCode")) == 17 &&
-			objc.Send[uint64](event, objc.RegisterName("modifierFlags"))&(1<<20) != 0 {
-			wake = false
+var wallpaperIdleAPI struct {
+	once    sync.Once
+	seconds func(int32, uint32) float64
+}
+
+func wallpaperSystemIdle() time.Duration {
+	wallpaperIdleAPI.once.Do(func() {
+		lib, err := purego.Dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", purego.RTLD_LAZY|purego.RTLD_LOCAL)
+		if err != nil {
+			return
 		}
-		if fn(wake, kind == 5) {
-			return 0
+		address, err := purego.Dlsym(lib, "CGEventSourceSecondsSinceLastEventType")
+		if err == nil {
+			purego.RegisterFunc(&wallpaperIdleAPI.seconds, address)
 		}
-		return event
 	})
-	monitor := events.Send(objc.RegisterName("addLocalMonitorForEventsMatchingMask:handler:"), mask, block)
-	monitor.Send(objc.RegisterName("retain"))
-	return func() {
-		if monitor != 0 {
-			events.Send(objc.RegisterName("removeMonitor:"), monitor)
-			monitor.Send(objc.RegisterName("release"))
-		}
-		block.Release()
+	if wallpaperIdleAPI.seconds == nil {
+		return -1
 	}
+	seconds := wallpaperIdleAPI.seconds(0, ^uint32(0)) // combined session, any hardware input
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 {
+		return -1
+	}
+	return time.Duration(min(seconds, float64(24*time.Hour/time.Second)) * float64(time.Second))
 }

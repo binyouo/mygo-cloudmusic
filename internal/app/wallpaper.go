@@ -15,14 +15,9 @@ type wallpaperState struct {
 	revealed     bool
 	win          *mygo.Window
 	native       *wallpaperNative
-	pointer      mygo.Point
-	lyrics       lyricPaneState
-	backdrop     backdropCache
-	art          *artwork
 	lastInput    time.Time
 	timer        *time.Timer
 	timerVersion uint64
-	stopInput    func()
 }
 
 func (a *app) toggleWallpaper() {
@@ -39,7 +34,6 @@ func (a *app) toggleWallpaper() {
 	}
 	w := &a.wallpaper
 	w.active = true
-	w.lyrics = lyricPaneState{lyricAt: -1}
 	if a.win != nil {
 		a.openWallpaperWindow()
 	}
@@ -49,7 +43,6 @@ func (a *app) toggleWallpaper() {
 func (a *app) openWallpaperWindow() {
 	w := &a.wallpaper
 	bounds := mygo.Screen.DisplayMatching(a.win.Bounds()).Bounds
-	w.pointer = mygo.Screen.CursorScreenPoint()
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title: "播放屏保", Hidden: true, Frameless: true,
 		DisableResize: true, DisableMove: true, DisableShadow: true,
@@ -74,7 +67,6 @@ func (a *app) openWallpaperWindow() {
 		e.PreventDefault()
 		a.leaveWallpaper()
 	})
-	win.OnBlur(a.leaveWallpaper)
 }
 
 func (a *app) leaveWallpaper() {
@@ -86,6 +78,8 @@ func (a *app) leaveWallpaper() {
 	w.revealed = false
 	if w.win != nil {
 		w.closing = true
+		// Restore the covered window while the fullscreen window fades away.
+		a.win.Invalidate()
 		w.win.Invalidate()
 		w.native.fade(false, a.finishWallpaper)
 		return
@@ -109,7 +103,6 @@ func (a *app) finishWallpaper() {
 		}
 	}
 	w.active, w.closing, w.revealed = false, false, false
-	w.backdrop, w.art = backdropCache{}, nil
 	w.lastInput = time.Now()
 	a.resetWallpaperTimer()
 	a.redraw()
@@ -130,6 +123,22 @@ func wallpaperWait(now, last time.Time, seconds int, focused, playing, blocked b
 	return max(0, time.Duration(seconds)*time.Second-now.Sub(last)), true
 }
 
+// Native input idle time is independent of rendering and AppKit's synthetic
+// events. The local baseline still protects a fresh focus/resume or exit.
+func wallpaperIdleWait(now, last time.Time, idle time.Duration, seconds int, focused, playing, blocked bool) (time.Duration, bool) {
+	if idle >= 0 {
+		last = maxTime(last, now.Add(-idle))
+	}
+	return wallpaperWait(now, last, seconds, focused, playing, blocked)
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
 func (a *app) resetWallpaperTimer() {
 	w := &a.wallpaper
 	w.timerVersion++
@@ -137,7 +146,7 @@ func (a *app) resetWallpaperTimer() {
 		w.timer.Stop()
 		w.timer = nil
 	}
-	if runtime.GOOS != "darwin" || a.win == nil || a.quitting {
+	if runtime.GOOS != "darwin" || a.win == nil || a.quitting || a.settings.WallpaperIdleSeconds <= 0 || w.active || w.closing {
 		return
 	}
 	now := time.Now()
@@ -145,10 +154,14 @@ func (a *app) resetWallpaperTimer() {
 		w.lastInput = now
 	}
 	blocked := w.active || w.closing || a.localImporting || a.login.open || a.naming.open || a.deleting.open
-	wait, enabled := wallpaperWait(now, w.lastInput, a.settings.WallpaperIdleSeconds, a.win.IsFocused(), a.pl.Playing(), blocked)
+	wait, enabled := wallpaperIdleWait(now, w.lastInput, wallpaperSystemIdle(), a.settings.WallpaperIdleSeconds, a.win.IsFocused(), a.pl.Playing(), blocked)
 	if !enabled {
 		w.lastInput = now
-		return
+	}
+	// Recheck focus and physical input even when no UI frame or focus callback
+	// arrives. This timer never requests a rendered frame while waiting.
+	if !enabled || wait > time.Second {
+		wait = time.Second
 	}
 	version := w.timerVersion
 	w.timer = time.AfterFunc(wait, func() {
@@ -158,7 +171,7 @@ func (a *app) resetWallpaperTimer() {
 			}
 			w.timer = nil
 			blocked := w.active || w.closing || a.localImporting || a.login.open || a.naming.open || a.deleting.open
-			wait, enabled := wallpaperWait(time.Now(), w.lastInput, a.settings.WallpaperIdleSeconds, a.win.IsFocused(), a.pl.Playing(), blocked)
+			wait, enabled := wallpaperIdleWait(time.Now(), w.lastInput, wallpaperSystemIdle(), a.settings.WallpaperIdleSeconds, a.win.IsFocused(), a.pl.Playing(), blocked)
 			if enabled && wait == 0 {
 				a.toggleWallpaper()
 				a.redraw()
@@ -194,38 +207,14 @@ func (a *app) ensureWallpaperTimer() {
 	}
 }
 
-func wallpaperPointerMoved(origin, current mygo.Point) bool {
-	dx, dy := current.X-origin.X, current.Y-origin.Y
-	return dx*dx+dy*dy >= 36
-}
-
-func (a *app) wakeWallpaper(wake, pointer bool) bool {
-	a.wallpaperInput()
-	w := &a.wallpaper
-	if !wake || !w.active && !w.closing {
-		return false
-	}
-	if pointer && !wallpaperPointerMoved(w.pointer, mygo.Screen.CursorScreenPoint()) {
-		return false
-	}
-	a.leaveWallpaper()
-	return true // Do not deliver waking input to the player or the page behind it.
-}
-
 func (a *app) watchWallpaper() {
-	a.wallpaper.stopInput = watchWallpaperInput(a.wakeWallpaper)
 	a.win.OnFocus(func() {
 		a.wallpaper.lastInput = time.Now()
 		a.resetWallpaperTimer()
 	})
 	a.win.OnBlur(func() {
-		// The screen saver takes focus from the main window during entry.
-		if a.wallpaper.win == nil {
-			a.leaveWallpaper()
-		}
 		a.resetWallpaperTimer()
 	})
-	mygo.App.OnDidResignActive(a.leaveWallpaper)
 	mygo.Screen.OnDisplaysChanged(a.leaveWallpaper)
 	a.wallpaperInput()
 }
@@ -235,8 +224,5 @@ func (a *app) stopWallpaper() {
 	a.wallpaper.timerVersion++
 	if a.wallpaper.timer != nil {
 		a.wallpaper.timer.Stop()
-	}
-	if a.wallpaper.stopInput != nil {
-		a.wallpaper.stopInput()
 	}
 }

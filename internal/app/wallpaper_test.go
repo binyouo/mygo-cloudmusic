@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
 )
 
@@ -35,38 +35,259 @@ func TestWallpaperShortcutRestoresView(t *testing.T) {
 	}
 }
 
-// A waking key is consumed without pausing or seeking, while key releases do not dismiss a new screen saver.
-func TestWallpaperWakingInput(t *testing.T) {
+// Mouse movement, scrolling and a single click keep the wallpaper open; a double click on its background closes it.
+func TestWallpaperMouseInteraction(t *testing.T) {
 	a := newTestApp()
-	a.pl.Cue([]netease.Track{{ID: -7, LocalPath: "test.mp3", Duration: 200000}})
-	a.pl.Hold(30 * time.Second)
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: -7, LocalPath: "test.mp3", Name: "播放测试", Duration: 200000}})
+	a.pl.SetLyrics([]lyrics.Line{{At: 10 * time.Second, Text: "测试歌词"}})
 	a.toggleWallpaper()
-	playing, position := a.pl.Playing(), a.pl.Position()
-	if a.wakeWallpaper(false, false) || !a.wallpaper.active {
-		t.Fatal("shortcut release dismissed the screen saver")
+	tester := ui.NewTester(a.wallpaperView, 1180, 780)
+	tester.Frame()
+	tester.Move(30, 30)
+	tester.Scroll(900, 400, 0, 30)
+	tester.ClickAt(30, 30)
+	tester.Frame()
+	if !a.wallpaper.active {
+		t.Fatal("mouse movement, scroll or a single click dismissed the wallpaper")
 	}
-	if !a.wakeWallpaper(true, false) || a.wallpaper.active {
-		t.Fatal("waking key was not consumed")
+	if err := tester.Click("测试歌词"); err != nil {
+		t.Fatal(err)
 	}
-	if a.pl.Playing() != playing || a.pl.Position() != position {
-		t.Fatal("waking input changed playback")
+	tester.Frame()
+	if !a.wallpaper.active || a.pl.Position() != 10*time.Second {
+		t.Fatalf("lyric click: active %v, position %v", a.wallpaper.active, a.pl.Position())
+	}
+	if err := tester.Click("测试歌词"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if !a.wallpaper.active {
+		t.Fatal("double click on an interactive lyric dismissed the wallpaper")
+	}
+	tester.ClickAt(30, 30)
+	tester.ClickAt(30, 30)
+	tester.Frame()
+	if a.wallpaper.active {
+		t.Fatal("double click on the background did not close the wallpaper")
 	}
 }
 
-// Pointer jitter during entry is ignored, but deliberate movement in any direction wakes the screen saver.
-func TestWallpaperPointerThreshold(t *testing.T) {
-	origin := mygo.Point{X: 100, Y: 100}
-	for _, test := range []struct {
-		point mygo.Point
-		wake  bool
-	}{
-		{mygo.Point{X: 101, Y: 99}, false},
-		{mygo.Point{X: 104, Y: 104}, false},
-		{mygo.Point{X: 106, Y: 100}, true},
-		{mygo.Point{X: 95, Y: 96}, true},
-	} {
-		if wallpaperPointerMoved(origin, test.point) != test.wake {
-			t.Fatalf("wrong wake result at %+v", test.point)
+// Playback controls change tracks and pause without leaving the wallpaper.
+func TestWallpaperPlaybackControls(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{
+		{ID: -1, Name: "第一首", LocalPath: "first.mp3", Duration: 200000},
+		{ID: -2, Name: "第二首", LocalPath: "second.mp3", Duration: 200000},
+	})
+	a.pl.SetLyrics(nil)
+	a.toggleWallpaper()
+	a.wallpaper.revealed = true
+	tester := ui.NewTester(a.wallpaperView, 1180, 780)
+	tester.Frame()
+	if err := tester.Click("下一首"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if !a.wallpaper.active || a.pl.Current().ID != -2 {
+		t.Fatalf("next: active %v, track %+v", a.wallpaper.active, a.pl.Current())
+	}
+	if err := tester.Click("播放/暂停"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if !a.wallpaper.active || a.pl.Playing() {
+		t.Fatal("pause did not keep the wallpaper open")
+	}
+	if err := tester.Click("上一首"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if !a.wallpaper.active || a.pl.Current().ID != -1 {
+		t.Fatal("previous did not play the first track")
+	}
+}
+
+// Comments open for the current track and follow a track change without leaving the wallpaper.
+func TestWallpaperCommentsFollowTrack(t *testing.T) {
+	asked := make(chan string, 1)
+	old := threadComments
+	threadComments = func(thread string, offset, limit int) (*netease.Comments, error) {
+		asked <- thread
+		return &netease.Comments{}, nil
+	}
+	defer func() { threadComments = old }()
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: 7, Name: "第一首", Duration: 200000}})
+	a.pl.SetLyrics([]lyrics.Line{{Text: "歌词内容"}})
+	a.comments = commentState{track: 7, thread: "R_SO_4_7", loaded: true, total: 1, latest: []netease.Comment{{ID: 1, Content: "评论内容"}}}
+	a.toggleWallpaper()
+	a.wallpaper.revealed = true
+	tester := ui.NewTester(a.wallpaperView, 1180, 780)
+	tester.Frame()
+	if err := tester.Click("评论"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if !a.wallpaper.active || a.npPane != paneComments || !tester.HasText("评论内容") {
+		t.Fatal("comments did not open for the current track")
+	}
+	a.pl.Cue([]netease.Track{{ID: 8, Name: "第二首", Duration: 200000}})
+	tester.Frame()
+	if thread := wait(t, asked, "the next track's comments"); thread != "R_SO_4_8" || a.comments.track != 8 {
+		t.Fatalf("asked for %s, comment track %d", thread, a.comments.track)
+	}
+	if err := tester.Click("歌词"); err != nil {
+		t.Fatal(err)
+	}
+	tester.Frame()
+	if !a.wallpaper.active || a.npPane != paneLyrics {
+		t.Fatal("returning to lyrics closed the wallpaper")
+	}
+}
+
+// Fullscreen keeps Now Playing's tabs and keyboard shortcuts instead of dismissing on a key press.
+func TestWallpaperKeepsNowPlayingTabs(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: 7, Name: "测试歌曲", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.comments = commentState{track: 7, thread: "R_SO_4_7", loaded: true}
+	a.toggleWallpaper()
+	a.wallpaper.revealed = true
+	tester := ui.NewTester(a.wallpaperView, 1180, 780)
+	tester.Move(500, 200)
+	tester.Advance(time.Second)
+	tester.Frame()
+	for _, tab := range []struct {
+		key  ui.Key
+		pane int
+	}{{ui.Key2, paneStage}, {ui.Key3, paneQueue}, {ui.Key4, paneWall}, {ui.Key5, paneComments}, {ui.Key1, paneLyrics}} {
+		tester.Key(ui.Cmd, tab.key)
+		tester.Frame()
+		if !a.wallpaper.active || a.npPane != tab.pane {
+			t.Fatalf("key %v: active %v, pane %d", tab.key, a.wallpaper.active, a.npPane)
+		}
+	}
+	for _, tab := range []struct {
+		label string
+		pane  int
+	}{{"律动", paneStage}, {"待播清单", paneQueue}, {"选歌", paneWall}, {"评论", paneComments}, {"歌词", paneLyrics}} {
+		if err := tester.Click(tab.label); err != nil {
+			t.Fatal(err)
+		}
+		tester.Frame()
+		if !a.wallpaper.active || a.npPane != tab.pane {
+			t.Fatalf("clicked %s: active %v, pane %d", tab.label, a.wallpaper.active, a.npPane)
+		}
+	}
+	tester.Key(0, ui.KeyA)
+	tester.Frame()
+	if !a.wallpaper.active {
+		t.Fatal("ordinary key dismissed the fullscreen player")
+	}
+}
+
+// The pane chosen in fullscreen remains selected when returning to Now Playing.
+func TestWallpaperKeepsPaneAfterExit(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: -1, Name: "测试", LocalPath: "test.mp3", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.nowPlaying = true
+	main := ui.NewTester(a.view, 1180, 780)
+	main.Frame()
+	main.Key(ui.Cmd, ui.KeyT)
+	main.Frame()
+	a.wallpaper.revealed = true
+	full := ui.NewTester(a.wallpaperView, 1440, 900)
+	full.Frame()
+	full.Key(ui.Cmd, ui.Key2)
+	full.Frame()
+	main.Frame() // The covered window must not rebuild the same player controls.
+	full.Frame()
+	if !a.wallpaper.active || a.npPane != paneStage {
+		t.Fatal("fullscreen did not show the selected pane")
+	}
+	full.Key(0, ui.KeyEscape)
+	full.Frame()
+	main.Frame()
+	if a.wallpaper.active || !a.nowPlaying || a.npPane != paneStage {
+		t.Fatal("leaving fullscreen lost the selected pane")
+	}
+}
+
+// The main window must keep Now Playing covered during the fullscreen fade; it previously flashed the underlying page.
+func TestWallpaperExitKeepsNowPlayingCovered(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: -1, Name: "测试", LocalPath: "test.mp3", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.nowPlaying = true
+	tester := ui.NewTester(a.view, 1200, 800)
+	tester.SetDark(false)
+	tester.Frame()
+	tester.Advance(time.Second)
+	tester.Frame()
+	a.wallpaper.active = true
+	tester.Frame()
+	// The native window is fading out, but has not yet completed its close.
+	a.wallpaper.active, a.wallpaper.closing = false, true
+	for _, closing := range []bool{true, false} {
+		a.wallpaper.closing = closing
+		tester.Frame()
+		img := tester.Image()
+		x := img.Bounds().Dx() / 12
+		y := img.Bounds().Dy() / 2
+		r, g, b, _ := img.At(x, y).RGBA()
+		if (r+g+b)/3 >= 0x9000 {
+			t.Fatalf("the page and sidebar showed through: closing=%v", closing)
+		}
+	}
+}
+
+// Fullscreen opened while Now Playing is closing must return to the page without showing the player again.
+func TestWallpaperExitKeepsPageDuringPlayerClose(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: -1, Name: "测试", LocalPath: "test.mp3", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.nowPlaying = true
+	tester := ui.NewTester(a.view, 1200, 800)
+	tester.Frame()
+	tester.Advance(time.Second)
+	tester.Frame()
+	a.nowPlaying = false
+	tester.Frame()
+	a.wallpaper.active = true
+	tester.Frame()
+	a.wallpaper.active, a.wallpaper.closing = false, true
+	tester.Frame()
+	if tester.HasText("待播清单") {
+		t.Fatal("the closing player appeared over the page during fullscreen exit")
+	}
+}
+
+// Double-clicking empty space closes fullscreen from both the stage and the cover wall.
+func TestWallpaperBackgroundDoubleClickInPanes(t *testing.T) {
+	for _, pane := range []int{paneStage, paneWall} {
+		a := newTestApp()
+		a.settings = defaultSettings()
+		a.pl.Cue([]netease.Track{{ID: -1, Name: "测试", LocalPath: "test.mp3", Duration: 200000}})
+		a.pl.SetLyrics(nil)
+		a.npPane = pane
+		a.toggleWallpaper()
+		a.wallpaper.revealed = true
+		tester := ui.NewTester(a.wallpaperView, 1180, 780)
+		tester.Advance(time.Second)
+		tester.Frame()
+		tester.ClickAt(20, 500)
+		tester.ClickAt(20, 500)
+		tester.Frame()
+		if a.wallpaper.active {
+			t.Fatalf("double click did not close pane %d", pane)
 		}
 	}
 }
@@ -116,6 +337,28 @@ func TestWallpaperIdleDeadline(t *testing.T) {
 	}
 	if wait, enabled := wallpaperWait(start.Add(time.Minute), start.Add(55*time.Second), 30, true, true, false); !enabled || wait != 25*time.Second {
 		t.Fatalf("input did not restart countdown: %v, %v", wait, enabled)
+	}
+}
+
+// Physical input restarts idle entry without a UI frame; a fresh resume still gets its full wait.
+func TestWallpaperSystemIdleDeadline(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name               string
+		baseline, physical time.Duration
+		want               time.Duration
+	}{
+		{"due without redraw", 3 * time.Minute, 3 * time.Minute, 0},
+		{"recent physical input", 3 * time.Minute, 5 * time.Second, 115 * time.Second},
+		{"fresh resume", 10 * time.Second, 3 * time.Minute, 110 * time.Second},
+		{"unavailable native clock", 3 * time.Minute, -1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wait, enabled := wallpaperIdleWait(now, now.Add(-tc.baseline), tc.physical, 120, true, true, false)
+			if !enabled || wait != tc.want {
+				t.Fatalf("wait=%v enabled=%v, want %v", wait, enabled, tc.want)
+			}
+		})
 	}
 }
 

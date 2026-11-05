@@ -50,11 +50,17 @@ func (a *app) npState(c *ui.Context) (open, settled bool) {
 // moves it in frames that only paint, building nothing.
 func (a *app) nowPlayingLayer(c *ui.Context, open, settled bool) {
 	layer := ui.Box(c.Key("now-playing-layer")).Absolute().Top(0).Left(0).Right(0).Bottom(0)
+	if a.wallpaper.active || a.wallpaper.closing && !open {
+		layer.Invisible()
+		return
+	}
 	pose := ui.Pose{Y: 60, Fade: 1}
 	if open {
 		pose = ui.Pose{}
 	}
-	layer.AnimatePose(pose, npSpring)
+	if !a.wallpaper.closing {
+		layer.AnimatePose(pose, npSpring)
+	}
 	if !open && settled || a.pl.Current() == nil {
 		// Closed: nothing to paint or click.
 		layer.Invisible()
@@ -71,15 +77,27 @@ func (a *app) nowPlayingLayer(c *ui.Context, open, settled bool) {
 // nowPlayingView fills the window with what plays: its cover over a slow
 // drift of its own colors, the controls, and lyrics that follow the song.
 func (a *app) nowPlayingView(c *ui.Context) {
+	a.nowPlayingSurface(c, false)
+}
+
+func (a *app) nowPlayingSurface(c *ui.Context, fullscreen bool) {
 	pl := a.pl
 	tr := pl.Current()
 	w, h := c.Size()
 	art := a.art.get(netease.Sized(tr.Album.PicURL, 600), true)
+	if tr.Album.PicURL == "" {
+		a.npVisual.clearArtwork()
+	}
+	if a.npVisual.track != tr.ID {
+		a.prefetchNowPlaying()
+	}
+	progress, duration, mixing := pl.TransitionProgress()
+	a.npVisual.step(c.Now(), tr.ID, art, c.Preferences().ReduceMotion, progress, duration, mixing)
 	// The colors stay the last song's while its cover loads, rather than
 	// going gray between the two.
 	shown := art
 	if art == nil && tr.Album.PicURL != "" {
-		shown = a.npArt
+		shown = a.npVisual.current
 	}
 	a.npArt = shown
 	tint := ui.RGB(120, 120, 130)
@@ -96,11 +114,30 @@ func (a *app) nowPlayingView(c *ui.Context) {
 		a.backdrop(c, shown, tint)
 		// Over the backdrop, which is positioned too: positioned elements
 		// paint over those in the flow.
-		ui.Column(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Children(func() { a.nowPlayingBody(c, tr, art, accent, w, h, pointerIn) })
+		content := ui.Column(c).Absolute().Top(0).Left(0).Right(0).Bottom(0)
+		if fullscreen {
+			pose := ui.Pose{Fade: 1, Y: 10}
+			motion := ui.Animation{Duration: 620 * time.Millisecond, Delay: 90 * time.Millisecond, Ease: ui.CubicBezier(0.22, 1, 0.36, 1)}
+			if a.wallpaper.revealed {
+				pose = ui.Pose{}
+			} else if a.wallpaper.closing {
+				pose.Y = -4
+				motion = ui.Animation{Duration: 260 * time.Millisecond, Ease: ui.EaseOut}
+			}
+			if c.Preferences().ReduceMotion {
+				pose.Y = 0
+				motion.Duration, motion.Delay = 160*time.Millisecond, 0
+			}
+			content.AnimatePose(pose, motion)
+		}
+		content.Children(func() { a.nowPlayingBody(c, tr, art, accent, w, h, pointerIn, fullscreen) })
 	})
+	if fullscreen && root.DoubleClicked() {
+		a.leaveWallpaper()
+	}
 }
 
-func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, accent ui.Color, w, h float32, pointerIn bool) {
+func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, accent ui.Color, w, h float32, pointerIn, fullscreen bool) {
 	pl := a.pl
 	if tr.LocalPath != "" && a.npPane == paneComments {
 		a.npPane = paneLyrics
@@ -130,7 +167,11 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 	{
 		// The top strip drags the window; the chevron closes the view,
 		// showing only while the pointer is in the window, as the pane tabs do.
-		ui.Row(c).Height(topBar(c)).Justify(ui.Center).AlignItems(ui.Center).DragWindow().Children(func() {
+		top := ui.Row(c).Height(topBar(c)).Justify(ui.Center).AlignItems(ui.Center)
+		if !fullscreen {
+			top.DragWindow()
+		}
+		top.Children(func() {
 			reveal(ui.Box(c.Key("close-reveal")), pointerIn).Children(func() {
 				if iconButton(c.Key("close"), iconDown, 22, white.Alpha(0.7), "关闭").Clicked() {
 					a.closeNowPlaying()
@@ -171,7 +212,11 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 				a.npCover(c, tr, art, coverSize)
 
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Margin(36, 0, 18, 0).Children(func() {
-					ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(4).Children(func() {
+					metadata := ui.Column(c.Key(tr.ID)).Grow(1).Shrink(1).MinWidth(0).Gap(4)
+					if !c.Preferences().ReduceMotion {
+						metadata.Transition(ui.ElementTransition{Duration: 380 * time.Millisecond, Enter: &ui.Motion{Y: 6}, Exit: &ui.Motion{Y: -4}})
+					}
+					metadata.Children(func() {
 						if r := pl.Radio(); r != "" {
 							a.radioChip(c, r)
 						}
@@ -195,6 +240,9 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 					}
 					ui.Text(c, status).FontSize(11).FontFeatures("tnum").TextColor(white.Alpha(0.5))
 				})
+				if pl.Err() != "" {
+					ui.Text(c, pl.Err()).FontSize(12).LineHeight(1.35).TextColor(white.Alpha(0.75)).MaxLines(3).Margin(8, 0, 0, 0)
+				}
 				ui.Box(c).Margin(14, 0, 18, 0).Children(func() {
 					a.transport(c, white, white.Alpha(0.45), accent, 28)
 				})
@@ -438,7 +486,7 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 	pl := a.pl
 	lines, loaded := pl.Lyrics()
 	if loaded && len(lines) == 0 && tr.LocalLyrics != "" {
-		ui.Scroll(c.Key("plain-lyrics")).Grow(1).Padding(24, 8).Children(func() {
+		ui.Scroll(c.Key("plain-lyrics").Key(tr.ID)).Grow(1).Padding(24, 8).Children(func() {
 			ui.Text(c, tr.LocalLyrics).FontSize(24).FontWeight(600).LineHeight(1.8).TextColor(white.Alpha(0.75))
 		})
 		return
@@ -478,6 +526,9 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 	lag := state.lyricGlide.step(c, &state.lyricScroll)
 
 	scroll := ui.Scroll(c.Key("lyrics")).Grow(1).TrackScroll(&state.lyricScroll).Padding(0, 8, h*0.5, 0)
+	if !c.Preferences().ReduceMotion {
+		scroll.Transition(ui.ElementTransition{Duration: 500 * time.Millisecond, Enter: &ui.Motion{Y: 12}})
+	}
 	var dim float32
 	var quiet bool
 	if comments {
@@ -488,7 +539,16 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 		// Under the hot comment, gone, not drawn faint.
 		scroll.Invisible()
 	}
-	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 30, weight: 800, lineHeight: 1.25, quiet: quiet, state: state}, nil)
+	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 30, weight: 800, lineHeight: 1.25, quiet: quiet, state: state, depth: true}, nil)
+	if state == &a.lyricPaneState && dim < .98 {
+		w, _ := c.Size()
+		ui.Box(c.Key("lyric-top-fade")).Absolute().Top(a.npPaneTop).Left(0).Right(0).Height(36).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
+			a.backdropOver(p, ui.Rect{W: w, H: h}, r, func(t float32) float32 { return 1 - smoothstep(0, .9, t) })
+		})
+		ui.Box(c.Key("lyric-bottom-fade")).Absolute().Bottom(0).Left(0).Right(0).Height(70).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
+			a.backdropOver(p, ui.Rect{W: w, H: h}, r, func(t float32) float32 { return smoothstep(0, 1, t) })
+		})
+	}
 }
 
 // linesStyle is how timedLines sets its lines: the size, weight and
@@ -499,6 +559,7 @@ type linesStyle struct {
 	weight     int
 	lineHeight float32
 	quiet      bool
+	depth      bool // lyric depth must not change spoken podcast captions.
 }
 
 // timedLines fills scroll with lines that follow the track playing at
@@ -540,6 +601,13 @@ func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, 
 					// The line fades as a pose, in frames that only paint, rather
 					// than building the view at the display's rate as it does.
 					text := ui.Column(c).AlignItems(ui.Start).Gap(6)
+					if st.depth && !on && !line.Hovered() && !c.Preferences().ReduceMotion {
+						distance := i - cur
+						if distance < 0 {
+							distance = -distance
+						}
+						text.Blur(min(3, float32(distance)*0.65)).Cache()
+					}
 					text.AnimatePose(ui.Pose{Fade: 1 - alpha}, ui.Animation{Duration: 380 * time.Millisecond})
 					text.Children(func() {
 						if on && len(l.Words) > 0 {

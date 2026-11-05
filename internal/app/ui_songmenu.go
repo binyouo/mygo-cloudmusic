@@ -25,6 +25,11 @@ func (a *app) songMenu(c *ui.Context, tr *netease.Track, size float32, color ui.
 // it is listed in, if set.
 func (a *app) songItems(tr *netease.Track, pid int64) func(m *ui.Menu) {
 	return func(m *ui.Menu) {
+		if m.Item("下一首播放").Chosen() {
+			a.pl.PlayNext(*tr)
+			a.toast = "已添加到下一首播放"
+		}
+		m.Separator()
 		if tr.ProgramID != 0 {
 			a.programItems(m, tr)
 			return

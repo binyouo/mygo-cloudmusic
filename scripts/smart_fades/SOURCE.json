@@ -1,0 +1,31 @@
+{
+  "repository": "https://github.com/music-assistant/server",
+  "revision": "e16a4688130e9779dbce091c62ed8625c86ee64b",
+  "upstream_sha256": {
+    "music_assistant/controllers/streams/smart_fades/bands.py": "99b7a37827db6a9a21bce160387f09351e71c6024ce1b6d35fea45e89149fdd3",
+    "music_assistant/controllers/streams/smart_fades/filters.py": "e0259f2ee801342eb5ec29790d9a17b19179bfad15c49836af07501c65168b29",
+    "music_assistant/controllers/streams/smart_fades/helpers.py": "13154a39d8dbac9d5a8a924befbb20408082e223da63cb4fc016b83c55d5fbf7",
+    "music_assistant/controllers/streams/smart_fades/models.py": "a380557b2b5b1b563f03bb5861a955765c78fa997a6387b68e1beda1a9de2c65",
+    "music_assistant/controllers/streams/smart_fades/planner/__init__.py": "9f99aa8a46aa9bf98ff8c812c4ac1b4693dc1b4ef871dd8b7253c36eb2c34a00",
+    "music_assistant/controllers/streams/smart_fades/planner/assembly.py": "b9294fad9357b333bd91f482b969dd249222ce556e20847bb26dd11483bc3d7d",
+    "music_assistant/controllers/streams/smart_fades/planner/candidates.py": "228607039c950a26103a0c80777a71dd24e777e0703660a2ac288d5d0f86497a",
+    "music_assistant/controllers/streams/smart_fades/planner/context.py": "25d28d83a9375718c036c986a0b200274df8a09350dc686798cae3bcb53c263b",
+    "music_assistant/controllers/streams/smart_fades/planner/planner.py": "1814b308466ab0df081c896b1422119754d4816b682f016b52a3e7691306e245",
+    "music_assistant/controllers/streams/smart_fades/planner/policies.py": "5b74cea822d1359b00d33ab45a83b6b8231e98e36434a9e86ef9e5177c017614",
+    "music_assistant/controllers/streams/smart_fades/planner/selection.py": "8c0d98f6f12260bd9b8fa6b6683c49ac904a1e5c04ed0cf06437706441b2024e",
+    "music_assistant/controllers/streams/smart_fades/structure.py": "6c1d7911e1bfff7fcdf97d874c21ea64cc14c3377a69d59a8a8c668570bbaae0",
+    "music_assistant/controllers/streams/smart_fades/vocal.py": "1edcba8f38d7ccba8b3d2d64ecee92e78ccf2cacbe418d10121fb5e4a6ed11be",
+    "music_assistant/helpers/camelot.py": "32b94952c83fa7e1053422014ef42746d3132eee326b2c57427aa072f06f7cf1",
+    "music_assistant/providers/smart_fades/feature_extractor.py": "d3bef4ae9f0813d26416367f6b3d0e78228551b3de73452a8c3b2579ba482570",
+    "music_assistant/providers/smart_fades/dbn_postprocessor.py": "196118e108b7f4422041025611c4ba841719a0d94c471597036d11f555c9c5ff",
+    "music_assistant/providers/smart_fades/vocal_activity.py": "bc595eb99d60299b1156e1af5a63d874223411d1890710b5f5aa6a045a822002",
+    "music_assistant/providers/smart_fades/resources/skey_model.py": "3750ef16d53639d2ff60dbe3acb67e34d9db96aa864e0cf7496a2f5db8b989c9",
+    "music_assistant/providers/smart_fades/helpers.py": "bd98942a9d63ae1b3d8b4513a6572193aa2b9a9e4f6dea1979bfa4ab914eca37"
+  },
+  "changes": [
+    "Import paths adapted to standalone ma package.",
+    "Server-only entrypoint omitted; constant VERBOSE_LOG_LEVEL supplied locally.",
+    "Analysis helpers retain BPM, bin aggregation and band RMS only; stream-format decoder omitted.",
+    "filters.py retains only ShelfType identifiers and ECHO_DECAYS planning constants; scheduled DSP and all selected effects are rendered by Go."
+  ]
+}

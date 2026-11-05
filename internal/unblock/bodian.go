@@ -32,20 +32,45 @@ type candidate struct {
 // match only accepts the same title, artists and duration. In particular,
 // a cover of a popular song must not stand in for the original.
 func match(t netease.Track, c candidate) bool {
-	if t.Name == "" || len(t.Artists) == 0 || t.Duration <= 0 || !strings.EqualFold(strings.TrimSpace(t.Name), strings.TrimSpace(c.Name)) {
+	title := normalizedTitle(t.Name)
+	if title == "" || len(t.Artists) == 0 || t.Duration <= 0 || !strings.EqualFold(title, normalizedTitle(c.Name)) {
 		return false
 	}
 	artists := strings.Split(c.Artist, "&")
-	if len(artists) != len(t.Artists) {
-		return false
+	equal := func(a, b string) bool { return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) }
+	// Some sources credit a guest only in the shared title. The lead
+	// artist must still match, and no uncredited artist may be missing.
+	var guests []string
+	if at := strings.LastIndex(title, "("); at >= 0 && strings.HasSuffix(title, ")") {
+		credit := title[at+1 : len(title)-1]
+		if len(credit) > 5 && strings.EqualFold(credit[:5], "with ") {
+			guests = strings.FieldsFunc(credit[5:], func(r rune) bool {
+				return r == '&' || r == ',' || r == '，' || r == '、'
+			})
+		}
 	}
-	for i, a := range artists {
-		if !strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(t.Artists[i].Name)) {
+	for i, a := range t.Artists {
+		if strings.TrimSpace(a.Name) == "" || i == 0 && !equal(artists[0], a.Name) {
+			return false
+		}
+		if !slices.ContainsFunc(artists, func(name string) bool { return equal(name, a.Name) }) &&
+			!slices.ContainsFunc(guests, func(name string) bool { return equal(name, a.Name) }) {
+			return false
+		}
+	}
+	for _, name := range artists {
+		if !slices.ContainsFunc(t.Artists, func(a netease.Artist) bool { return equal(name, a.Name) }) {
 			return false
 		}
 	}
 	seconds, err := strconv.ParseInt(c.Duration, 10, 64)
 	return err == nil && seconds > 0 && abs(seconds*1000-t.Duration) < 5000 && strings.HasPrefix(c.ID, "MUSIC_")
+}
+
+// normalizedTitle ignores spacing before brackets, without dropping version or guest credits.
+func normalizedTitle(title string) string {
+	title = strings.NewReplacer("（", "(", "）", ")").Replace(title)
+	return strings.ReplaceAll(strings.Join(strings.Fields(title), " "), " (", "(")
 }
 
 func abs(n int64) int64 {
