@@ -316,7 +316,7 @@ func (r *downloadReader) Read(p []byte) (int, error) {
 }
 
 // A stream decodes a download for package audio, and measures the
-// spectrum of what it decodes, for the visualizers: an MP3's or a FLAC's.
+// spectrum of what it decodes, for the visualizers: MP3, FLAC or Ogg Vorbis.
 type stream interface {
 	audio.Decoder
 	Close() error
@@ -324,12 +324,17 @@ type stream interface {
 	source() (*download, *spectrum)
 }
 
-// openStream opens the song dl fetches, MP3 or FLAC, as its first bytes
+// openStream opens the song dl fetches, MP3, FLAC or Ogg, as its first bytes
 // say. An MP3 says nothing of its length: durationMs is it.
 func openStream(dl *download, durationMs int64) (stream, error) {
 	off := id3Size(dl)
-	if dl.waitFor(off+4) >= off+4 && string(dl.peek(off, 4)) == "fLaC" {
-		return openFLACStream(dl)
+	if dl.waitFor(off+4) >= off+4 {
+		switch string(dl.peek(off, 4)) {
+		case "fLaC":
+			return openFLACStream(dl)
+		case "OggS":
+			return openOggStream(dl, durationMs)
+		}
 	}
 	return openMP3Stream(dl, durationMs)
 }
@@ -350,6 +355,8 @@ func openShared(dl *download, durationMs int64) (stream, error) {
 	case *mp3Stream:
 		s.spec, s.drop = nil, dl.release
 	case *flacStream:
+		s.spec, s.drop = nil, dl.release
+	case *oggStream:
 		s.spec, s.drop = nil, dl.release
 	}
 	return s, nil

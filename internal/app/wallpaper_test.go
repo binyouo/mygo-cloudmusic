@@ -1,6 +1,9 @@
 package app
 
 import (
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +12,36 @@ import (
 	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
 )
+
+// NM_FRAMES saves fullscreen lyrics opened from a closed Now Playing view, which previously stayed transparent.
+func TestWallpaperLyricsFrame(t *testing.T) {
+	dir := os.Getenv("NM_FRAMES")
+	if dir == "" {
+		t.Skip("set NM_FRAMES to inspect fullscreen lyrics")
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: -7, Name: "测试歌曲", LocalPath: "test.mp3", Duration: 200000}})
+	a.pl.SetLyrics(lyrics.Build("[00:00]第一句歌词\n[00:10]第二句歌词\n[00:20]第三句歌词", "", ""))
+	a.pl.Hold(10 * time.Second)
+	a.toggleWallpaper()
+	a.wallpaper.revealed = true
+	tt := ui.NewTester(a.wallpaperView, 1440, 900)
+	tt.Frame()
+	tt.Advance(time.Second)
+	tt.Frame()
+	f, err := os.Create(filepath.Join(dir, "wallpaper-lyrics.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, tt.Image()); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Cmd-T opens the screen saver without navigating the main player, and toggles it off again.
 func TestWallpaperShortcutRestoresView(t *testing.T) {

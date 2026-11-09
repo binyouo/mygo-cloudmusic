@@ -14,6 +14,7 @@ import (
 
 	"github.com/dhowden/tag"
 	gomp3 "github.com/hajimehoshi/go-mp3"
+	"github.com/jfreymuth/oggvorbis"
 	"github.com/mewkiz/flac"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/encoding/unicode"
@@ -23,7 +24,7 @@ import (
 
 func Supported(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".mp3", ".flac":
+	case ".mp3", ".flac", ".ogg":
 		return true
 	}
 	return false
@@ -32,7 +33,7 @@ func Supported(path string) bool {
 func Read(path, artworkDir string) (netease.Track, error) {
 	var track netease.Track
 	if !Supported(path) {
-		return track, fmt.Errorf("支持导入 MP3 和 FLAC")
+		return track, fmt.Errorf("支持导入 MP3、FLAC 和 Ogg")
 	}
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -53,12 +54,12 @@ func Read(path, artworkDir string) (netease.Track, error) {
 	track.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	metadata, tagErr := tag.ReadFrom(file)
 	if tagErr == nil {
-		if metadata.Title() != "" {
-			track.Name = metadata.Title()
+		if title := decodeLegacy(metadata.Title()); title != "" {
+			track.Name = title
 		}
-		track.Artists = []netease.Artist{{Name: metadata.Artist()}}
-		track.Album.Name = metadata.Album()
-		track.LocalLyrics = metadata.Lyrics()
+		track.Artists = []netease.Artist{{Name: decodeLegacy(metadata.Artist())}}
+		track.Album.Name = decodeLegacy(metadata.Album())
+		track.LocalLyrics = decodeLegacy(metadata.Lyrics())
 		if picture := metadata.Picture(); picture != nil {
 			track.Album.PicURL, err = keepArtwork(artworkDir, picture.Data)
 			if err != nil {
@@ -85,6 +86,12 @@ func Read(path, artworkDir string) (netease.Track, error) {
 		return track, err
 	}
 	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ogg":
+		decoder, decodeErr := oggvorbis.NewReader(file)
+		if decodeErr != nil {
+			return track, decodeErr
+		}
+		track.Duration = decoder.Length() * 1000 / int64(decoder.SampleRate())
 	case ".mp3":
 		decoder, decodeErr := gomp3.NewDecoder(file)
 		if decodeErr != nil {

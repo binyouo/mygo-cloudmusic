@@ -13,22 +13,22 @@ import (
 
 var white = ui.RGB(255, 255, 255)
 
-var npSpring = ui.Animation{Spring: ui.SpringOptions{Duration: 450 * time.Millisecond, Bounce: 0.08}}
+// npSpring is how Now Playing grows out of the player bar's cover and
+// shrinks back into it, and how it springs back from a pull too short to
+// close it.
+var npSpring = ui.SpringOptions{Duration: 440 * time.Millisecond}
 
-// npSettle is how long Now Playing takes to come or go, its spring at rest.
-const npSettle = 600 * time.Millisecond
+// npFade is how Now Playing comes and goes while the desktop asks for less
+// motion: it fades, in place.
+var npFade = ui.Animation{Duration: 200 * time.Millisecond, NonMotion: true}
 
 // npState tracks Now Playing opening and closing, and reports whether it is
-// open and whether it has come to rest, open or closed. Call it once a
-// build, before the window's content.
+// open and whether it has come to rest, open or closed, as it last showed.
+// Call it once a build, before the window's content.
 func (a *app) npState(c *ui.Context) (open, settled bool) {
 	open = a.nowPlaying && a.pl.Current() != nil
-	now := c.Now()
 	if open != a.npOpen {
-		a.npOpen, a.npChangedAt = open, now
-		// A build once it is at rest: to stop painting what it covers, or
-		// itself once gone.
-		c.After(npSettle)
+		a.npOpen = open
 		// The window buttons light over its dark backdrop, and as the
 		// theme over the pages (Windows).
 		if a.win != nil {
@@ -39,39 +39,195 @@ func (a *app) npState(c *ui.Context) (open, settled bool) {
 			a.win.SetWindowButtonsTheme(buttons)
 		}
 	}
-	return open, now.Sub(a.npChangedAt) >= npSettle
+	return open, a.npAtRest(open)
 }
 
-// nowPlayingLayer holds Now Playing over the whole window, rising into
-// view as it opens and sinking away as it closes. The layer moves itself,
-// staying on top all the way, rather than leaving as an exit transition
-// would, under the rest of the window: that would show it going over the
-// sidebar's material while the page above it hid it at once. Its pose
-// moves it in frames that only paint, building nothing.
+// npAtRest reports whether Now Playing showed at rest: all open, with
+// nothing pulling on it, or all gone.
+func (a *app) npAtRest(open bool) bool {
+	if open {
+		return a.npT >= 1 && a.npShift == 0 && !a.npHeld
+	}
+	return a.npT <= 0
+}
+
+// nowPlayingLayer holds Now Playing over the whole window. It grows out of
+// the cover in the player bar as it opens, a card that takes the window,
+// the cover flying out of the bar to its place, and shrinks back into it
+// as it closes. Pulled down, it follows the pointer, smaller and rounder
+// the farther it goes, and let go far or fast enough it falls into the
+// bar; otherwise it springs back. The layer stays on top all the way,
+// rather than leaving as an exit transition would, under the rest of the
+// window: that would show it going over the sidebar's material while the
+// page above it hid it at once.
 func (a *app) nowPlayingLayer(c *ui.Context, open, settled bool) {
+	w, h := c.Size()
 	layer := ui.Box(c.Key("now-playing-layer")).Absolute().Top(0).Left(0).Right(0).Bottom(0)
 	if a.wallpaper.active || a.wallpaper.closing && !open {
 		layer.Invisible()
 		return
 	}
-	pose := ui.Pose{Y: 60, Fade: 1}
+	a.npStill = c.Preferences().ReduceMotion
+	spring := npSpring
+	_, dy, held := layer.Dragged()
+	held = held && open
+	if held {
+		a.npPull += dy
+	}
+	if _, vy, ok := layer.DragEnded(); ok && open {
+		if a.npPull > h*0.2 || a.npPull > 24 && vy > 700 {
+			// Let go far enough, or thrown: it falls the rest of the way
+			// as fast as it was thrown.
+			a.nowPlaying, open = false, false
+			spring.Velocity = -max(vy, 0) / h
+		}
+	}
+	if !held {
+		a.npPull = 0
+	}
+	a.npHeld = held
+
+	target := float32(0)
 	if open {
-		pose = ui.Pose{}
+		target = 1
 	}
-	if !a.wallpaper.closing {
-		layer.AnimatePose(pose, npSpring)
+	var t, shift float32
+	if a.npStill {
+		t = layer.AnimateTo("open", target, npFade)
+	} else {
+		t = layer.AnimateTo("open", target, ui.Animation{Spring: spring})
 	}
-	if !open && settled || a.pl.Current() == nil {
+	if held {
+		// Pulled up, it gives less and less.
+		shift = layer.Jump("pull", ui.Rubberband(a.npPull, 0, h, h))
+	} else {
+		shift = layer.AnimateTo("pull", 0, ui.Animation{Spring: npSpring})
+	}
+	fresh, was := a.npT <= 0 && t > 0, a.npT
+	a.npT, a.npShift = t, shift
+	if a.npAtRest(open) != settled {
+		// Another build, for the page under it to come or go, and the
+		// bar's cover with it.
+		c.AnimationFrame()
+	}
+	// Back in the bar, it shows a frame more, its cover over the bar's:
+	// the bar, built before it, hid its own cover in this frame, and
+	// shows it from the next.
+	if t <= 0 && !open && was <= 0 || a.pl.Current() == nil {
 		// Closed: nothing to paint or click.
 		layer.Invisible()
 		a.queueAt, a.wallState.track = -1, 0
 		return
 	}
+	switch {
+	case fresh:
+		// Its first frame lays it out, for what flies to its place to know
+		// where that is; it shows from the next.
+		layer.Opacity(0)
+		c.AnimationFrame()
+	case a.npStill:
+		if t < 1 {
+			layer.Opacity(max(t, 0))
+		}
+	default:
+		a.npCard(layer, t, shift, w, h)
+	}
 	if !open {
 		// On its way out, the window under it takes the clicks.
-		layer.PassThrough()
+		layer.IgnoreInput(true).PassThrough()
 	}
 	layer.Children(func() { a.nowPlayingView(c) })
+}
+
+// npCard clips the layer to the card Now Playing is, t of the way open,
+// from the player bar's cover to the window, and moves it shift down, a
+// little smaller and rounder for it.
+func (a *app) npCard(layer ui.Element, t, shift, w, h float32) {
+	k := 1 - clamp01(t) // how near the bar's cover it is
+	pulled := clamp01(shift / h)
+	if k == 0 && shift == 0 {
+		return
+	}
+	from := a.npFromRect(w, h)
+	radius := npFromRadius*k + 28*clamp01(shift/120)
+	layer.ClipInset(from.Y*k, (w-from.X-from.W)*k, (h-from.Y-from.H)*k, from.X*k, radius)
+	if shift != 0 {
+		s := 1 - 0.12*pulled
+		layer.TransformOrigin(0.5, 0).Scale(s, s).Translate(0, shift)
+	}
+}
+
+// npFromRect is the player bar's cover, in a window w by h, that Now
+// Playing grows out of: where the bar last showed it, or where the bar
+// would, before it has.
+func (a *app) npFromRect(w, h float32) ui.Rect {
+	if a.npFrom.W > 0 {
+		return a.npFrom
+	}
+	return ui.Rect{X: sidebarWidth + 21, Y: h - (playerBarHeight+48)/2, W: 48, H: 48}
+}
+
+// npMorph moves e, a cover of Now Playing, out of the player bar's cover
+// to its place as Now Playing opens, and back into it as it closes: the
+// song in the bar grows into the view.
+func (a *app) npMorph(c *ui.Context, e ui.Element) ui.Element {
+	if a.npT >= 1 || a.npStill || a.wallpaper.active || a.wallpaper.closing {
+		return e
+	}
+	b := e.LayoutBounds()
+	if b.W <= 0 {
+		// Not laid out yet: the next frame places it.
+		c.AnimationFrame()
+		return e.Opacity(0)
+	}
+	w, h := c.Size()
+	from := a.npFromRect(w, h)
+	k := 1 - a.npT
+	s := 1 + (from.W/b.W-1)*k
+	return e.TransformOrigin(0, 0).Scale(s, s).Translate((from.X-b.X)*k, (from.Y-b.Y)*k)
+}
+
+// npBreathe scales e, a cover that breathes, to scale: there as a pose
+// moves it, while Now Playing is open, and at once on its way to or from
+// the bar, coming to its full size as it gets there, the size of the
+// bar's cover it takes the place of.
+func (a *app) npBreathe(e ui.Element, scale float32) {
+	if a.npT < 1 && !a.npStill && !a.wallpaper.active && !a.wallpaper.closing {
+		s := lerp(1, scale, clamp01(a.npT))
+		e.Scale(s, s)
+		return
+	}
+	e.AnimatePose(ui.Pose{Scale: scale}, ui.Animation{Spring: ui.SpringOptions{Duration: 600 * time.Millisecond, Bounce: 0.25}})
+}
+
+// npRadius is the corner radius, r at rest, of a cover size across that
+// npMorph moves: its corners, shrinking with it, stay as round on screen
+// as they are on its way to the bar's cover's, and are that round as it
+// gets there, rather than going sharp and rounding at once as the bar's
+// cover takes its place.
+func (a *app) npRadius(c *ui.Context, r, size float32) float32 {
+	if a.npT >= 1 || a.npStill || a.wallpaper.active || a.wallpaper.closing {
+		return r
+	}
+	w, h := c.Size()
+	k := 1 - clamp01(a.npT)
+	s := 1 + (a.npFromRect(w, h).W/size-1)*k // as npMorph scales it
+	return min(lerp(r, npFromRadius, k)/s, size/2)
+}
+
+// npFromRadius is the corner radius of the player bar's cover.
+const npFromRadius = 8
+
+// npRise fades e in and lifts it into place as Now Playing opens, once the
+// cover is on its way: the nth of the things that do, one after another,
+// going again the other way as it closes.
+func (a *app) npRise(e ui.Element, n int) ui.Element {
+	if a.npT >= 1 || a.npStill || a.wallpaper.active || a.wallpaper.closing {
+		return e
+	}
+	from := 0.3 + 0.07*float32(n)
+	k := smoothstep(from, from+0.4, a.npT)
+	return e.Opacity(k).Translate(0, 24*(1-k))
 }
 
 // nowPlayingView fills the window with what plays: its cover over a slow
@@ -92,7 +248,7 @@ func (a *app) nowPlayingSurface(c *ui.Context, fullscreen bool) {
 		a.prefetchNowPlaying()
 	}
 	progress, duration, mixing := pl.TransitionProgress()
-	a.npVisual.step(c.Now(), tr.ID, art, c.Preferences().ReduceMotion, progress, duration, mixing)
+	a.npVisual.step(c.Now(), tr.ID, art, c.Preferences().ReduceMotion, progress, duration, mixing, a.settings.CoverTransition)
 	// The colors stay the last song's while its cover loads, rather than
 	// going gray between the two.
 	shown := art
@@ -106,12 +262,20 @@ func (a *app) nowPlayingSurface(c *ui.Context, fullscreen bool) {
 	}
 	accent := tint.Mix(white, 0.45)
 
+	bg := ui.Hex("#0b0b0d")
+	if !fullscreen && a.npT < 1 && !a.npStill {
+		bg = bg.Alpha(smoothstep(0, 0.35, a.npT))
+	}
 	root := ui.Box(c.Key("now-playing")).Absolute().Top(0).Left(0).Right(0).Bottom(0).
-		Background(ui.Hex("#0b0b0d")).TextColor(white)
+		Background(bg).TextColor(white)
 	// The pointer is over the view whenever it is in the window.
 	pointerIn := root.Hovered()
 	root.Children(func() {
-		a.backdrop(c, shown, tint)
+		bloom := ui.Box(c.Key("bloom")).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough()
+		if !fullscreen && a.npT < 1 && !a.npStill {
+			bloom.Opacity(smoothstep(0.05, 0.55, a.npT))
+		}
+		bloom.Children(func() { a.backdrop(c, shown, tint) })
 		// Over the backdrop, which is positioned too: positioned elements
 		// paint over those in the flow.
 		content := ui.Column(c).Absolute().Top(0).Left(0).Right(0).Bottom(0)
@@ -171,7 +335,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 		if !fullscreen {
 			top.DragWindow()
 		}
-		top.Children(func() {
+		a.npRise(top, 0).Children(func() {
 			reveal(ui.Box(c.Key("close-reveal")), pointerIn).Children(func() {
 				if iconButton(c.Key("close"), iconDown, 22, white.Alpha(0.7), "关闭").Clicked() {
 					a.closeNowPlaying()
@@ -181,7 +345,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 		if a.npPane == paneStage {
 			// The stage takes the whole view: the lyrics are the show, the
 			// controls a slim bar at the foot.
-			reveal(npTabsRow(c, w), pointerIn).Children(func() {
+			a.npRise(reveal(npTabsRow(c, w), pointerIn), 0).Children(func() {
 				a.paneTabs(c)
 				a.stageStyleButton(c)
 			})
@@ -204,14 +368,24 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 		// the controls.
 		side = max(coverSize, 280)
 		padX := npSideX(w)
-		reveal(npTabsRow(c, w), pointerIn).Children(func() { a.paneTabs(c) })
+		a.npRise(reveal(npTabsRow(c, w), pointerIn), 0).Children(func() { a.paneTabs(c) })
 		ui.Row(c).Grow(1).Padding(0, padX, 44, padX).Gap(72).AlignItems(ui.Stretch).Children(func() {
 			var coverTop float32
 			ui.Column(c).Width(side).Justify(ui.Center).Gap(0).Children(func() {
 				coverTop = ui.Box(c.Key("cover-top")).Height(0).LayoutBounds().Y
-				a.npCover(c, tr, art, coverSize)
+				a.npMorph(c, ui.Box(c.Key("cover-morph")).Size(coverSize, coverSize).AlignSelf(ui.Start)).Children(func() {
+					a.npCover(c, tr, art, coverSize)
+				})
 
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Margin(36, 0, 18, 0).Children(func() {
+				a.npRise(ui.Row(c).Gap(8).AlignItems(ui.Center).Margin(36, 0, 18, 0), 1).Children(func() {
+					// In the gap over the title, their left edge level with
+					// the title's, without reserving a row for them.
+					ui.Row(c.Key("np-switches")).Absolute().Top(-30).Left(0).Gap(6).Children(func() {
+						if a.npPane == paneLyrics {
+							a.lyricClarityButton(c.Key("lyric-clarity"))
+						}
+						a.coverTransitionButton(c.Key("cover-transition"))
+					})
 					metadata := ui.Column(c.Key(tr.ID)).Grow(1).Shrink(1).MinWidth(0).Gap(4)
 					if !c.Preferences().ReduceMotion {
 						metadata.Transition(ui.ElementTransition{Duration: 380 * time.Millisecond, Enter: &ui.Motion{Y: 6}, Exit: &ui.Motion{Y: -4}})
@@ -226,10 +400,10 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 					a.likeButton(c.Key("like"), tr, 22, white.Alpha(0.7))
 					a.songMenu(c.Key("more"), tr, 22, white.Alpha(0.7)).Margin(0, -8, 0, 0)
 				})
-				a.scrubber(c.Key("np-scrub"), &a.npScrub, white.Alpha(0.18), white.Alpha(0.9), 16, accent.Mix(white, 0.35))
+				a.npRise(a.scrubber(c.Key("np-scrub"), &a.npScrub, white.Alpha(0.18), white.Alpha(0.9), 16, accent.Mix(white, 0.35)), 2)
 				// As tall with the quality's badge as without it: the badge goes
 				// while the next song loads, and the column would move with it.
-				ui.Row(c).Height(16).AlignItems(ui.Center).Children(func() {
+				a.npRise(ui.Row(c).Height(16).AlignItems(ui.Center), 2).Children(func() {
 					ui.Text(c, clock(pl.Position())).FontSize(11).FontFeatures("tnum").TextColor(white.Alpha(0.5))
 					ui.Spacer(c)
 					qualityBadge(c, pl.Stream())
@@ -243,16 +417,16 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 				if pl.Err() != "" {
 					ui.Text(c, pl.Err()).FontSize(12).LineHeight(1.35).TextColor(white.Alpha(0.75)).MaxLines(3).Margin(8, 0, 0, 0)
 				}
-				ui.Box(c).Margin(14, 0, 18, 0).Children(func() {
+				a.npRise(ui.Box(c).Margin(14, 0, 18, 0), 3).Children(func() {
 					a.transport(c, white, white.Alpha(0.45), accent, 28)
 				})
-				ui.Row(c).Justify(ui.Center).Children(func() {
+				a.npRise(ui.Row(c).Justify(ui.Center), 4).Children(func() {
 					a.volumeSlider(c, white.Alpha(0.7), white.Alpha(0.18), 180)
 				})
 			})
 
 			pane := ui.Column(c.Key("pane")).Grow(1).Basis(0).MinWidth(0)
-			pane.Children(func() {
+			a.npRise(pane, 2).Children(func() {
 				// The pane starts level with the cover beside it, but below the
 				// tabs, which start level with the pane's top: they come and go
 				// with the pointer, so they sit out of the flow, never over it.
@@ -421,23 +595,27 @@ func qualityBadge(c *ui.Context, st *netease.Stream) {
 func (a *app) stageBar(c *ui.Context, tr *netease.Track, art *artwork, accent ui.Color) {
 	pl := a.pl
 	ui.Column(c).Padding(0, 48, 28, 48).Gap(10).Children(func() {
-		a.scrubber(c.Key("stage-scrub"), &a.npScrub, white.Alpha(0.18), white.Alpha(0.9), 14, accent.Mix(white, 0.35))
+		a.npRise(a.scrubber(c.Key("stage-scrub"), &a.npScrub, white.Alpha(0.18), white.Alpha(0.9), 14, accent.Mix(white, 0.35)), 2)
 		ui.Row(c).Gap(14).AlignItems(ui.Center).Children(func() {
 			ui.Row(c).Grow(1).Basis(0).MinWidth(0).Gap(12).AlignItems(ui.Center).Children(func() {
 				if bmp := bitmap(art); bmp != nil {
-					cov := ui.Box(c.Key(tr.ID)).Size(44, 44)
+					cov := a.npMorph(c, ui.Box(c.Key(tr.ID)).Size(44, 44))
 					in := artIn(cov, bmp)
-					cov.Children(func() { artImage(c, bmp, 8, in) })
+					cov.Children(func() { artImage(c, bmp, a.npRadius(c, 8, 44), in) })
 				}
-				ui.Column(c).Shrink(1).MinWidth(0).Gap(2).Children(func() {
-					ui.Text(c, tr.Name).FontSize(14).FontWeight(700).SingleLine()
-					a.artistLinks(c, tr, white.Alpha(0.55), white).FontSize(12).SingleLine()
+				// All but the cover, which flies to the bar's, fade as the
+				// rest of Now Playing does.
+				a.npRise(ui.Row(c).Shrink(1).MinWidth(0).Gap(12).AlignItems(ui.Center), 3).Children(func() {
+					ui.Column(c).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+						ui.Text(c, tr.Name).FontSize(14).FontWeight(700).SingleLine()
+						a.artistLinks(c, tr, white.Alpha(0.55), white).FontSize(12).SingleLine()
+					})
+					a.likeButton(c.Key("like"), tr, 17, white.Alpha(0.6))
+					a.songMenu(c.Key("more"), tr, 17, white.Alpha(0.6)).Margin(0, 0, 0, -10)
 				})
-				a.likeButton(c.Key("like"), tr, 17, white.Alpha(0.6))
-				a.songMenu(c.Key("more"), tr, 17, white.Alpha(0.6)).Margin(0, 0, 0, -10)
 			})
-			a.transport(c, white, white.Alpha(0.45), white, 22)
-			ui.Row(c).Grow(1).Basis(0).MinWidth(0).Justify(ui.End).Children(func() {
+			a.npRise(ui.Row(c), 3).Children(func() { a.transport(c, white, white.Alpha(0.45), white, 22) })
+			a.npRise(ui.Row(c).Grow(1).Basis(0).MinWidth(0).Justify(ui.End), 4).Children(func() {
 				ui.Text(c, clock(pl.Position())+" / "+clock(pl.Duration())).FontSize(11.5).FontFeatures("tnum").TextColor(white.Alpha(0.5))
 			})
 		})
@@ -476,6 +654,56 @@ type lyricPaneState struct {
 	lyricGlide  lyricGlide
 	lyricAt     int
 	lyricTrack  int64
+}
+
+// lyricClarityButton toggles the blur of the lyrics not sung, floating
+// over the title as a capsule that says which look they have.
+func (a *app) lyricClarityButton(c *ui.Context) ui.Element {
+	blur := a.settings.LyricsBlur
+	label := "清晰"
+	if blur {
+		label = "模糊"
+	}
+	button := ui.ButtonBase(c).Bind(&a.lyricBlurSwitch).Padding(4, 10).Radius(999).
+		Role(ui.RoleSwitch).Checked(blur).Label("歌词模糊").Tooltip("歌词模糊")
+	bg, fg := white.Alpha(0.07), white.Alpha(0.6)
+	if button.Hovered() {
+		bg, fg = white.Alpha(0.14), white.Alpha(0.9)
+	}
+	button.Background(button.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
+	button.Children(func() {
+		ui.Text(c, label).FontSize(11.5).FontWeight(600).TextColor(fg)
+	})
+	button.OnClick(func() {
+		a.settings.LyricsBlur = !a.settings.LyricsBlur
+		a.settings.save()
+	})
+	return button
+}
+
+// coverTransitionButton toggles the dissolve from one song's cover into the
+// next's, beside the lyric clarity switch.
+func (a *app) coverTransitionButton(c *ui.Context) ui.Element {
+	on := a.settings.CoverTransition
+	label := "硬切"
+	if on {
+		label = "淡入"
+	}
+	button := ui.ButtonBase(c).Bind(&a.coverTransitionSwitch).Padding(4, 10).Radius(999).
+		Role(ui.RoleSwitch).Checked(on).Label("封面过渡").Tooltip("封面过渡")
+	bg, fg := white.Alpha(0.07), white.Alpha(0.6)
+	if button.Hovered() {
+		bg, fg = white.Alpha(0.14), white.Alpha(0.9)
+	}
+	button.Background(button.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
+	button.Children(func() {
+		ui.Text(c, label).FontSize(11.5).FontWeight(600).TextColor(fg)
+	})
+	button.OnClick(func() {
+		a.settings.CoverTransition = !a.settings.CoverTransition
+		a.settings.save()
+	})
+	return button
 }
 
 func (a *app) lyricsPane(c *ui.Context, tr *netease.Track, h float32) {
@@ -548,6 +776,7 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 		ui.Box(c.Key("lyric-bottom-fade")).Absolute().Bottom(0).Left(0).Right(0).Height(70).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
 			a.backdropOver(p, ui.Rect{W: w, H: h}, r, func(t float32) float32 { return smoothstep(0, 1, t) })
 		})
+
 	}
 }
 
@@ -601,7 +830,7 @@ func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, 
 					// The line fades as a pose, in frames that only paint, rather
 					// than building the view at the display's rate as it does.
 					text := ui.Column(c).AlignItems(ui.Start).Gap(6)
-					if st.depth && !on && !line.Hovered() && !c.Preferences().ReduceMotion {
+					if st.depth && a.settings.LyricsBlur && !on && !line.Hovered() && !c.Preferences().ReduceMotion {
 						distance := i - cur
 						if distance < 0 {
 							distance = -distance

@@ -5,11 +5,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
-	"net/http/cookiejar"
-	"strings"
 	"testing"
 	"time"
 )
@@ -59,70 +55,6 @@ func TestWeapiSealsLikeTheWebsite(t *testing.T) {
 	var got map[string]any
 	if err := json.Unmarshal(unseal(t, inner, weapiPresetKey), &got); err != nil || got["hello"] != "世界" {
 		t.Fatalf("opened %v, %v", got, err)
-	}
-}
-
-// A scrobble is a play log posted to feedback/weblog: the song, how long it
-// played, and the session's CSRF, in the shape NetEase records plays with.
-func TestScrobblePostsAPlay(t *testing.T) {
-	oldClient := httpClient
-	defer func() { httpClient = oldClient }()
-	oldSecret := weapiSecret
-	defer func() { weapiSecret = oldSecret }()
-	weapiSecret = func() string { return "abcdefghijklmnop" }
-	deviceOnce.Do(func() { deviceID = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123" })
-
-	for _, tc := range []struct {
-		code int
-		fail bool
-	}{{200, false}, {400, true}} {
-		jar, _ := cookiejar.New(nil)
-		jar.SetCookies(siteURL, []*http.Cookie{
-			{Name: "MUSIC_U", Value: "session", Path: "/"},
-			{Name: "__csrf", Value: "tok", Path: "/"},
-		})
-		var sent bool
-		httpClient = &http.Client{Jar: jar, Transport: weapiTransport(func(r *http.Request) (*http.Response, error) {
-			sent = true
-			if r.Method != http.MethodPost || r.URL.Path != "/weapi/feedback/weblog" {
-				t.Fatalf("requested %s %s", r.Method, r.URL.Path)
-			}
-			if !strings.Contains(r.Header.Get("Cookie"), "MUSIC_U=session") {
-				t.Fatalf("no session cookie: %q", r.Header.Get("Cookie"))
-			}
-			if err := r.ParseForm(); err != nil {
-				t.Fatal(err)
-			}
-			var data map[string]any
-			if err := json.Unmarshal(unseal(t, string(unseal(t, r.Form.Get("params"), "abcdefghijklmnop")), weapiPresetKey), &data); err != nil {
-				t.Fatalf("opened request: %v", err)
-			}
-			if data["csrf_token"] != "tok" || data["e_r"] != false {
-				t.Fatalf("csrf %v, e_r %v", data["csrf_token"], data["e_r"])
-			}
-			logs, ok := data["logs"].(string)
-			if !ok {
-				t.Fatalf("logs is %T", data["logs"])
-			}
-			var list []map[string]any
-			if err := json.Unmarshal([]byte(logs), &list); err != nil || len(list) != 1 || list[0]["action"] != "play" {
-				t.Fatalf("logs %q: %v", logs, err)
-			}
-			j, ok := list[0]["json"].(map[string]any)
-			if !ok {
-				t.Fatalf("log json is %T", list[0]["json"])
-			}
-			if j["id"] != float64(42) || j["sourceId"] != float64(42) || j["time"] != float64(185) ||
-				j["end"] != "playend" || j["type"] != "song" || j["source"] != "list" || j["mainsite"] != float64(1) ||
-				j["download"] != float64(0) || j["wifi"] != float64(0) || j["content"] != "" {
-				t.Fatalf("play %v", j)
-			}
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(fmt.Sprintf("{\"code\":%d}", tc.code))), Header: make(http.Header)}, nil
-		})}
-		err := Scrobble(42, 0, 185*time.Second, "")
-		if !sent || (err != nil) != tc.fail {
-			t.Fatalf("code %d: scrobbled, err %v", tc.code, err)
-		}
 	}
 }
 

@@ -41,9 +41,13 @@ func TestArtistNameOpensTheirPage(t *testing.T) {
 
 	tt.Advance(time.Second)
 	tt.Frame()
-	if err := tt.Click("丙"); err != nil {
-		t.Fatal(err)
+	// A single artist also labels its rich-text parent; clicking the visible
+	// text directly exercises the link rather than Tester's parent-target check.
+	link, ok := tt.Find("丙")
+	if !ok {
+		t.Fatal("no artist link")
 	}
+	tt.ClickAt(link.X+link.W/2, link.Y+link.H/2)
 	tt.Frame()
 	if a.route != (route{page: pageArtist, id: 13}) {
 		t.Fatalf("a row's artist opened %+v", a.route)

@@ -21,7 +21,7 @@ type nowPlayingVisual struct {
 	followedMix     bool
 }
 
-func (v *nowPlayingVisual) step(now time.Time, track int64, art *artwork, reduced bool, audio float32, duration time.Duration, mixing bool) {
+func (v *nowPlayingVisual) step(now time.Time, track int64, art *artwork, reduced bool, audio float32, duration time.Duration, mixing bool, fade bool) {
 	v.reduced = reduced
 	if v.track != track {
 		v.track, v.trackAt = track, now
@@ -43,6 +43,10 @@ func (v *nowPlayingVisual) step(now time.Time, track int64, art *artwork, reduce
 		}
 		if reduced {
 			v.duration = 160 * time.Millisecond
+		}
+		if !fade {
+			// No dissolve: the new cover shows at once.
+			v.before, v.initial, v.alpha = nil, false, 1
 		}
 	}
 	v.opacity(now, audio, mixing)

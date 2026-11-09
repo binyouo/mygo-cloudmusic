@@ -36,6 +36,13 @@ func (a *app) loadLocalLibrary() {
 		a.localError = "本地音乐库读取失败：" + err.Error()
 	}
 	a.pl.SetLocalLibrary(a.localTracks)
+	if a.settings.LocalTagsVersion < 1 && len(a.localTracks) > 0 {
+		paths := make([]string, 0, len(a.localTracks))
+		for _, track := range a.localTracks {
+			paths = append(paths, track.LocalPath)
+		}
+		a.readLocalFiles(paths, true)
+	}
 }
 
 func saveLocalLibrary(path string, tracks []netease.Track) error {
@@ -60,7 +67,7 @@ func (a *app) chooseLocalAudio() {
 	go func() {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 			Parent: a.win, Title: "导入本地音乐", Multiple: true,
-			Filters: []mygo.FileFilter{{Name: "音乐与歌词", Extensions: []string{"mp3", "flac", "lrc"}}},
+			Filters: []mygo.FileFilter{{Name: "音乐与歌词", Extensions: []string{"mp3", "flac", "ogg", "lrc"}}},
 		})
 		a.post(func() {
 			if err != nil {
@@ -169,6 +176,11 @@ func readLocalImports(paths []string, existing []netease.Track, currentPath, art
 }
 
 func (a *app) importLocalFiles(paths []string) {
+	a.readLocalFiles(paths, false)
+}
+
+// readLocalFiles imports explicit files or refreshes stored tags in the background.
+func (a *app) readLocalFiles(paths []string, refresh bool) {
 	if a.localImporting {
 		a.toast = "正在导入，请稍候再添加文件"
 		return
@@ -206,13 +218,16 @@ func (a *app) importLocalFiles(paths []string) {
 				a.pl.SetLocalLibrary(a.localTracks)
 				a.lyricAt, a.lyricTrack = -1, 0
 				a.localError = strings.Join(result.failures, "\n")
-				if result.lyrics > 0 {
+				if refresh {
+					a.settings.LocalTagsVersion = 1
+					a.settings.save()
+				} else if result.lyrics > 0 {
 					a.toast = fmt.Sprintf("已更新 %d 首歌曲的歌词", result.lyrics)
 				} else if result.audio > 0 {
 					a.toast = fmt.Sprintf("已导入 %d 首歌曲", result.audio)
 				}
 			}
-			if result.audio > 0 || len(result.failures) > 0 || saveErr != nil {
+			if !refresh && (result.audio > 0 || len(result.failures) > 0 || saveErr != nil) {
 				a.open(route{page: pageLocal})
 			}
 		})
@@ -221,7 +236,7 @@ func (a *app) importLocalFiles(paths []string) {
 
 func (a *app) localPage(c *ui.Context) {
 	header := func(c *ui.Context) {
-		a.heading(c, "本地音乐", fmt.Sprintf("%d 首 · 支持 MP3、FLAC、内嵌封面与同名 LRC", len(a.localTracks)))
+		a.heading(c, "本地音乐", fmt.Sprintf("%d 首 · 支持 MP3、FLAC、Ogg、内嵌封面与同名 LRC", len(a.localTracks)))
 		label := "导入音乐或歌词…"
 		if a.localImporting {
 			label = "正在导入…"

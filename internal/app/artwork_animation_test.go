@@ -72,12 +72,12 @@ func TestNowPlayingArtworkReadiness(t *testing.T) {
 	var v nowPlayingVisual
 	a, c := &artwork{}, &artwork{}
 	now := time.Unix(1, 0)
-	v.step(now, 1, a, false, 1, 0, false)
-	v.step(now.Add(time.Second), 2, nil, false, 1, 0, false)
+	v.step(now, 1, a, false, 1, 0, false, true)
+	v.step(now.Add(time.Second), 2, nil, false, 1, 0, false, true)
 	if v.current != a {
 		t.Fatal("discarded the cover before its replacement loaded")
 	}
-	v.step(now.Add(2*time.Second), 3, c, false, 1, 0, false)
+	v.step(now.Add(2*time.Second), 3, c, false, 1, 0, false, true)
 	if v.current != c || v.before != a {
 		t.Fatal("rapid skip lost its ready cover")
 	}
@@ -88,5 +88,17 @@ func TestNowPlayingArtworkReadiness(t *testing.T) {
 	v.opacity(now.Add(4*time.Second), 1, false)
 	if v.before != nil {
 		t.Fatal("retained a finished transition")
+	}
+}
+
+// With the cover transition off, a new song's cover shows at once rather than dissolving in.
+func TestNowPlayingArtworkCuts(t *testing.T) {
+	var v nowPlayingVisual
+	a, c := &artwork{}, &artwork{}
+	now := time.Unix(1, 0)
+	v.step(now, 1, a, false, 1, 0, false, true)
+	v.step(now.Add(time.Second), 2, c, false, 1, 0, false, false)
+	if v.current != c || v.before != nil || v.initial || v.alpha != 1 {
+		t.Fatal("the cover did not cut to the new song")
 	}
 }

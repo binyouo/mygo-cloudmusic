@@ -80,16 +80,20 @@ func device() string {
 // data, and decodes the JSON it answers into out. The cookies it sets, the
 // session's among them, go in the jar.
 func eapiPost(path string, data map[string]any, out any) error {
+	return eapiPostAs(path, data, out, eapiDomain, eapiClient, eapiUA)
+}
+
+func eapiPostAs(path string, data map[string]any, out any, domain string, client map[string]string, userAgent string) error {
 	header := map[string]string{
-		"osver":       eapiClient["osver"],
+		"osver":       client["osver"],
 		"deviceId":    device(),
-		"os":          eapiClient["os"],
-		"appver":      eapiClient["appver"],
+		"os":          client["os"],
+		"appver":      client["appver"],
 		"versioncode": "140",
 		"mobilename":  "",
 		"buildver":    fmt.Sprint(time.Now().Unix()),
 		"resolution":  "1920x1080",
-		"channel":     eapiClient["channel"],
+		"channel":     client["channel"],
 		"requestId":   fmt.Sprintf("%d_%04d", time.Now().UnixMilli(), time.Now().Nanosecond()%1000),
 		"__csrf":      "",
 	}
@@ -107,7 +111,7 @@ func eapiPost(path string, data map[string]any, out any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", eapiDomain+"/eapi/"+strings.TrimPrefix(path, "/api/"),
+	req, err := http.NewRequest("POST", domain+"/eapi/"+strings.TrimPrefix(path, "/api/"),
 		strings.NewReader(url.Values{"params": {params}}.Encode()))
 	if err != nil {
 		return err
@@ -117,7 +121,7 @@ func eapiPost(path string, data map[string]any, out any) error {
 		cookie = append(cookie, url.QueryEscape(k)+"="+url.QueryEscape(v))
 	}
 	req.Header.Set("Cookie", strings.Join(cookie, "; "))
-	req.Header.Set("User-Agent", eapiUA)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// Sent by hand: the jar would add the site's cookies to these.
 	res, err := (&http.Client{Timeout: httpClient.Timeout}).Do(req)

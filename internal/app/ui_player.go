@@ -377,7 +377,14 @@ func (a *app) playerBar(c *ui.Context) {
 			info := ui.ButtonBase(c.Key("info")).Gap(12).AlignItems(ui.Center).FocusRing(false).Shrink(1).MinWidth(0).Label("打开正在播放")
 			hovered := info.Hovered()
 			info.Children(func() {
-				ui.Box(c).Size(48, 48).Shrink(0).Children(func() {
+				mini := ui.Box(c.Key("mini-cover")).Size(48, 48).Shrink(0)
+				if b := mini.LayoutBounds(); b.W > 0 {
+					a.npFrom = b
+				}
+				if a.npT > 0 && !a.npStill {
+					mini.Opacity(0)
+				}
+				mini.Children(func() {
 					a.cover(c, tr.Album.PicURL, 120, 48, 8).Shadow(0, 2, 8, 0, p.cardShade)
 					if hovered {
 						ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Radius(8).Center().

@@ -79,8 +79,10 @@ func (a *app) loadSubscriptions(d *userData) {
 		return
 	}
 	d.subsLoading = 2
+	// Snapshot request dependencies before starting asynchronous work.
+	artists, podcasts := followedArtists, subscribedPodcasts
 	go func() {
-		ars, err := followedArtists()
+		ars, err := artists()
 		a.post(func() {
 			d.subsLoading--
 			if err == nil {
@@ -89,7 +91,7 @@ func (a *app) loadSubscriptions(d *userData) {
 		})
 	}()
 	go func() {
-		pods, err := subscribedPodcasts()
+		pods, err := podcasts()
 		a.post(func() {
 			d.subsLoading--
 			if err == nil {

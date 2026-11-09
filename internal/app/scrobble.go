@@ -16,9 +16,10 @@ import (
 var reportPlay = func(id int64, played time.Duration) error {
 	return netease.Scrobble(id, id, played, "list")
 }
+var reportPlayStart = func(id int64) error { return netease.ScrobbleStart(id, id) }
 
-// scrobbleMin is how much of a song counts as heard: NetEase records one
-// played over 30 seconds, or half of a shorter one.
+// scrobbleMin is the app's threshold for reporting a play, or half the
+// duration of a song shorter than a minute.
 const scrobbleMin = 30 * time.Second
 
 // scrobbleLength is how long a song of length d must play to be recorded.
@@ -38,14 +39,16 @@ const scrobbleStep = 10 * time.Second
 // another, or the app quits.
 type scrobbler struct {
 	report func(id int64, played time.Duration)
+	start  func(id int64)
 
-	id     int64
-	length time.Duration
-	heard  time.Duration // heard before the stretch now playing
-	start  time.Duration // where the stretch now playing began
-	far    time.Duration // the furthest of the stretch now playing
-	play   bool          // the stretch now playing is playing
-	sent   bool          // the song was reported
+	id      int64
+	length  time.Duration
+	heard   time.Duration // heard before the stretch now playing
+	from    time.Duration // where the stretch now playing began
+	far     time.Duration // the furthest of the stretch now playing
+	play    bool          // the stretch now playing is playing
+	sent    bool          // the song was reported
+	started bool          // the song's start was reported
 }
 
 // note follows what plays now: t, at pos, playing or not, and reports the
@@ -55,29 +58,35 @@ func (s *scrobbler) note(t *netease.Track, pos time.Duration, playing bool) {
 		s.stop()
 		return
 	}
-	if t.ID != s.id || pos == 0 && s.heard+max(0, s.far-s.start) > 0 {
+	if t.ID != s.id || pos == 0 && s.heard+max(0, s.far-s.from) > 0 {
 		// Another song, or the same one from its beginning again.
 		s.stop()
 		s.id, s.length = t.ID, t.Length()
 	}
 	if playing {
+		if !s.started {
+			s.started = true
+			if s.start != nil {
+				s.start(s.id)
+			}
+		}
 		switch {
 		case !s.play:
-			s.play, s.start, s.far = true, pos, pos
+			s.play, s.from, s.far = true, pos, pos
 		case pos > s.far && pos-s.far > scrobbleStep:
 			// A seek forward: what was skipped is not heard.
-			s.heard += s.far - s.start
-			s.start, s.far = pos, pos
+			s.heard += s.far - s.from
+			s.from, s.far = pos, pos
 		case pos > s.far:
 			s.far = pos
 		case pos < s.far:
 			// A seek back: hear on from there.
-			s.heard += s.far - s.start
-			s.start, s.far = pos, pos
+			s.heard += s.far - s.from
+			s.from, s.far = pos, pos
 		}
 	} else if s.play {
 		s.play = false
-		s.heard += s.far - s.start
+		s.heard += s.far - s.from
 	}
 	s.reportIfEnough()
 }
@@ -92,7 +101,7 @@ func scrobbled(t *netease.Track) bool {
 func (s *scrobbler) progress() time.Duration {
 	heard := s.heard
 	if s.play {
-		heard += s.far - s.start
+		heard += s.far - s.from
 	}
 	return heard
 }
@@ -115,7 +124,7 @@ func (s *scrobbler) reportIfEnough() {
 // stop settles the song followed, reporting it if it was heard enough.
 func (s *scrobbler) stop() {
 	s.reportIfEnough()
-	*s = scrobbler{report: s.report}
+	*s = scrobbler{report: s.report, start: s.start}
 }
 
 // scrobbleEvery is how often what plays is noted, so a song skipped or
@@ -157,4 +166,8 @@ var scrobbleAfter = func(d time.Duration, fn func()) {
 // postPlay reports a song from a goroutine: NetEase answers by network.
 func (a *app) postPlay(id int64, played time.Duration) {
 	go func() { _ = reportPlay(id, played) }()
+}
+
+func (a *app) postPlayStart(id int64) {
+	go func() { _ = reportPlayStart(id) }()
 }

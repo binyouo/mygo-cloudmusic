@@ -849,18 +849,15 @@ func (p *Player) open(t netease.Track, level string) (*netease.Stream, stream, e
 		kind, quality := "mp3", "standard"
 		if strings.EqualFold(filepath.Ext(t.LocalPath), ".flac") {
 			kind, quality = "flac", "lossless"
+		} else if strings.EqualFold(filepath.Ext(t.LocalPath), ".ogg") {
+			kind = "ogg"
 		}
 		return &netease.Stream{Size: stat.Size(), Type: kind, Level: quality}, decoded, nil
 	}
 	dl, info, ok := p.Cache.lookup(t.ID, level)
 	if !ok {
 		var err error
-		info, err = resolveSong(t.ID, level)
-		tracePlayback("resolve", t.ID, err)
-		if errors.Is(err, netease.ErrUnavailable) && t.ProgramID == 0 {
-			info, err = resolveAlternative(t)
-			tracePlayback("alternative", t.ID, err)
-		}
+		info, err = resolveTrack(t, level)
 		if err != nil {
 			return nil, nil, err
 		}

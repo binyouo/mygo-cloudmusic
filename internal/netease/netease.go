@@ -486,30 +486,46 @@ func SongURL(id int64, level string) (*Stream, error) {
 	return &s, nil
 }
 
+type lyricResponse struct {
+	apiError
+	Lrc struct {
+		Lyric string `json:"lyric"`
+	} `json:"lrc"`
+	Tlyric struct {
+		Lyric string `json:"lyric"`
+	} `json:"tlyric"`
+	Yrc struct {
+		Lyric string `json:"lyric"`
+	} `json:"yrc"`
+}
+
 // Lyrics returns a track's timed lyrics, their translation if any, and
 // its word-timed lyrics (YRC) where NetEase has them, which only the
 // desktop client's API serves.
 func Lyrics(id int64) (lrc, translation, yrc string, err error) {
-	var res struct {
-		Lrc struct {
-			Lyric string `json:"lyric"`
-		} `json:"lrc"`
-		Tlyric struct {
-			Lyric string `json:"lyric"`
-		} `json:"tlyric"`
-	}
+	return fetchLyricResponses(id, get, eapiPost)
+}
+
+func fetchLyricResponses(id int64, web func(string, url.Values, any) error, desktop func(string, map[string]any, any) error) (lrc, translation, yrc string, err error) {
+	var res, words lyricResponse
 	q := url.Values{"id": {strconv.FormatInt(id, 10)}, "lv": {"1"}, "tv": {"-1"}}
-	if err = get("/api/song/lyric", q, &res); err != nil {
-		return "", "", "", err
-	}
-	var words struct {
-		Yrc struct {
-			Lyric string `json:"lyric"`
-		} `json:"yrc"`
-	}
+	webErr := web("/api/song/lyric", q, &res)
 	data := map[string]any{"id": strconv.FormatInt(id, 10), "cp": false, "tv": 0, "lv": 0, "rv": 0, "kv": 0, "yv": 0, "ytv": 0, "yrv": 0}
-	if eapiPost("/api/song/lyric/v1", data, &words) == nil {
+	desktopErr := desktop("/api/song/lyric/v1", data, &words)
+	if desktopErr == nil && words.Code != 200 {
+		desktopErr = fmt.Errorf("netease: /api/song/lyric/v1: code %d %s", words.Code, words.Message)
+	}
+	if webErr != nil && desktopErr != nil {
+		return "", "", "", errors.Join(webErr, desktopErr)
+	}
+	if desktopErr == nil {
 		yrc = words.Yrc.Lyric
+		if res.Lrc.Lyric == "" {
+			res.Lrc.Lyric = words.Lrc.Lyric
+		}
+		if res.Tlyric.Lyric == "" {
+			res.Tlyric.Lyric = words.Tlyric.Lyric
+		}
 	}
 	return res.Lrc.Lyric, res.Tlyric.Lyric, yrc, nil
 }

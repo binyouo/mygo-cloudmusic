@@ -21,6 +21,25 @@ func newScrobbler(got *[]recorded) *scrobbler {
 	return s
 }
 
+// Recently played is reported once playback starts, including after a track change, but not on pause or resume.
+func TestScrobbleStartsOnlyOnPlayback(t *testing.T) {
+	var started []int64
+	s := &scrobbler{start: func(id int64) { started = append(started, id) }}
+	a, b := &netease.Track{ID: 7, Duration: 200000}, &netease.Track{ID: 8, Duration: 200000}
+	s.note(a, 0, false)
+	if len(started) != 0 {
+		t.Fatal("reported a paused song")
+	}
+	s.note(a, 0, true)
+	s.note(a, 5*time.Second, true)
+	s.note(a, 5*time.Second, false)
+	s.note(a, 5*time.Second, true)
+	s.note(b, 0, true)
+	if len(started) != 2 || started[0] != 7 || started[1] != 8 {
+		t.Fatalf("starts %v", started)
+	}
+}
+
 // A song is reported once it has played 30 seconds, and once only.
 func TestScrobblesASongOnceHeardEnough(t *testing.T) {
 	var got []recorded

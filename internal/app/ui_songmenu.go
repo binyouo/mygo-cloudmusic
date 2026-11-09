@@ -30,6 +30,9 @@ func (a *app) songItems(tr *netease.Track, pid int64) func(m *ui.Menu) {
 			a.toast = "已添加到下一首播放"
 		}
 		m.Separator()
+		if a.canDownload(tr) && m.Item("下载").Chosen() {
+			a.download(*tr)
+		}
 		if tr.ProgramID != 0 {
 			a.programItems(m, tr)
 			return

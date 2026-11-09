@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -91,6 +93,40 @@ func TestSwipeCover(t *testing.T) {
 	tt.Frame()
 	if id := a.pl.Current().ID; id != 3 {
 		t.Errorf("swiped left: playing %d", id)
+	}
+}
+
+// The switch on the cover's corner turns the dissolve between songs' covers on and off, keeps the choice, and leaves Space to itself.
+func TestCoverTransitionSwitch(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.settings.path = filepath.Join(t.TempDir(), "settings.json")
+	a.pl.Cue([]netease.Track{{ID: 1, Name: "歌曲", Duration: 200000}})
+	a.nowPlaying = true
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	tt.Advance(time.Second)
+	tt.Frame()
+	for _, want := range []bool{false, true} {
+		if !want {
+			if err := tt.Click("封面过渡"); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			playing := a.pl.Playing()
+			tt.Key(0, ui.KeySpace)
+			if a.pl.Playing() != playing {
+				t.Fatal("Space on the switch toggled playback")
+			}
+		}
+		tt.Frame()
+		data, err := os.ReadFile(a.settings.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.settings.CoverTransition != want || parseSettings(data).CoverTransition != want {
+			t.Fatalf("cover transition did not persist as %v", want)
+		}
 	}
 }
 

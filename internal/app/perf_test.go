@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -10,6 +11,85 @@ import (
 	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
 )
+
+// BenchmarkAccountMenuOpen measures the avatar menu's first frame and any follow-up frames on an otherwise idle page.
+func BenchmarkAccountMenuOpen(b *testing.B) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.profile = &netease.Profile{UserID: 1, Nickname: "菜单测试"}
+	a.route = route{page: pageLocal}
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	tt.Advance(time.Second)
+	tt.Frame()
+	frames := 0
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := tt.Click("菜单测试"); err != nil {
+			b.Fatal(err)
+		}
+		tt.Frame()
+		for range 60 {
+			tt.Advance(time.Second / 60)
+			if tt.FramePending() {
+				frames++
+				tt.Frame()
+			}
+		}
+		b.StopTimer()
+		tt.Key(0, ui.KeyEscape)
+		tt.Advance(time.Second)
+		tt.Frame()
+		b.StartTimer()
+	}
+	b.ReportMetric(float64(frames)/float64(b.N), "followup_frames/open")
+}
+
+// Opening the avatar menu should settle immediately; its spring transition previously requested about 48 extra frames per click.
+func TestAccountMenuFrameBudget(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.profile = &netease.Profile{UserID: 1, Nickname: "菜单测试"}
+	a.route = route{page: pageLocal}
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	tt.Advance(time.Second)
+	tt.Frame()
+	if err := tt.Click("菜单测试"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	frames := 0
+	for range 60 {
+		tt.Advance(time.Second / 60)
+		if tt.FramePending() {
+			frames++
+			tt.Frame()
+		}
+	}
+	if frames > 2 {
+		t.Fatalf("opening the avatar menu requested %d extra frames", frames)
+	}
+}
+
+// The daily card's grooves change only about three times a second, rather than redrawing its backdrop for every record frame.
+func TestDailyRippleBudget(t *testing.T) {
+	start := time.Unix(0, 0)
+	s := spinState{last: start, speed: 1}
+	changes, before := 0, float64(0)
+	for frame := 1; frame <= 360; frame++ {
+		s.step(start.Add(time.Duration(frame)*time.Second/60), 1)
+		at := math.Floor(s.ripple)
+		if at != before {
+			changes++
+		}
+		before = at
+	}
+	if changes > 19 || changes < 17 {
+		t.Fatalf("daily backdrop moved %d times in six seconds", changes)
+	}
+}
 
 // A ten-thousand-song playlist and its cached search stay idle after their initial layout.
 func TestPlaylistSearchFrameBudget(t *testing.T) {

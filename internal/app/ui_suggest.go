@@ -93,17 +93,39 @@ func suggestionList(res netease.Suggestions) []suggestion {
 // before.
 func (a *app) searchField(c *ui.Context) {
 	p := a.pal
-	field := ui.Row(c).Height(32).PaddingX(10).Gap(7).Radius(9).AlignItems(ui.Center).Margin(0, 0, 14, 0)
+	field := ui.Row(c).Height(32).Radius(9).AlignItems(ui.Stretch).Margin(0, 0, 14, 0)
 	if c.Focused(a.searchBox) {
 		field.Background(p.bg).Shadow(0, 0, 0, 3, p.accent.Alpha(0.25)).Border(1, p.accent.Alpha(0.6))
 	} else {
 		field.Background(p.hover).Border(1, p.hairline)
 	}
 	field.Children(func() {
-		ui.Icon(c, iconSearch).Size(14, 14).TextColor(p.muted)
+		clearable := a.query != "" || a.searched.query != ""
+		end := float32(10)
+		if clearable {
+			end = 28
+		}
 		cb := ui.ComboboxBase(c.Key("search"), &a.query)
-		in := cb.Input.Bind(&a.searchBox).Grow(1).MinWidth(0).
+		in := cb.Input.Bind(&a.searchBox).Grow(1).MinWidth(0).PaddingStart(31).PaddingEnd(end).
 			Placeholder("搜索歌曲、歌手、播客").FontSize(13).Label("搜索")
+		ui.Icon(c, iconSearch).Size(14, 14).TextColor(p.muted).Absolute().Left(10).Top(8).IgnoreInput(true)
+		if clearable {
+			x := ui.ButtonBase(c.Key("clear-search")).Size(22, 22).Center().Absolute().Right(4).Top(4).
+				KeepFocus().FocusRing(false).Label("清除搜索")
+			fill := p.faint
+			if x.Hovered() {
+				fill = p.muted
+			}
+			x.Children(func() {
+				ui.Box(c).Size(14, 14).Radius(7).Center().Background(fill).Children(func() {
+					ui.Icon(c, iconX).Size(8, 8).TextColor(p.bg)
+				})
+			})
+			if x.Clicked() {
+				cb.SetOpen(false)
+				a.clearSearch()
+			}
+		}
 		q := strings.TrimSpace(a.query)
 		s := &a.suggestions
 		switch {
@@ -116,30 +138,31 @@ func (a *app) searchField(c *ui.Context) {
 		if q == "" && len(a.settings.SearchHistory) == 0 {
 			cb.SetOpen(false)
 		}
+		pop := popoverColors(p.dark)
 		cb.Popup(func(panel ui.Element) {
 			panel.AttachTo(field, ui.AnchorBottomStart, ui.AnchorTopStart).
-				Width(360).Padding(6).Margin(8, 0, 0, 0).Radius(12).
-				Background(p.bg).Border(1, p.hairline).
+				MinWidth(field.Bounds().W).MaxWidth(sidebarWidth+60).Padding(5).Gap(1).Margin(6, 0, 0, 0).Radius(12).
+				Background(pop.fill).Border(0.5, pop.edge).
 				Shadow(0, 8, 24, -4, ui.RGBA(0, 0, 0, 0.2))
 			option := func(key, label string) ui.Element {
-				row := cb.Item(key).MinHeight(36).Padding(6, 10).Gap(10).Radius(7).AlignItems(ui.Center).Label(label)
+				row := cb.Item(key).MinHeight(26).Padding(4, 8).Gap(8).Radius(6).AlignItems(ui.Center).Label(label)
 				if row.Highlighted() {
-					row.Background(p.hover)
+					row.Background(p.press)
 				}
 				return row
 			}
 			if q == "" {
 				panel.Label("搜索历史")
-				ui.Row(c).Padding(2, 4, 2, 10).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, "搜索历史").FontSize(12).TextColor(p.muted).Grow(1)
-					iconButton(c.Key("clear"), iconTrash, 14, p.muted, "清空搜索历史").KeepFocus().OnClick(a.clearSearchHistory)
-				})
+				ui.Text(c, "搜索历史").FontSize(11).FontWeight(600).TextColor(p.faint).Padding(4, 8, 2, 8)
 				for _, h := range a.settings.SearchHistory {
 					option("history:"+h, h).Children(func() {
-						ui.Icon(c, iconSearch).Size(13, 13).TextColor(p.muted)
 						ui.Text(c, h).FontSize(13).SingleLine().Shrink(1).MinWidth(0)
 					})
 				}
+				ui.Box(c).Height(0.5).Margin(4, 8).Background(pop.edge)
+				option("clear", "清空搜索历史").Children(func() {
+					ui.Text(c, "清空搜索历史").FontSize(13)
+				})
 				return
 			}
 			panel.Label("搜索建议")
@@ -174,6 +197,10 @@ func (a *app) searchField(c *ui.Context) {
 
 // choose goes where the option chosen in the search field's popup goes.
 func (a *app) choose(key, q string) {
+	if key == "clear" {
+		a.clearSearchHistory()
+		return
+	}
 	if h, ok := strings.CutPrefix(key, "history:"); ok {
 		a.query = h
 		a.search(h)
@@ -196,5 +223,14 @@ func (a *app) choose(key, q string) {
 		a.dismissSuggestions()
 		a.open(sg.route)
 		return
+	}
+}
+
+// clearSearch empties the field and leaves the results page for Home.
+func (a *app) clearSearch() {
+	a.searched, a.query = route{}, ""
+	a.dismissSuggestions()
+	if a.route.page == pageSearch && !a.nowPlaying {
+		a.open(route{page: pageHome})
 	}
 }

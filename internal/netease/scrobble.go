@@ -3,15 +3,25 @@ package netease
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 )
 
-// Scrobble tells NetEase the listener played song id for played, so it
-// joins their listening history: the record RecentPlays reads back. id and
-// sourceID are the song's, and source is where it played from ("list",
-// "radio", "album", "search"...). A stream URL alone leaves no trace; this
-// is the report that records the play.
+var scrobbleClient = map[string]string{"os": "osx", "appver": "3.1.10.5100", "osver": "15.5", "channel": "netease"}
+
+const scrobbleUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36 NeteaseMusicDesktop/3.1.10.5100"
+
+// ScrobbleStart records a song as recently played when playback starts.
+func ScrobbleStart(id, sourceID int64) error {
+	return scrobble(id, sourceID, 0, "", true)
+}
+
+// Scrobble reports the time actually heard for a song.
 func Scrobble(id, sourceID int64, played time.Duration, source string) error {
+	return scrobble(id, sourceID, played, source, false)
+}
+
+func scrobble(id, sourceID int64, played time.Duration, source string, start bool) error {
 	if id <= 0 {
 		return fmt.Errorf("netease: scrobble: no song")
 	}
@@ -25,21 +35,25 @@ func Scrobble(id, sourceID int64, played time.Duration, source string) error {
 	if seconds < 0 {
 		seconds = 0
 	}
-	logs, err := json.Marshal([]map[string]any{{
-		"action": "play",
-		"json": map[string]any{
-			"download": 0,
-			"end":      "playend",
-			"id":       id,
-			"sourceId": sourceID,
-			"time":     seconds,
-			"type":     "song",
-			"wifi":     0,
-			"source":   source,
-			"mainsite": 1,
-			"content":  "",
-		},
-	}})
+	action := "play"
+	detail := map[string]any{
+		"download":    0,
+		"end":         "playend",
+		"id":          id,
+		"sourceId":    strconv.FormatInt(sourceID, 10),
+		"time":        seconds,
+		"type":        "song",
+		"wifi":        0,
+		"source":      source,
+		"mainsite":    "1",
+		"mainsiteWeb": "1",
+		"content":     fmt.Sprintf("id=%d", sourceID),
+	}
+	if start {
+		action = "startplay"
+		detail = map[string]any{"id": id, "type": "song", "mainsite": "1", "mainsiteWeb": "1", "content": fmt.Sprintf("id=%d", sourceID)}
+	}
+	logs, err := json.Marshal([]map[string]any{{"action": action, "json": detail}})
 	if err != nil {
 		return err
 	}
@@ -48,7 +62,7 @@ func Scrobble(id, sourceID int64, played time.Duration, source string) error {
 		Message string `json:"message"`
 		Msg     string `json:"msg"`
 	}
-	if err := weapiPost("/api/feedback/weblog", map[string]any{"logs": string(logs)}, &res); err != nil {
+	if err := eapiPostAs("/api/feedback/weblog", map[string]any{"logs": string(logs)}, &res, "https://clientlog.music.163.com", scrobbleClient, scrobbleUA); err != nil {
 		return err
 	}
 	if res.Code != 200 {

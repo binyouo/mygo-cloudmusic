@@ -108,11 +108,15 @@ type app struct {
 	searched    route                 // the search last shown, which the sidebar goes back to
 	suggestions suggestState          // what the search field's query may be after
 
-	nowPlaying  bool
-	npOpen      bool      // Now Playing as it last showed: open or not
-	npChangedAt time.Time // when it last opened or closed
-	npPane      int       // paneLyrics, paneQueue, paneStage, paneComments, paneProgram or paneCaptions
-	npPaneTop   float32   // how far the cover beside the pane starts below its top
+	nowPlaying            bool
+	npOpen                bool    // Now Playing as it last showed: open or not
+	npT, npShift, npPull  float32 // open progress and vertical pull
+	npHeld, npStill       bool
+	npFrom                ui.Rect // last player-bar cover bounds
+	npPane                int     // paneLyrics, paneQueue, paneStage, paneComments, paneProgram or paneCaptions
+	npPaneTop             float32 // how far the cover beside the pane starts below its top
+	lyricBlurSwitch       ui.Handle
+	coverTransitionSwitch ui.Handle
 	lyricPaneState
 	queueList ui.ListState
 	queueAt   int // the row of the queue pane last scrolled to, -1 while it is hidden
@@ -278,6 +282,7 @@ func Run() error {
 		a.pl.Prepared = func(t netease.Track) { a.art.get(netease.Sized(t.Album.PicURL, 600), true) }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
 		a.scrob.report = a.postPlay
+		a.scrob.start = a.postPlayStart
 		a.pl.Changed = func() {
 			a.wallpaperPlaybackChanged()
 			a.keepSession()

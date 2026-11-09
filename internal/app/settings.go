@@ -39,6 +39,8 @@ type settings struct {
 	// LyricsStage shows lyrics on the stage, Folia's style, in Now
 	// Playing, rather than scrolling.
 	LyricsStage bool `json:"lyricsStage"`
+	// LyricsBlur softens inactive lines in the scrolling lyrics pane.
+	LyricsBlur bool `json:"lyricsBlur"`
 	// StageStyle is how the stage sets its lyrics (stageStyles): empty for
 	// Folia's classic, or the id of another of its visualizers.
 	StageStyle string `json:"stageStyle,omitempty"`
@@ -53,6 +55,9 @@ type settings struct {
 	AdaptiveMix bool `json:"adaptiveMix"`
 	// MotionArtwork enables animated covers and the flowing album-color background.
 	MotionArtwork bool `json:"motionArtwork"`
+	// CoverTransition dissolves one song's cover into the next's; off, the
+	// new cover shows at once.
+	CoverTransition bool `json:"coverTransition"`
 	// HotComments shows a song's hot comments in its quiet parts, in
 	// place of the lyrics (quietComment): the listener turns it on.
 	HotComments bool `json:"hotComments"`
@@ -72,12 +77,14 @@ type settings struct {
 	// SearchHistory keeps submitted keywords, most recent first.
 	SearchHistory []string        `json:"searchHistory,omitempty"`
 	Shortcuts     *shortcutConfig `json:"shortcuts,omitempty"`
+	// LocalTagsVersion records the one-time reread of legacy MP3 tags.
+	LocalTagsVersion int `json:"localTagsVersion,omitempty"`
 
 	path string // where they were loaded from, and are saved to
 }
 
 func defaultSettings() settings {
-	return settings{AdaptiveMix: true, MotionArtwork: true, WallpaperIdleSeconds: 120, MenuBarWidth: 180, NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true}
+	return settings{AdaptiveMix: true, MotionArtwork: true, CoverTransition: true, LyricsBlur: true, WallpaperIdleSeconds: 120, MenuBarWidth: 180, NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true}
 }
 
 func settingsPath() (string, error) {
