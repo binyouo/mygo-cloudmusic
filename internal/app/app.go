@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -165,8 +166,11 @@ type app struct {
 	savedSession string // the session as last kept
 	sessionDue   bool   // a save of the session is due
 
-	scrob       scrobbler // what plays, reported to NetEase's listening history
-	scrobbleDue bool      // a note of what plays is due
+	scrob             scrobbler // what plays, reported to NetEase's listening history
+	scrobbleDue       bool      // a note of what plays is due
+	scrobbleUser      int64
+	scrobbleWork      sync.WaitGroup
+	scrobbleQuitReady bool
 }
 
 // post runs fn on the main thread and redraws both windows. Without a
@@ -281,8 +285,11 @@ func Run() error {
 		a.pl.PreloadMetadata = true
 		a.pl.Prepared = func(t netease.Track) { a.art.get(netease.Sized(t.Album.PicURL, 600), true) }
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
-		a.scrob.report = a.postPlay
-		a.scrob.start = a.postPlayStart
+		a.scrob.bind = a.bindPlayback
+		a.pl.Ended = func() {
+			a.noteScrobble()
+			a.scrob.stop()
+		}
 		a.pl.Changed = func() {
 			a.wallpaperPlaybackChanged()
 			a.keepSession()
@@ -356,8 +363,16 @@ func Run() error {
 			}
 		})
 	})
-	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
+		if a.quitting {
+			if !a.scrobbleQuitReady {
+				e.PreventDefault()
+			}
+			return
+		}
+		a.noteScrobble()
 		a.quitting = true
+		e.PreventDefault()
 		if a.likeSync.timer != nil {
 			a.likeSync.timer.Stop()
 		}
@@ -371,6 +386,20 @@ func Run() error {
 		if write := a.transcriptWrite(); write != nil {
 			write()
 		}
+		// Keep the UI responsive while the final playback report finishes.
+		// A stalled network must not trap the application in its quit sequence.
+		go func() {
+			done := make(chan struct{})
+			go func() { a.scrobbleWork.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+			}
+			mygo.RunOnMain(func() {
+				a.scrobbleQuitReady = true
+				mygo.App.Quit()
+			})
+		}()
 	})
 	// Windows leaves an icon in the notification area after its app until
 	// the pointer passes over it.

@@ -21,10 +21,13 @@ func newScrobbler(got *[]recorded) *scrobbler {
 	return s
 }
 
-// Recently played is reported once playback starts, including after a track change, but not on pause or resume.
+// The account is bound once playback starts, not on pause or resume.
 func TestScrobbleStartsOnlyOnPlayback(t *testing.T) {
 	var started []int64
-	s := &scrobbler{start: func(id int64) { started = append(started, id) }}
+	s := &scrobbler{bind: func(id int64) func(time.Duration) {
+		started = append(started, id)
+		return nil
+	}}
 	a, b := &netease.Track{ID: 7, Duration: 200000}, &netease.Track{ID: 8, Duration: 200000}
 	s.note(a, 0, false)
 	if len(started) != 0 {
@@ -40,7 +43,7 @@ func TestScrobbleStartsOnlyOnPlayback(t *testing.T) {
 	}
 }
 
-// A song is reported once it has played 30 seconds, and once only.
+// A playback is settled once with its measured duration, not truncated at 30 seconds.
 func TestScrobblesASongOnceHeardEnough(t *testing.T) {
 	var got []recorded
 	s := newScrobbler(&got)
@@ -48,7 +51,11 @@ func TestScrobblesASongOnceHeardEnough(t *testing.T) {
 	for pos := time.Duration(0); pos <= 60*time.Second; pos += 5 * time.Second {
 		s.note(tr, pos, true)
 	}
-	if len(got) != 1 || got[0].id != 7 || got[0].played != 30*time.Second {
+	if len(got) != 0 {
+		t.Fatalf("reported before settlement: %v", got)
+	}
+	s.stop()
+	if len(got) != 1 || got[0].id != 7 || got[0].played != 60*time.Second {
 		t.Fatalf("reported %v", got)
 	}
 	s.stop()
@@ -57,23 +64,20 @@ func TestScrobblesASongOnceHeardEnough(t *testing.T) {
 	}
 }
 
-// A song left before it played enough is not recorded.
+// A sub-second playback is not sent as a completed listening event.
 func TestScrobbleNeedsEnough(t *testing.T) {
 	var got []recorded
 	s := newScrobbler(&got)
 	tr := &netease.Track{ID: 7, Duration: 200000}
-	for pos := time.Duration(0); pos <= 25*time.Second; pos += 5 * time.Second {
-		s.note(tr, pos, true)
-	}
-	s.note(tr, 25*time.Second, false)
+	s.note(tr, 0, true)
+	s.note(tr, 500*time.Millisecond, false)
 	s.stop()
 	if len(got) != 0 {
 		t.Fatalf("reported %v", got)
 	}
 }
 
-// What a seek forward skips is not time heard, so it does not count toward
-// the thirty seconds.
+// A seek forward does not inflate the measured listening duration.
 func TestScrobbleDoesNotCountASeek(t *testing.T) {
 	var got []recorded
 	s := newScrobbler(&got)
@@ -84,7 +88,8 @@ func TestScrobbleDoesNotCountASeek(t *testing.T) {
 	for pos := 100 * time.Second; pos <= 130*time.Second; pos += 5 * time.Second {
 		s.note(tr, pos, true)
 	}
-	if len(got) != 1 || got[0].played != 30*time.Second {
+	s.stop()
+	if len(got) != 1 || got[0].played != 40*time.Second {
 		t.Fatalf("reported %v", got)
 	}
 }
@@ -98,18 +103,20 @@ func TestScrobbleResumesFromWhereItStopped(t *testing.T) {
 	for pos := 42 * time.Second; pos <= 72*time.Second; pos += 5 * time.Second {
 		s.note(tr, pos, true)
 	}
+	s.stop()
 	if len(got) != 1 || got[0].played != 30*time.Second {
 		t.Fatalf("reported %v", got)
 	}
 }
 
-// A song shorter than a minute counts once half of it has played.
+// A short song reports its measured partial duration when settled.
 func TestScrobblesAHalfOfAShortSong(t *testing.T) {
 	var got []recorded
 	s := newScrobbler(&got)
 	tr := &netease.Track{ID: 7, Duration: 20000}
 	s.note(tr, 0, true)
 	s.note(tr, 10*time.Second, true)
+	s.stop()
 	if len(got) != 1 || got[0].played != 10*time.Second {
 		t.Fatalf("reported %v", got)
 	}
@@ -152,6 +159,7 @@ func TestNoteScrobbleFollowsThePlayer(t *testing.T) {
 		a.pl.Hold(pos)
 		a.noteScrobble()
 	}
+	a.scrob.stop()
 	if len(got) != 1 || got[0].id != 7 || got[0].played != 30*time.Second {
 		t.Fatalf("reported %v", got)
 	}
@@ -172,5 +180,56 @@ func TestScrobbleNeedsALogin(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("reported %v signed out", got)
+	}
+}
+
+// Finishing the last song settles it even when no next track is selected.
+func TestScrobbleSettlesAtEnd(t *testing.T) {
+	var got []recorded
+	s := newScrobbler(&got)
+	tr := &netease.Track{ID: 7, Duration: 40000}
+	for pos := time.Duration(0); pos < 40*time.Second; pos += 5 * time.Second {
+		s.note(tr, pos, true)
+	}
+	s.note(tr, 40*time.Second, false)
+	s.stop()
+	if len(got) != 1 || got[0].played != 40*time.Second {
+		t.Fatalf("reported %v", got)
+	}
+}
+
+// A settled playback uses the account-bound closure from its start.
+func TestScrobbleKeepsBoundReporter(t *testing.T) {
+	account, got := 1, 0
+	s := &scrobbler{bind: func(int64) func(time.Duration) {
+		owner := account
+		return func(time.Duration) { got = owner }
+	}}
+	tr := &netease.Track{ID: 7, Duration: 40000}
+	for pos := time.Duration(0); pos <= 30*time.Second; pos += 5 * time.Second {
+		s.note(tr, pos, true)
+	}
+	account = 2
+	s.stop()
+	if got != 1 {
+		t.Fatalf("reported as account %d", got)
+	}
+}
+
+// Seeking back to zero is still the same playback and must not submit it early.
+func TestScrobbleSeekToZeroDoesNotSettle(t *testing.T) {
+	var got []recorded
+	s := newScrobbler(&got)
+	tr := &netease.Track{ID: 7, Duration: 40000}
+	s.note(tr, 0, true)
+	s.note(tr, 5*time.Second, true)
+	s.note(tr, 0, true)
+	if len(got) != 0 {
+		t.Fatal("seek ended the listening session")
+	}
+	s.note(tr, 5*time.Second, true)
+	s.stop()
+	if len(got) != 1 || got[0].played != 10*time.Second {
+		t.Fatalf("reported %v", got)
 	}
 }

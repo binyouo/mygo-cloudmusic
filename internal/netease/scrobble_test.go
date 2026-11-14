@@ -1,6 +1,7 @@
 package netease
 
 import (
+	"context"
 	"crypto/aes"
 	"encoding/hex"
 	"encoding/json"
@@ -85,5 +86,59 @@ func TestScrobblePostsClientLog(t *testing.T) {
 	code = 400
 	if err := ScrobbleStart(42, 0); err == nil {
 		t.Fatal("server error ignored")
+	}
+}
+
+// A delayed report keeps its original account, orders start/play, and cannot change the new account's cookies.
+func TestPlaybackReporterKeepsItsSession(t *testing.T) {
+	oldClient, oldTransport := httpClient, http.DefaultTransport
+	defer func() { httpClient, http.DefaultTransport = oldClient, oldTransport }()
+	jar, _ := cookiejar.New(nil)
+	jar.SetCookies(siteURL, []*http.Cookie{{Name: "MUSIC_U", Value: "first", Path: "/"}})
+	httpClient = &http.Client{Jar: jar}
+	deviceOnce.Do(func() { deviceID = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123" })
+	report := PlaybackReporter(42)
+	jar.SetCookies(siteURL, []*http.Cookie{{Name: "MUSIC_U", Value: "second", Path: "/"}})
+	calls := 0
+	http.DefaultTransport = weapiTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if !strings.Contains(r.Header.Get("Cookie"), "MUSIC_U=first") {
+			t.Fatal("playback was attributed to the new account")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"code":200}`)), Header: http.Header{"Set-Cookie": {"MUSIC_U=stale; Path=/"}}}, nil
+	})
+	if err := report(context.Background(), 42*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("requests %d", calls)
+	}
+	for _, cookie := range jar.Cookies(siteURL) {
+		if cookie.Name == "MUSIC_U" && cookie.Value != "second" {
+			t.Fatal("old response overwrote current account")
+		}
+	}
+}
+
+// A rejected start is not followed by play, and a failed/ambiguous request is not blindly retried.
+func TestPlaybackReporterStopsOnError(t *testing.T) {
+	oldClient, oldTransport := httpClient, http.DefaultTransport
+	defer func() { httpClient, http.DefaultTransport = oldClient, oldTransport }()
+	jar, _ := cookiejar.New(nil)
+	jar.SetCookies(siteURL, []*http.Cookie{{Name: "MUSIC_U", Value: "first", Path: "/"}})
+	httpClient = &http.Client{Jar: jar}
+	deviceOnce.Do(func() { deviceID = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123" })
+	for _, status := range []int{200, 429, 500} {
+		calls := 0
+		http.DefaultTransport = weapiTransport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"code":400}`)), Header: make(http.Header)}, nil
+		})
+		if err := PlaybackReporter(42)(context.Background(), 42*time.Second); err == nil {
+			t.Fatal("error ignored")
+		}
+		if calls != 1 {
+			t.Fatalf("retried or sent play after failure: %d", calls)
+		}
 	}
 }
