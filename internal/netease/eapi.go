@@ -2,6 +2,7 @@ package netease
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/md5"
 	"crypto/rand"
@@ -84,6 +85,12 @@ func eapiPost(path string, data map[string]any, out any) error {
 }
 
 func eapiPostAs(path string, data map[string]any, out any, domain string, client map[string]string, userAgent string) error {
+	return eapiPostAsSession(context.Background(), path, data, out, domain, client, userAgent, httpClient.Jar.Cookies(siteURL), true)
+}
+
+// eapiPostAsSession keeps a queued request tied to the session that created it.
+// Playback requests must not read a later account's cookies or overwrite its jar.
+func eapiPostAsSession(ctx context.Context, path string, data map[string]any, out any, domain string, client map[string]string, userAgent string, cookies []*http.Cookie, storeCookies bool) error {
 	header := map[string]string{
 		"osver":       client["osver"],
 		"deviceId":    device(),
@@ -97,7 +104,7 @@ func eapiPostAs(path string, data map[string]any, out any, domain string, client
 		"requestId":   fmt.Sprintf("%d_%04d", time.Now().UnixMilli(), time.Now().Nanosecond()%1000),
 		"__csrf":      "",
 	}
-	for _, c := range httpClient.Jar.Cookies(siteURL) {
+	for _, c := range cookies {
 		switch c.Name {
 		case "MUSIC_U", "NMTID":
 			header[c.Name] = c.Value
@@ -111,7 +118,7 @@ func eapiPostAs(path string, data map[string]any, out any, domain string, client
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", domain+"/eapi/"+strings.TrimPrefix(path, "/api/"),
+	req, err := http.NewRequestWithContext(ctx, "POST", domain+"/eapi/"+strings.TrimPrefix(path, "/api/"),
 		strings.NewReader(url.Values{"params": {params}}.Encode()))
 	if err != nil {
 		return err
@@ -130,12 +137,15 @@ func eapiPostAs(path string, data map[string]any, out any, domain string, client
 	}
 	defer res.Body.Close()
 	// Keep what it sets for the site, whichever host set it.
-	if set := res.Cookies(); len(set) > 0 {
+	if set := res.Cookies(); storeCookies && len(set) > 0 {
 		for _, c := range set {
 			c.Domain = ""
 			c.Path = "/"
 		}
 		httpClient.Jar.SetCookies(siteURL, set)
+	}
+	if !storeCookies && (res.StatusCode < 200 || res.StatusCode >= 300) {
+		return &playbackError{kind: "http", code: res.StatusCode}
 	}
 	body, err := io.ReadAll(res.Body)
 	if err != nil {

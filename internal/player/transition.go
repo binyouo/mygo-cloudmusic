@@ -82,6 +82,9 @@ func (p *Player) pollAudio(seq *sequence) {
 	frame := int64((p.out.Position().Seconds() * outputRate) + 0.5)
 	part, pending, ended := seq.state(frame)
 	if part.start != p.partStart {
+		if p.Ended != nil {
+			p.Ended()
+		}
 		p.partStart = part.start
 		p.partOffset = part.offset
 		p.gen++

@@ -45,6 +45,8 @@ type Player struct {
 	// Changed, if set, hears that what plays, where it is or whether it
 	// plays changed.
 	Changed func()
+	// Ended runs before playback is stopped, replaced, or naturally restarted.
+	Ended func()
 
 	queue   []netease.Track
 	order   []int // the queue's indices in play order: shuffled or not
@@ -157,8 +159,12 @@ func (p *Player) announce(t *netease.Track, artwork []byte) {
 
 func (p *Player) ended() {
 	if p.repeat == RepeatOne {
+		if p.Ended != nil {
+			p.Ended()
+		}
 		p.out.Seek(p.audioPosition(0))
 		p.out.Play()
+		p.sync()
 		return
 	}
 	if p.at+1 >= len(p.order) && p.feed != nil {
@@ -166,6 +172,9 @@ func (p *Player) ended() {
 		return
 	}
 	if p.at+1 >= len(p.order) && p.repeat == RepeatOff {
+		if p.Ended != nil {
+			p.Ended()
+		}
 		p.playing = false
 		p.sync()
 		return
@@ -612,6 +621,9 @@ func (p *Player) Levels() ([Bands]float32, bool) {
 }
 
 func (p *Player) stop() {
+	if p.track != nil && p.Ended != nil {
+		p.Ended()
+	}
 	if p.sequence != nil {
 		if p.nextJob != nil && p.nextJob.pcm != nil && p.sequence.started(p.nextJob.pcm) {
 			p.nextJob.close()
