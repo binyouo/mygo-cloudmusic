@@ -29,6 +29,10 @@ func TestCoveredPageKeepsItsPlace(t *testing.T) {
 	for _, r := range []route{{page: pagePlaylist, id: 42}, {page: pageCharts}} {
 		a.open(r)
 		tt.Frame()
+		tt.Advance(time.Second)
+		tt.Frame()
+		// Capture the initial layout without copying app's synchronization state.
+		first := shown(tt)
 		tt.Wheel(700, 400, 0, 2400)
 		tt.Advance(time.Second)
 		tt.Frame()
@@ -49,7 +53,7 @@ func TestCoveredPageKeepsItsPlace(t *testing.T) {
 		if after := shown(tt); after != before {
 			t.Errorf("%+v: shows\n%s\nafter Now Playing, was\n%s", r, after, before)
 		}
-		if before == firstShown(a) {
+		if before == first {
 			t.Errorf("%+v: the wheel did not scroll it", r)
 		}
 	}
@@ -64,13 +68,4 @@ func shown(tt *ui.Tester) string {
 		}
 	}
 	return s
-}
-
-// firstShown returns what a's page shows unscrolled.
-func firstShown(a *app) string {
-	b := *a
-	b.trackList, b.pageScroll = ui.ListState{}, ui.ScrollState{}
-	tt := ui.NewTester(b.view, 1200, 800)
-	tt.Frame()
-	return shown(tt)
 }
