@@ -18,6 +18,9 @@ type playlistRemainder struct {
 	loading  bool
 	err      string
 	play     *playlistPlay
+	// grow is how many of pl.Tracks the player's queue holds, to extend
+	// once the rest has loaded.
+	grow int
 }
 
 type playlistPlay struct {
@@ -85,10 +88,17 @@ func (a *app) playlistSongsLoaded(d *playlistRemainder, end int, tracks []neteas
 	p.Tracks = append(p.Tracks, tracks...)
 	p.TrackOffset = end
 	if p.TrackOffset < len(p.TrackIDs) {
-		if d.play != nil || a.route == (route{page: pagePlaylist, id: p.ID}) {
+		if d.play != nil || d.grow > 0 || a.route == (route{page: pagePlaylist, id: p.ID}) {
 			a.morePlaylistSongs(d)
 		}
 		return
+	}
+	if d.grow > 0 {
+		grow := d.grow
+		d.grow = 0
+		if len(a.pl.Queue()) == grow {
+			a.pl.ExtendQueue(p.Tracks)
+		}
 	}
 	if play := d.play; play != nil {
 		d.play = nil
@@ -98,26 +108,43 @@ func (a *app) playlistSongsLoaded(d *playlistRemainder, end int, tracks []neteas
 	}
 }
 
-// Play waits for the complete queue rather than silently stopping at the first batch.
+// A chosen song plays on what of the playlist has loaded: its queue grows
+// to the complete list as the rest arrives. Only a play that cannot begin
+// yet — shuffling all of it, or a song not yet loaded — waits, as a fair
+// shuffle needs the whole list to choose from.
 func (a *app) playPlaylist(p *netease.Playlist, id int64, shuffle bool) {
 	d := a.remainingPlaylist(p)
 	// A later play choice supersedes one waiting for another playlist's details.
 	for _, other := range a.playlistMore {
-		other.play = nil
+		other.play, other.grow = nil, 0
+	}
+	at := -1
+	if id != 0 {
+		for i := range p.Tracks {
+			if p.Tracks[i].ID == id {
+				at = i
+				break
+			}
+		}
+	} else if !shuffle {
+		at = 0
 	}
 	if p.TrackOffset < len(p.TrackIDs) {
-		d.play = &playlistPlay{id, shuffle, a.pl.Current()}
 		d.err = ""
-		a.morePlaylistSongs(d)
-		a.toast = "正在加载完整歌单，完成后播放"
-		return
-	}
-	at := 0
-	for i := range p.Tracks {
-		if p.Tracks[i].ID == id {
-			at = i
-			break
+		if at >= 0 && at < len(p.Tracks) {
+			d.grow = len(p.Tracks)
+		} else {
+			d.play = &playlistPlay{id, shuffle, a.pl.Current()}
+			a.toast = "正在加载完整歌单，完成后播放"
 		}
+		a.morePlaylistSongs(d)
+		if d.play != nil {
+			return
+		}
+	}
+	if shuffle && id == 0 {
+		a.pl.PlayShuffled(p.Tracks)
+		return
 	}
 	if a.pl.Shuffle() != shuffle {
 		a.pl.ToggleShuffle()

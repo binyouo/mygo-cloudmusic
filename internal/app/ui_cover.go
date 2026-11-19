@@ -195,13 +195,27 @@ func (a *app) npCover(c *ui.Context, tr *netease.Track, art *artwork, size float
 
 	wrap.Children(func() {
 		// The cover breathes: smaller while paused, a little nearer under
-		// the pointer.
+		// the pointer. A retro player shows a pause as it stops turning.
+		style := a.settings.PlayerStyle
 		scale := float32(1)
-		if !pl.Playing() {
+		if !pl.Playing() && style == "" {
 			scale = 0.88
 		}
 		if over {
 			scale *= 1.02
+		}
+		if style != "" {
+			box := ui.Box(c).Fill()
+			if math.Abs(float64(rx))+math.Abs(float64(ry)) > 0.05 {
+				box.RotateX(rx).RotateY(ry).Perspective(900)
+			}
+			a.npBreathe(box, scale)
+			tint := ui.RGB(120, 120, 130)
+			if s := a.npArt; s != nil && !s.failed {
+				tint = s.tint
+			}
+			box.Children(func() { a.retroPlayer(c, style, tr, art, size, tint) })
+			return
 		}
 		radius := a.npRadius(c, 16, size)
 		box := ui.Box(c).Fill().Radius(radius).Shadow(0, 30, 60, -12, ui.RGBA(0, 0, 0, 0.55))

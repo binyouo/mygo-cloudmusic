@@ -370,9 +370,9 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 		padX := npSideX(w)
 		a.npRise(reveal(npTabsRow(c, w), pointerIn), 0).Children(func() { a.paneTabs(c) })
 		ui.Row(c).Grow(1).Padding(0, padX, 44, padX).Gap(72).AlignItems(ui.Stretch).Children(func() {
-			var coverTop float32
-			ui.Column(c).Width(side).Justify(ui.Center).Gap(0).Children(func() {
-				coverTop = ui.Box(c.Key("cover-top")).Height(0).LayoutBounds().Y
+			ui.Column(c).Width(side).Gap(0).Children(func() {
+				// Extra metadata pushes controls down, never the cover into the tabs.
+				ui.Box(c.Key("over-cover")).Grow(1).Basis(0).MinHeight(npCoverTop)
 				a.npMorph(c, ui.Box(c.Key("cover-morph")).Size(coverSize, coverSize).AlignSelf(ui.Start)).Children(func() {
 					a.npCover(c, tr, art, coverSize)
 				})
@@ -423,23 +423,13 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 				a.npRise(ui.Row(c).Justify(ui.Center), 4).Children(func() {
 					a.volumeSlider(c, white.Alpha(0.7), white.Alpha(0.18), 180)
 				})
+				ui.Box(c.Key("under-controls")).Grow(1).Basis(0)
 			})
 
 			pane := ui.Column(c.Key("pane")).Grow(1).Basis(0).MinWidth(0)
 			a.npRise(pane, 2).Children(func() {
-				// The pane starts level with the cover beside it, but below the
-				// tabs, which start level with the pane's top: they come and go
-				// with the pointer, so they sit out of the flow, never over it.
-				b := pane.LayoutBounds()
-				if b.H > 0 && coverTop > 0 {
-					if top := max(coverTop-b.Y, npTabsHeight+8); top != a.npPaneTop {
-						a.npPaneTop = top
-						c.AnimationFrame()
-					}
-				} else {
-					c.AnimationFrame() // not laid out yet: the next frame places it
-				}
-				ui.Box(c).Height(a.npPaneTop)
+				// Lyrics stay near the tabs even when a tall window centers the cover lower.
+				ui.Box(c).Height(npCoverTop)
 				switch a.npPane {
 				case paneLyrics:
 					a.lyricsPane(c, tr, h)
@@ -470,6 +460,9 @@ func npSideX(w float32) float32 {
 // npTabsHeight is how tall the row of Now Playing's tabs is, for what is
 // under it to start below it.
 const npTabsHeight = 28
+
+// Minimum space below the top strip, clear of the tabs.
+const npCoverTop = npTabsHeight + 22
 
 // npTabsRow is the row of Now Playing's tabs, in the same place for every
 // pane, so that they stay put going from one to another: at the top, level
@@ -770,7 +763,7 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 30, weight: 800, lineHeight: 1.25, quiet: quiet, state: state, depth: true}, nil)
 	if state == &a.lyricPaneState && dim < .98 {
 		w, _ := c.Size()
-		ui.Box(c.Key("lyric-top-fade")).Absolute().Top(a.npPaneTop).Left(0).Right(0).Height(36).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
+		ui.Box(c.Key("lyric-top-fade")).Absolute().Top(npCoverTop).Left(0).Right(0).Height(36).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
 			a.backdropOver(p, ui.Rect{W: w, H: h}, r, func(t float32) float32 { return 1 - smoothstep(0, .9, t) })
 		})
 		ui.Box(c.Key("lyric-bottom-fade")).Absolute().Bottom(0).Left(0).Right(0).Height(70).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
@@ -803,6 +796,7 @@ func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, 
 		state = &a.lyricPaneState
 	}
 	var active ui.Element
+	lang := lyrics.Lang(lines)
 	scroll.Children(func() {
 		ui.Column(c).Gap(6).Translate(0, -lag).Children(func() {
 			for i, l := range lines {
@@ -841,7 +835,7 @@ func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, 
 					text.Children(func() {
 						if on && len(l.Words) > 0 {
 							// The line sung lights up word by word as it is sung.
-							ui.RichText(c.Key("words")).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).Children(func() {
+							ui.RichText(c.Key("words")).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).Children(func() {
 								for wi, wd := range l.Words {
 									lit := clamp01(float32((pos - wd.Start).Seconds() / max(0.05, (wd.End-wd.Start).Seconds())))
 									ui.Text(c.Key(wi), wd.Text).TextColor(white.Alpha(0.38 + 0.62*lit))
@@ -852,7 +846,7 @@ func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, 
 								c.After(40 * time.Millisecond)
 							}
 						} else {
-							ui.Text(c, l.Text).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).TextColor(white)
+							ui.Text(c, l.Text).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).TextColor(white)
 						}
 						if l.Translation != "" {
 							ui.Text(c, l.Translation).FontSize(17).FontWeight(600).TextColor(white.Alpha(0.7))

@@ -231,3 +231,21 @@ func TestBackdropFadeEnds(t *testing.T) {
 		t.Error("the last song's backdrop still fades after the fade")
 	}
 }
+
+// Paused retro players request no animation frames after the tonearm has settled.
+func TestRetroPlayerPausedFrameBudget(t *testing.T) {
+	readyRetro()
+	for _, style := range playerStyles[1:] {
+		a := newTestApp()
+		a.settings.PlayerStyle = style.id
+		a.pl.Cue([]netease.Track{{ID: 7, Name: "宝船", Duration: 180000}})
+		a.pl.Seek(12 * time.Second)
+		a.nowPlaying, a.npPane = true, paneQueue
+		tt := ui.NewTester(a.view, 1200, 800)
+		settleRetro(tt)
+		tt.Advance(time.Second)
+		if tt.FramePending() {
+			t.Errorf("%s paused: requests frames", style.id)
+		}
+	}
+}

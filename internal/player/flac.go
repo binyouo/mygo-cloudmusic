@@ -44,7 +44,7 @@ func openFLACStream(dl *download) (*flacStream, error) {
 	if s.info.NChannels == 0 || s.info.SampleRate == 0 {
 		return nil, errors.New("flac: no stream info")
 	}
-	s.spec = newSpectrum(int(s.info.SampleRate), int64(s.info.NSamples))
+	s.spec = newSpectrum(int(s.info.SampleRate))
 	s.r = bufio.NewReaderSize(&downloadReader{d: dl, pos: start}, 64<<10)
 	return s, nil
 }

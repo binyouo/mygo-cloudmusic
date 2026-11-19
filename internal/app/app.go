@@ -115,7 +115,6 @@ type app struct {
 	npHeld, npStill       bool
 	npFrom                ui.Rect // last player-bar cover bounds
 	npPane                int     // paneLyrics, paneQueue, paneStage, paneComments, paneProgram or paneCaptions
-	npPaneTop             float32 // how far the cover beside the pane starts below its top
 	lyricBlurSwitch       ui.Handle
 	coverTransitionSwitch ui.Handle
 	lyricPaneState
@@ -275,6 +274,9 @@ func Run() error {
 		a.settings = loadSettings()
 		a.settings.applyAppearance()
 		a.npPane = a.lyricsPaneChosen()
+		if a.settings.PlayerStyle != "" {
+			prepareRetro()
+		}
 		// Before the window: on Windows it lays out its content as it is
 		// made, and the view asks the player what plays.
 		a.art = newArtCache(a.post)

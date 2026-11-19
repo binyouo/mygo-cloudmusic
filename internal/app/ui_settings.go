@@ -168,6 +168,28 @@ func (a *app) settingsView(c *ui.Context) {
 		}
 
 		group("播放", func() {
+			row("播放页样式", "用专辑封面、旋转的黑胶唱片或磁带展示当前歌曲", func() {
+				labels := make([]string, len(playerStyles))
+				chosen := playerStyles[0].label
+				for i, style := range playerStyles {
+					labels[i] = style.label
+					if style.id == s.PlayerStyle {
+						chosen = style.label
+					}
+				}
+				if ui.Select(c.Key("player-style"), &chosen, labels).Label("播放页样式").Width(150).Changed() {
+					for _, style := range playerStyles {
+						if style.label == chosen {
+							s.PlayerStyle = style.id
+						}
+					}
+					s.save()
+					a.redraw()
+					if s.PlayerStyle != "" {
+						prepareRetro()
+					}
+				}
+			})
 			row("歌曲过渡", "根据节拍、调性和人声选择衔接，保音高对拍并交接频段；不适合混音时保留自然衔接", func() {
 				labels := []string{"自动混音（AutoMix）", "无缝衔接"}
 				chosen := labels[0]

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/egoist/mygo/audio"
 	gomp3 "github.com/hajimehoshi/go-mp3"
@@ -397,7 +398,7 @@ func openMP3Stream(dl *download, durationMs int64) (*mp3Stream, error) {
 	if !trim {
 		s.frames = durationMs * int64(s.rate) / 1000
 	}
-	s.spec = newSpectrum(s.rate, s.frames)
+	s.spec = newSpectrum(s.rate)
 	return s, nil
 }
 
@@ -562,18 +563,20 @@ func frameSize(b []byte) int {
 
 // The spectrum of a song, measured in chunks of fftSize frames as it
 // decodes, a second ahead of what plays: the visualizers look up the
-// chunk playing.
+// chunk playing. It keeps only the chunks of the last spectrumKeep
+// decoded, in a ring, so that an audiobook of hours holds no more than
+// a song does; a seek decodes, and so measures, again from where it lands.
 
 const (
-	fftSize = 1024
-	Bands   = 24
+	fftSize      = 1024
+	Bands        = 24
+	spectrumKeep = 10 * time.Second
 )
 
 type spectrum struct {
 	mu     sync.RWMutex
 	rate   int
-	chunks [][Bands]float32
-	have   []bool
+	ring   []measured // chunk c in ring[c%len(ring)], if it's still there
 	window [fftSize]float32
 	acc    []float32 // mono samples of the chunk being filled
 	accAt  int64     // its first frame
@@ -581,9 +584,24 @@ type spectrum struct {
 	fft    []complex128
 }
 
-func newSpectrum(rate int, frames int64) *spectrum {
-	n := int(frames/fftSize) + 2
-	s := &spectrum{rate: rate, chunks: make([][Bands]float32, n), have: make([]bool, n), accAt: -1}
+// measured is the bands of a chunk, and which chunk: -1 for none yet.
+type measured struct {
+	chunk int64
+	bands [Bands]float32
+}
+
+func newSpectrum(rate int) *spectrum {
+	n := max(16, int(int64(rate)*int64(spectrumKeep/time.Second)/fftSize)+1)
+	return newSpectrumSlots(rate, n)
+}
+
+// newSpectrumSlots also serves a bounded, fully prerendered Smart Fades transition.
+// That window must retain its beginning until playback reaches it.
+func newSpectrumSlots(rate, n int) *spectrum {
+	s := &spectrum{rate: rate, ring: make([]measured, max(1, n)), accAt: -1}
+	for i := range s.ring {
+		s.ring[i].chunk = -1
+	}
 	for i := range s.window {
 		s.window[i] = float32(0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(fftSize-1)))
 	}
@@ -629,7 +647,7 @@ func (s *spectrum) feed(at int64, stereo []float32) {
 }
 
 func (s *spectrum) analyze(chunk int64) {
-	if chunk < 0 || chunk >= int64(len(s.chunks)) {
+	if chunk < 0 {
 		return
 	}
 	for i, v := range s.acc {
@@ -649,8 +667,7 @@ func (s *spectrum) analyze(chunk int64) {
 		bands[b] = float32(math.Max(0, math.Min(1, (db+60)/52)))
 	}
 	s.mu.Lock()
-	s.chunks[chunk] = bands
-	s.have[chunk] = true
+	s.ring[chunk%int64(len(s.ring))] = measured{chunk, bands}
 	s.mu.Unlock()
 }
 
@@ -659,10 +676,14 @@ func (s *spectrum) at(frame int64) ([Bands]float32, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	c := frame / fftSize
-	if c < 0 || c >= int64(len(s.chunks)) || !s.have[c] {
+	if c < 0 {
 		return [Bands]float32{}, false
 	}
-	return s.chunks[c], true
+	m := s.ring[c%int64(len(s.ring))]
+	if m.chunk != c {
+		return [Bands]float32{}, false
+	}
+	return m.bands, true
 }
 
 // fft transforms x in place; len(x) is a power of two.

@@ -222,6 +222,22 @@ func isCJK(r rune) bool {
 	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul)
 }
 
+// Lang answers "ja" for lyrics in Japanese, any of whose lines has kana,
+// and "" for any others, which take the app's language. Their kanji are
+// then drawn in a Japanese font along with their kana: in a Chinese app
+// they took a Chinese one, heavier and larger than the Japanese font the
+// kana fell back to.
+func Lang(lines []Line) string {
+	for _, l := range lines {
+		for _, r := range l.Text {
+			if unicode.In(r, unicode.Hiragana, unicode.Katakana) && r != 'ー' && r != '・' {
+				return "ja"
+			}
+		}
+	}
+	return ""
+}
+
 // Index returns the line sung at pos, or -1 before the first.
 func Index(lines []Line, pos time.Duration) int {
 	i := sort.Search(len(lines), func(i int) bool { return lines[i].At > pos })

@@ -81,6 +81,31 @@ func TestPlayNextDuringFailedLoad(t *testing.T) {
 	}
 }
 
+// A queue grown around the song playing keeps its place and what already
+// played, with the new songs joining the order ahead — shuffled among it
+// when shuffle is on. A list the queue does not start changes nothing.
+func TestExtendQueueKeepsPlayback(t *testing.T) {
+	p := &Player{post: func(func()) {}}
+	p.Cue([]netease.Track{{ID: 1}, {ID: 2}, {ID: 3}})
+	p.at, p.track = 1, &p.queue[1]
+	p.ExtendQueue([]netease.Track{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 5}})
+	if len(p.queue) != 5 || p.at != 1 || p.track.ID != 2 || !slices.Equal(p.order, []int{0, 1, 2, 3, 4}) {
+		t.Fatalf("order %v at %d on %+v", p.order, p.at, p.track)
+	}
+	p.ExtendQueue([]netease.Track{{ID: 1}, {ID: 9}, {ID: 3}, {ID: 4}, {ID: 5}, {ID: 6}})
+	if len(p.queue) != 5 {
+		t.Fatal("a list the queue does not start changed it")
+	}
+	p.shuffle = true
+	p.order, p.at = []int{2, 0, 1, 3, 4}, 2
+	p.ExtendQueue([]netease.Track{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 5}, {ID: 6}, {ID: 7}})
+	tail := slices.Clone(p.order[3:])
+	slices.Sort(tail)
+	if len(p.queue) != 7 || !slices.Equal(p.order[:3], []int{2, 0, 1}) || p.queue[p.order[p.at]].ID != 2 || !slices.Equal(tail, []int{3, 4, 5, 6}) {
+		t.Fatalf("shuffle order %v at %d lost what played or the new songs", p.order, p.at)
+	}
+}
+
 // The last next-song choice goes first, preserves pause, and leaves a
 // radio's feed so it cannot replace the listener's chosen queue.
 func TestPlayNextChoicesAndModes(t *testing.T) {

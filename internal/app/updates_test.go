@@ -78,6 +78,9 @@ func TestCheckForUpdatesFromSettings(t *testing.T) {
 	a.profile = &netease.Profile{UserID: 1}
 	tt := ui.NewTester(a.settingsView, 560, 2000)
 	tt.Frame()
+	// Settings can grow; reach the update action through the scroll view.
+	tt.Scroll(280, 1800, 0, 1200)
+	tt.Frame()
 	if err := tt.Click("检查更新"); err != nil {
 		t.Fatal(err)
 	}
