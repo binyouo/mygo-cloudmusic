@@ -275,8 +275,10 @@ func TestPlaylistRemainderRejectsStaleReply(t *testing.T) {
 	}
 }
 
-// Playing during loading waits for the whole queue, and a later choice cancels any earlier deferred play.
-func TestPlaylistPlayWaitsForCompleteQueue(t *testing.T) {
+// A chosen song plays on the part loaded so far and its queue grows to the
+// complete playlist as the rest arrives; only a shuffle of everything still
+// waits, and a later choice cancels any earlier deferred play.
+func TestPlaylistPlayGrowsToCompleteQueue(t *testing.T) {
 	old := playlistSongs
 	defer func() { playlistSongs = old }()
 	requests := make(chan []int64, 4)
@@ -289,22 +291,39 @@ func TestPlaylistPlayWaitsForCompleteQueue(t *testing.T) {
 		ID int64 `json:"id"`
 	}{2})
 	a.playPlaylist(p, 1, false)
-	wait(t, requests, "remaining songs before play")
-	if a.pl.Current() != nil {
-		t.Fatal("started a truncated queue")
+	wait(t, requests, "remaining songs keep loading")
+	if a.pl.Current() == nil || a.pl.Current().ID != 1 || len(a.pl.Queue()) != 1 {
+		t.Fatal("a chosen song waited for the rest of the playlist")
 	}
 	d := a.remainingPlaylist(p)
 	a.playlistSongsLoaded(d, 2, []netease.Track{{ID: 2, Name: "二", LocalPath: "/missing/music.wav"}}, nil)
-	if a.pl.Current() == nil || a.pl.Current().ID != 1 || len(a.pl.Queue()) != 2 {
-		t.Fatal("did not start the complete queue")
+	order, at := a.pl.PlayOrder()
+	if a.pl.Current().ID != 1 || len(a.pl.Queue()) != 2 || at+1 >= len(order) || a.pl.Queue()[order[at+1]].ID != 2 {
+		t.Fatal("the queue did not grow around the song playing")
 	}
-	// Another unfinished playlist should not win over a later click on this one.
+	// A play that left this queue keeps the grown songs from joining it.
+	a.pl.PlayQueue([]netease.Track{{ID: 9, LocalPath: "/missing/music.wav"}}, 0)
+	d.grow = 1
+	a.playlistSongsLoaded(d, 2, nil, nil)
+	if len(a.pl.Queue()) != 1 || a.pl.Queue()[0].ID != 9 {
+		t.Fatal("the grown songs replaced a queue the listener moved to")
+	}
+	// Shuffling everything still waits for the full list.
 	other := &netease.Playlist{ID: 43, TrackIDs: p.TrackIDs}
 	a.playlists[43] = other
-	a.playPlaylist(other, 2, false)
-	wait(t, requests, "other playlist")
-	a.playPlaylist(p, 1, false)
+	a.playPlaylist(other, 0, true)
+	wait(t, requests, "shuffle waits for the list")
 	a.playlistSongsLoaded(a.remainingPlaylist(other), 2, p.Tracks, nil)
+	if !a.pl.Shuffle() || len(a.pl.Queue()) != 2 {
+		t.Fatal("the deferred shuffle did not play once complete")
+	}
+	// Another unfinished playlist should not win over a later click on this one.
+	waiting := &netease.Playlist{ID: 44, TrackIDs: p.TrackIDs}
+	a.playlists[44] = waiting
+	a.playPlaylist(waiting, 0, true)
+	wait(t, requests, "waiting playlist")
+	a.playPlaylist(p, 1, false)
+	a.playlistSongsLoaded(a.remainingPlaylist(waiting), 2, p.Tracks, nil)
 	if a.pl.Current().ID != 1 {
 		t.Fatal("an earlier deferred play overrode the later choice")
 	}
