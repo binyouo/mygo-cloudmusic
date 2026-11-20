@@ -30,8 +30,8 @@ func paletteFor(t *ui.Theme) palette {
 	if t.Dark {
 		return palette{
 			dark:      true,
-			bg:        ui.Hex("#141416"),
-			sidebar:   ui.Hex("#1c1c1f"),
+			bg:        ui.Hex("#1a1a20"),
+			sidebar:   ui.Hex("#232329"),
 			text:      ui.Hex("#f5f5f7"),
 			muted:     ui.RGBA(235, 235, 245, 0.56),
 			faint:     ui.RGBA(235, 235, 245, 0.3),
@@ -74,20 +74,32 @@ func playButton(c *ui.Context, playing bool, size float32, color ui.Color) ui.El
 	return b
 }
 
-// playPause draws the icon of b, a button that plays and pauses: as it
-// goes from one to the other, the icon going shrinks and fades as the one
-// coming grows in, with a little spring.
+// playPause draws the icon of b, a button that plays and pauses, as
+// Apple's Now Playing does: two glyph layers cross, the one coming
+// popping in on a loose spring as the one going snaps out on a tight
+// one, and the whole button gives a little pulse as they cross.
 func playPause(c *ui.Context, b ui.Element, playing bool, size float32) {
 	to := float32(0)
 	if playing {
 		to = 1
 	}
-	v := b.AnimateTo("playing", to, ui.Animation{Spring: ui.SpringOptions{Duration: 340 * time.Millisecond, Bounce: 0.3}})
-	ui.Box(c).Size(size, size).Children(func() {
+	// Apple MediaCoreUI's PlayPauseStop.ca: the incoming glyph springs in
+	// (damping 30, mass 2, stiffness 300), the outgoing snaps out
+	// (damping 58.16, mass 1, stiffness 845.74).
+	in := b.AnimateTo("pp-in", to, ui.Animation{Spring: ui.SpringOptions{Mass: 2, Stiffness: 300, Damping: 30}})
+	out := b.AnimateTo("pp-out", to, ui.Animation{Spring: ui.SpringOptions{Mass: 1, Stiffness: 845.74, Damping: 58.1632}})
+	// The origin layer's pulse: a scale bump that follows how fast the
+	// incoming glyph is moving.
+	pulse := 1 + min(abs32(b.Velocity("pp-in"))*0.04, 0.08)
+	box := ui.Box(c).Size(size, size).TransformOrigin(0.5, 0.5)
+	if pulse > 1.001 {
+		box.Scale(pulse, pulse)
+	}
+	box.Children(func() {
 		for _, icon := range []struct {
 			svg   *ui.SVG
 			shown float32
-		}{{iconPlay, 1 - v}, {iconPause, v}} {
+		}{{iconPlay, 1 - out}, {iconPause, in}} {
 			if icon.shown <= 0.01 {
 				continue
 			}
@@ -137,9 +149,12 @@ func pillButton(c *ui.Context, icon *ui.SVG, label string, bg, fg ui.Color) ui.E
 
 // cover shows an artwork, or a placeholder of the same size while it loads.
 func (a *app) cover(c *ui.Context, url string, px int, size, radius float32) ui.Element {
+	return a.coverTile(c, bitmap(a.art.get(netease.Sized(url, px), false)), size, radius)
+}
+
+func (a *app) coverTile(c *ui.Context, bmp *ui.Bitmap, size, radius float32) ui.Element {
 	p := a.pal
 	box := ui.Box(c).Size(size, size).Radius(radius).Center()
-	bmp := bitmap(a.art.get(netease.Sized(url, px), false))
 	in := artIn(box, bmp)
 	if in < 1 {
 		box.Background(p.hover)
@@ -347,7 +362,7 @@ func (a *app) pageFoot(c *ui.Context, pg *paged, next func()) {
 			ui.Text(c, "正在加载…").FontSize(12.5).TextColor(a.pal.muted)
 		case pg.err != "":
 			ui.Text(c, pg.err).FontSize(12.5).TextColor(a.pal.muted)
-			if ui.Button(c.Key("retry"), "重试").Clicked() {
+			if a.settingButton(c, "retry", "重试", false).Clicked() {
 				next()
 			}
 		}

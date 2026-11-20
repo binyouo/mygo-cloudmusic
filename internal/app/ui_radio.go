@@ -36,7 +36,37 @@ func radioLabel(name string) string {
 	return "私人 FM"
 }
 
-var fetchHeartMode = netease.HeartMode
+var (
+	fetchHeartMode  = netease.HeartMode
+	fetchPersonalFM = netease.PersonalFM
+)
+
+// A request owns its results, even if the same radio is started again.
+type radioStart struct {
+	name   string
+	before *netease.Track
+}
+
+func (a *app) startingRadio() string {
+	if a.radioStarting != nil {
+		return a.radioStarting.name
+	}
+	return ""
+}
+
+func (a *app) beginRadioStart(name string) *radioStart {
+	start := &radioStart{name: name, before: a.pl.Current()}
+	a.radioStarting = start
+	return start
+}
+
+func (a *app) finishRadioStart(start *radioStart) bool {
+	if a.radioStarting != start {
+		return false
+	}
+	a.radioStarting = nil
+	return a.pl.Current() == start.before
+}
 
 // likedPlaylist returns the ID of the listener's liked songs, or 0.
 func (a *app) likedPlaylist() int64 {
@@ -57,7 +87,8 @@ func (a *app) radioFeed(name string) func(got func([]netease.Track)) {
 		switch {
 		case strings.HasPrefix(name, "fm:"):
 			mode := strings.TrimPrefix(name, "fm:")
-			fetch = func() ([]netease.Track, error) { return netease.PersonalFM(mode) }
+			personal := fetchPersonalFM
+			fetch = func() ([]netease.Track, error) { return personal(mode) }
 		case name == heartRadio:
 			// More like the last song queued, from the song it began with.
 			q, pid := a.pl.Queue(), a.likedPlaylist()
@@ -66,7 +97,8 @@ func (a *app) radioFeed(name string) func(got func([]netease.Track)) {
 				return
 			}
 			start, last := q[0].ID, q[len(q)-1].ID
-			fetch = func() ([]netease.Track, error) { return fetchHeartMode(last, start, pid) }
+			heart := fetchHeartMode
+			fetch = func() ([]netease.Track, error) { return heart(last, start, pid) }
 		default:
 			got(nil)
 			return
@@ -91,28 +123,31 @@ func (a *app) radioFeed(name string) func(got func([]netease.Track)) {
 func (a *app) playFM() {
 	name := fmRadio(fmModes[a.fmMode].mode)
 	if a.pl.Radio() == name {
+		a.radioStarting = nil
 		if !a.pl.Playing() {
 			a.pl.TogglePlay()
 		}
 		return
 	}
-	a.radioStarting = name
+	start := a.beginRadioStart(name)
 	feed := a.radioFeed(name)
-	feed(func(tracks []netease.Track) {
-		if a.radioStarting != name {
-			return
-		}
-		a.radioStarting = ""
-		if len(tracks) == 0 {
-			a.toast = "私人 FM 暂时无法播放，请稍后再试"
-			return
-		}
-		a.pl.PlayRadio(name, tracks, feed)
-	})
+	feed(func(tracks []netease.Track) { a.fmStarted(start, tracks, feed) })
+}
+
+func (a *app) fmStarted(start *radioStart, tracks []netease.Track, feed func(func([]netease.Track))) {
+	if !a.finishRadioStart(start) {
+		return
+	}
+	if len(tracks) == 0 {
+		a.toast = "私人 FM 暂时无法播放，请稍后再试"
+		return
+	}
+	a.pl.PlayRadio(start.name, tracks, feed)
 }
 
 // exitRadio stops the radio playing, but not the song it plays.
 func (a *app) exitRadio() {
+	a.radioStarting = nil
 	name := a.pl.Radio()
 	if name == "" {
 		return
@@ -153,6 +188,10 @@ func (a *app) startHeartMode() {
 		a.nowPlaying = true
 		return
 	}
+	if a.startingRadio() == heartRadio {
+		a.radioStarting = nil
+		return
+	}
 	var seed *netease.Track
 	fromPlaying := false
 	if cur := a.pl.Current(); cur != nil && a.liked[cur.ID] {
@@ -160,12 +199,16 @@ func (a *app) startHeartMode() {
 		seed, fromPlaying = &s, true
 	}
 	liked := a.playlists[pid]
-	a.radioStarting = heartRadio
+	if seed == nil && liked != nil && len(liked.Tracks) > 0 {
+		track := liked.Tracks[rand.IntN(len(liked.Tracks))]
+		seed = &track
+	}
+	needLiked := liked == nil
+	start := a.beginRadioStart(heartRadio)
+	fetch := fetchHeartMode
 	go func() {
-		if seed == nil {
-			if liked == nil {
-				liked, _ = netease.PlaylistDetail(pid)
-			}
+		if seed == nil && needLiked {
+			liked, _ := netease.PlaylistDetail(pid)
 			if liked != nil && len(liked.Tracks) > 0 {
 				track := liked.Tracks[rand.IntN(len(liked.Tracks))]
 				seed = &track
@@ -174,13 +217,12 @@ func (a *app) startHeartMode() {
 		var more []netease.Track
 		var err error
 		if seed != nil {
-			more, err = fetchHeartMode(seed.ID, seed.ID, pid)
+			more, err = fetch(seed.ID, seed.ID, pid)
 		}
 		a.post(func() {
-			if a.radioStarting != heartRadio {
+			if !a.finishRadioStart(start) {
 				return
 			}
-			a.radioStarting = ""
 			if seed == nil || err != nil {
 				a.toast = "心动模式暂时无法开启，请稍后再试"
 				return
@@ -199,16 +241,22 @@ func (a *app) startHeartMode() {
 func (a *app) fmPage(c *ui.Context) {
 	p := a.pal
 	top, bottom := a.insets(c)
-	ui.Scroll(c.Key("fm")).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, pagePad, bottom+48, pagePad).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
+	ui.Scroll(c.Key("fm")).TrackScroll(a.ps()).Grow(1).Padding(top+pageGap, a.pagePadding(), bottom+48, a.pagePadding()).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
 		a.startMark(c)
 		defer a.endMark(c)
 		// The mode the FM plays in, if it plays.
-		for i, m := range fmModes {
-			if a.pl.Radio() == fmRadio(m.mode) {
-				a.fmMode = i
+		if !strings.HasPrefix(a.startingRadio(), "fm:") {
+			for i, m := range fmModes {
+				if a.pl.Radio() == fmRadio(m.mode) {
+					a.fmMode = i
+				}
 			}
 		}
-		ui.Row(c).AlignItems(ui.End).Children(func() {
+		header := ui.Row(c).AlignItems(ui.End)
+		if a.phone {
+			header.Column().AlignItems(ui.Start)
+		}
+		header.Children(func() {
 			ui.Box(c).Grow(1).Children(func() { a.heading(c, "私人 FM", "无尽推荐") })
 			mode := a.fmMode
 			ui.Box(c).Margin(0, 0, 22, 0).Children(func() {
@@ -216,10 +264,10 @@ func (a *app) fmPage(c *ui.Context) {
 				for i, m := range fmModes {
 					labels[i] = m.label
 				}
-				if segmented(c.Key("fm-mode"), &mode, labels...) {
+				if a.phone && a.phoneTabs(c, &mode, labels...) || !a.phone && segmented(c.Key("fm-mode"), &mode, labels...) {
 					a.fmMode = mode
 					// Playing the FM, it changes to the mode at once.
-					if strings.HasPrefix(a.pl.Radio(), "fm:") {
+					if strings.HasPrefix(a.pl.Radio(), "fm:") || strings.HasPrefix(a.startingRadio(), "fm:") {
 						a.playFM()
 					}
 				}
@@ -235,6 +283,7 @@ func (a *app) fmPage(c *ui.Context) {
 func (a *app) fmCard(c *ui.Context) {
 	pl := a.pl
 	onFM := strings.HasPrefix(pl.Radio(), "fm:")
+	tuning := strings.HasPrefix(a.startingRadio(), "fm:")
 	var tr *netease.Track
 	if onFM {
 		tr = pl.Current()
@@ -257,8 +306,14 @@ func (a *app) fmCard(c *ui.Context) {
 				{Color: ui.RGBA(0, 0, 0, 0.35), At: 0},
 				{Color: ui.RGBA(0, 0, 0, 0.1), At: 1},
 			}})
-		ui.Row(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Padding(36, 40).Gap(40).AlignItems(ui.Center).Children(func() {
-			a.fmCovers(c, tr)
+		body := ui.Row(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Padding(36, 40).Gap(40).AlignItems(ui.Center)
+		if a.phone {
+			body.Padding(20, 24)
+		}
+		body.Children(func() {
+			if !a.phone {
+				a.fmCovers(c, tr)
+			}
 			ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(8).Children(func() {
 				label := "私人 FM · " + fmModes[a.fmMode].label
 				if onFM {
@@ -273,11 +328,19 @@ func (a *app) fmCard(c *ui.Context) {
 					ui.Text(c, "根据你的口味，一首接一首，不停推荐").FontSize(13.5).TextColor(white.Alpha(0.75))
 					ui.Row(c).Margin(18, 0, 0, 0).Children(func() {
 						label := "开始收听"
-						if a.radioStarting != "" && strings.HasPrefix(a.radioStarting, "fm:") {
-							label = "正在调频…"
+						if tuning {
+							label = "取消调频"
 						}
-						if pillButton(c.Key("start"), iconPlay, label, white, ui.Hex("#1d1d1f")).Clicked() {
-							a.playFM()
+						button := pillButton(c.Key("start"), iconPlay, label, white, ui.Hex("#1d1d1f"))
+						if a.phone {
+							button.MinHeight(44)
+						}
+						if button.Clicked() {
+							if tuning {
+								a.radioStarting = nil
+							} else {
+								a.playFM()
+							}
 						}
 					})
 					return
@@ -359,7 +422,11 @@ func (a *app) fmCovers(c *ui.Context, tr *netease.Track) {
 // heartCard starts heart mode: songs like those the listener likes.
 func (a *app) heartCard(c *ui.Context, p palette) {
 	on := a.pl.Radio() == heartRadio
-	ui.Row(c).Padding(22, 26).Gap(20).Radius(18).AlignItems(ui.Center).Background(p.hover).Children(func() {
+	card := ui.Row(c).Padding(22, 26).Gap(20).Radius(18).AlignItems(ui.Center).Background(p.hover)
+	if a.phone {
+		card.Column().AlignItems(ui.Start)
+	}
+	card.Children(func() {
 		ui.Box(c).Size(56, 56).Radius(16).Center().Shrink(0).
 			LinearGradient(ui.LinearGradient{Angle: 135, Oklab: true, From: ui.Oklch(0.72, 0.17, 10), To: ui.Oklch(0.58, 0.22, 350)}).
 			TextColor(white).Children(func() { ui.Icon(c, iconHeartFill).Size(26, 26) })
@@ -378,8 +445,8 @@ func (a *app) heartCard(c *ui.Context, p palette) {
 			label = "登录后开启"
 		case on:
 			label = "正在播放"
-		case a.radioStarting == heartRadio:
-			label = "正在开启…"
+		case a.startingRadio() == heartRadio:
+			label = "取消开启心动模式"
 		}
 		if pillButton(c.Key("heart"), iconHeartFill, label, p.accent, p.onAccent).Clicked() {
 			a.startHeartMode()

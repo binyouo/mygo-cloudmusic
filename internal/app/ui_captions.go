@@ -18,7 +18,11 @@ func (a *app) captionsPane(c *ui.Context, tr *netease.Track, h float32) {
 	pl := a.pl
 	cs := &a.captions
 	if !a.modelReady() {
-		a.modelCard(c)
+		if systemCaptions {
+			a.systemCaptionsCard(c)
+		} else {
+			a.modelCard(c)
+		}
 		return
 	}
 	if !a.settings.Captions {
@@ -41,7 +45,11 @@ func (a *app) captionsPane(c *ui.Context, tr *netease.Track, h float32) {
 		case cs.program != tr.ProgramID:
 			a.captionsNote(c, "正在识别…", "", nil)
 		case cs.failed == cs.program:
-			a.captionsNote(c, "字幕生成失败", "", nil)
+			message := cs.failure
+			if message == "" {
+				message = "字幕生成失败"
+			}
+			a.captionsNote(c, message, "重试", a.retryCaptions)
 		case a.captionsWritten():
 			a.captionsNote(c, "这期节目没有识别到语音", "", nil)
 		default:
@@ -61,16 +69,37 @@ func (a *app) captionsPane(c *ui.Context, tr *netease.Track, h float32) {
 		}
 	}
 	if a.lyricTrack != tr.ID {
-		a.lyricTrack, a.lyricAt = tr.ID, -2
-		a.lyricScroll, a.lyricGlide = ui.ScrollState{}, lyricGlide{}
+		a.lyricPaneState = lyricPaneState{lyricTrack: tr.ID, lyricAt: -2}
 	}
-	lag := a.lyricGlide.step(c, &a.lyricScroll)
-	scroll := ui.Scroll(c.Key("captions")).Grow(1).TrackScroll(&a.lyricScroll).Padding(0, 8, h*0.5, 0)
-	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 24, weight: 700, lineHeight: 1.4}, func() {
-		if cs.work != nil {
+	if a.lyricListJump {
+		a.lyricGlide.set = a.lyricScroll.Y
+		a.lyricListJump = false
+	}
+	following := a.lyricGlide.pending
+	lag, took := a.lyricGlide.step(c, &a.lyricScroll, a.phone)
+	if a.phone {
+		if took {
+			a.seeking, a.seekStamp, a.seekY = true, c.Now(), a.lyricScroll.Y
+		}
+		a.phoneLyricSeekWatch(c, &a.lyricPaneState)
+	}
+	var scroll ui.Element
+	if a.phone {
+		scroll = ui.Column(c.Key("captions")).Grow(1).MinHeight(0)
+	} else {
+		scroll = ui.Scroll(c.Key("captions")).Grow(1).TrackScroll(&a.lyricScroll).Padding(0, 8, h*0.5, 0)
+	}
+	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 24, weight: 700, lineHeight: 1.4, virtual: a.phone, listPadding: h * 0.5}, func() {
+		switch {
+		case cs.work != nil:
 			ui.Text(c, "正在识别…").FontSize(14).FontWeight(600).TextColor(white.Alpha(0.35)).Padding(16, 12)
+		case cs.failed == cs.program:
+			ui.Button(c.Key("retry-captions"), "重试生成后续字幕").MinHeight(44).OnClick(a.retryCaptions)
 		}
 	})
+	if a.phone && following {
+		a.lyricListJump = true
+	}
 }
 
 // captionsNote says how the captions are, in the middle of the pane, with
@@ -81,6 +110,19 @@ func (a *app) captionsNote(c *ui.Context, text, button string, act func()) {
 		if button != "" && pillButton(c.Key("act"), nil, button, white.Alpha(0.14), white).Clicked() {
 			act()
 		}
+	})
+}
+
+func (a *app) systemCaptionsCard(c *ui.Context) {
+	ui.Column(c).Grow(1).Justify(ui.Center).Gap(14).Padding(0, 12).Children(func() {
+		ui.Text(c, "为播客生成字幕").FontSize(24).FontWeight(800)
+		ui.Text(c, "用 iOS 的语音识别在本机转写当前节目。字幕会随播放滚动，点一句即可跳到那里。").
+			FontSize(14).LineHeight(1.6).TextColor(white.Alpha(0.68))
+		if message := a.captions.model.err; message != "" {
+			ui.Text(c, message).FontSize(13).TextColor(ui.Hex("#ff8a80"))
+		}
+		ui.Button(c.Key("enable-speech"), "启用本机语音识别").MinHeight(44).
+			Disabled(a.captions.model.downloading).OnClick(a.startModelDownload)
 	})
 }
 
@@ -137,11 +179,19 @@ func (a *app) captionSettings(row func(label, desc string, control func()), c *u
 	m := &a.captions.model
 	s := &a.settings
 	row("播客字幕", "播放节目时在本机转写语音，生成可滚动的字幕；转写时会多用一些电量", func() {
-		if ui.Switch(c.Key("captions"), &s.Captions).Label("播客字幕").Disabled(!a.modelReady()).Changed() {
+		if a.switchControl(c, "captions", &s.Captions, "播客字幕").Disabled(!a.modelReady()).Changed() {
 			a.changed()
 			a.syncCaptions()
 		}
 	})
+	if systemCaptions {
+		if !a.modelReady() {
+			row("本机语音识别", m.err, func() {
+				a.settingButton(c, "enable-speech", "启用", m.downloading).OnClick(a.startModelDownload)
+			})
+		}
+		return
+	}
 	var desc string
 	switch {
 	case m.downloading:
@@ -154,15 +204,15 @@ func (a *app) captionSettings(row func(label, desc string, control func()), c *u
 	row("语音识别模型", desc, func() {
 		switch {
 		case m.downloading:
-			if ui.Button(c.Key("model"), "取消").Clicked() {
+			if a.settingButton(c, "model", "取消", false).Clicked() {
 				a.cancelModelDownload()
 			}
 		case a.modelReady():
-			if ui.Button(c.Key("model"), "删除").Clicked() {
+			if a.settingButton(c, "model", "删除", false).Clicked() {
 				a.deleteModel()
 			}
 		default:
-			if ui.Button(c.Key("model"), "下载").Clicked() {
+			if a.settingButton(c, "model", "下载", false).Clicked() {
 				a.startModelDownload()
 			}
 		}

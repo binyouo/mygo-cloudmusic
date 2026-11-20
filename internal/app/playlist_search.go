@@ -109,7 +109,13 @@ func (a *app) playPlaylist(p *netease.Playlist, id int64, shuffle bool) {
 		d.play = &playlistPlay{id, shuffle, a.pl.Current()}
 		d.err = ""
 		a.morePlaylistSongs(d)
-		a.toast = "正在加载完整歌单，完成后播放"
+		if !a.phone {
+			a.toast = "正在加载完整歌单，完成后播放"
+		}
+		return
+	}
+	if shuffle && id == 0 {
+		a.pl.PlayShuffled(p.Tracks)
 		return
 	}
 	at := 0
@@ -123,6 +129,31 @@ func (a *app) playPlaylist(p *netease.Playlist, id int64, shuffle bool) {
 		a.pl.ToggleShuffle()
 	}
 	a.pl.PlayQueue(p.Tracks, at)
+}
+
+// The wait stays actionable while the listener scrolls or searches the playlist.
+func (a *app) phonePlaylistPending(c *ui.Context) {
+	d := a.playlistMore[a.route.id]
+	if d == nil || d.play == nil {
+		return
+	}
+	p := a.pal
+	label := "正在加载完整歌单"
+	if d.err != "" {
+		label = d.err
+	}
+	ui.Row(c).MinHeight(44).Shrink(0).Padding(0, 10, 0, 16).Gap(6).AlignItems(ui.Center).
+		Background(p.hover).Children(func() {
+		ui.Text(c, label).Grow(1).MinWidth(0).FontSize(13).TextColor(p.muted).SingleLine()
+		if d.err != "" && !a.loadingPl[d.pl.ID] {
+			ui.ButtonBase(c.Key("retry")).MinWidth(44).Height(44).Center().Label("重试加载歌单").
+				OnClick(func() { d.err = ""; a.morePlaylistSongs(d) }).
+				Children(func() { ui.Text(c, "重试").FontSize(14).TextColor(p.accent) })
+		}
+		ui.ButtonBase(c.Key("cancel")).MinWidth(44).Height(44).Center().Label("取消等待播放").
+			OnClick(func() { d.play = nil }).
+			Children(func() { ui.Text(c, "取消").FontSize(14).TextColor(p.accent) })
+	})
 }
 
 // songFilter keeps normalized text and matching indices, never a second song queue.
@@ -172,15 +203,17 @@ func (f *songFilter) rows(p *netease.Playlist) []int {
 	return f.indices
 }
 
-// playlistSearch is the playlist's search, at the right of the row of its
-// header's buttons, over the songs it filters.
+// playlistSearch filters the songs from the desktop playlist header or
+// the fixed phone navigation bar.
 func (a *app) playlistSearch(c *ui.Context) {
 	p := a.pal
-	ui.Box(c).Grow(1)
 	// A press anywhere in the field, its magnifier too, types in it. It is
 	// a pill as tall as the buttons beside it.
 	field := ui.Row(c).Width(220).Height(36).AlignSelf(ui.Center).PaddingX(14).Gap(7).Radius(999).AlignItems(ui.Center).Cursor(ui.CursorText).
 		OnClick(func() { a.playlistSearchBox.Focus(c) })
+	if a.phone {
+		field.Grow(1).Basis(0).MinWidth(0).Height(44).Padding(0, 0, 0, 10).Radius(9)
+	}
 	if c.Focused(a.playlistSearchBox) {
 		field.Background(p.bg).Shadow(0, 0, 0, 3, p.accent.Alpha(0.25)).Border(1, p.accent.Alpha(0.6))
 	} else {
@@ -188,21 +221,32 @@ func (a *app) playlistSearch(c *ui.Context) {
 	}
 	field.Children(func() {
 		ui.Icon(c, iconSearch).Size(14, 14).TextColor(p.muted)
-		ui.TextInputBase(c.Key("playlist-song-search"), &a.playlistFilter.query).Bind(&a.playlistSearchBox).
+		in := ui.TextInputBase(c.Key("playlist-song-search"), &a.playlistFilter.query).Bind(&a.playlistSearchBox).
 			Grow(1).MinWidth(0).FillHeight().FontSize(13).Placeholder("搜索歌单内歌曲").Label("搜索歌单内歌曲").
-			OnChange(func() { a.trackList.ScrollTo(0, ui.Start) })
+			OnChange(func() { a.ls().ScrollTo(0, ui.Start) })
+		if a.phone {
+			in.FocusBind(&a.phonePlaylistEditing, true)
+			if in.Submitted() {
+				a.phonePlaylistEditing = false
+			}
+		}
 		if a.playlistFilter.query != "" {
 			clear := ui.ButtonBase(c.Key("clear-song-search")).Size(18, 18).Radius(999).Center().Label("清除歌曲搜索").TextColor(p.muted).KeepFocus()
+			if a.phone {
+				clear.Size(44, 44)
+			}
 			if clear.Hovered() {
 				clear.Background(p.press)
 			}
 			clear.Children(func() { ui.Icon(c, iconX).Size(11, 11) })
-			clear.OnClick(func() {
-				a.playlistFilter.query = ""
-				a.trackList.ScrollTo(0, ui.Start)
-			})
+			clear.OnClick(a.clearPlaylistSearch)
 		}
 	})
+}
+
+func (a *app) clearPlaylistSearch() {
+	a.playlistFilter.query = ""
+	a.ls().ScrollTo(0, ui.Start)
 }
 
 // playlistProgress says, under the songs, how many of the playlist's have
@@ -219,7 +263,7 @@ func (a *app) playlistProgress(c *ui.Context, p *netease.Playlist) {
 		}
 		ui.Text(c, label).FontSize(12).TextColor(a.pal.muted)
 		if d.err != "" {
-			ui.Button(c.Key("retry"), "重试").OnClick(func() { d.err = ""; a.morePlaylistSongs(d) })
+			a.settingButton(c, "retry", "重试", false).OnClick(func() { d.err = ""; a.morePlaylistSongs(d) })
 		}
 	})
 }

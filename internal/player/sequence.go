@@ -135,6 +135,7 @@ func (s *sequence) queue(p *pcmTrack) {
 	if p != nil {
 		p.retain()
 	}
+	s.prepareMix()
 	s.mu.Unlock()
 	if old != nil {
 		old.release()
@@ -186,6 +187,9 @@ func (s *sequence) Read(b []float32) (int, error) {
 				s.startSmartRender(p, s.next, *s.plan)
 				start := part.start + s.plan.sourceStart - part.offset
 				data := s.render.ready.Load()
+				if data != nil {
+					start = part.start + data.sourceStart - part.offset
+				}
 				if data != nil && s.pos == start {
 					s.beginSmart(part, data)
 					s.mu.Unlock()
@@ -193,6 +197,10 @@ func (s *sequence) Read(b []float32) (int, error) {
 				}
 				if start > s.pos {
 					limit = min(limit, int((start-s.pos)*2))
+				} else if data == nil && s.plan.full && s.plan.outAnalysis.deviceTiming != nil && !s.render.done.Load() {
+					// The analysis buffer's start is only provisional until
+					// the device renderer publishes its effect boundary.
+					limit = min(limit, 4096*2)
 				} else {
 					// Never block playback for analysis or replay a missed tail.
 					s.parts[len(s.parts)-1].noMix = true
@@ -345,6 +353,7 @@ func (s *sequence) SetPosition(frame int64) error {
 	}
 	s.plan = nil
 	s.pos, s.ended = frame, false
+	s.prepareMix()
 	next := s.next
 	s.mu.Unlock()
 	for _, p := range removed {

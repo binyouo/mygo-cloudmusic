@@ -1,6 +1,9 @@
 package netease
 
-import "net/url"
+import (
+	"context"
+	"net/url"
+)
 
 // Suggestions are what a search may be after, as its query is typed, in
 // the order NetEase ranks their kinds. It suggests no users or podcasts.
@@ -13,7 +16,7 @@ type Suggestions struct {
 }
 
 // SearchSuggest returns what a search for query may be after.
-func SearchSuggest(query string) (Suggestions, error) {
+func SearchSuggest(ctx context.Context, query string) (Suggestions, error) {
 	var res struct {
 		Result struct {
 			Songs   []legacyTrack `json:"songs"`
@@ -26,7 +29,7 @@ func SearchSuggest(query string) (Suggestions, error) {
 			Order     []string   `json:"order"`
 		} `json:"result"`
 	}
-	if err := get("/api/search/suggest/web", url.Values{"s": {query}}, &res); err != nil {
+	if err := getWithContext(ctx, "/api/search/suggest/web", url.Values{"s": {query}}, &res); err != nil {
 		return Suggestions{}, err
 	}
 	r := res.Result

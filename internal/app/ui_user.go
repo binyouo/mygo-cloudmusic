@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 
+	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/netease"
@@ -118,6 +119,10 @@ func (a *app) userPage(c *ui.Context) {
 	p := a.pal
 	id := a.route.id
 	d := a.users[id]
+	if a.phone {
+		a.userPhonePage(c, d)
+		return
+	}
 	if d.user == nil {
 		if d.loading == 0 {
 			a.centered(c, d.err, func() { a.loadUser(id) })
@@ -133,7 +138,7 @@ func (a *app) userPage(c *ui.Context) {
 	u := d.user
 	own := a.profile != nil && a.profile.UserID == id
 	a.scrollPage(c, func() {
-		ui.Row(c).Gap(28).AlignItems(ui.End).Children(func() {
+		a.detailHeader(c).Children(func() {
 			ui.Box(c).Size(artistPhotoSize, artistPhotoSize).Radius(artistPhotoSize/2).Shadow(0, 18, 40, -10, p.cardShade).Children(func() {
 				a.coverFill(c, u.AvatarURL, 600, artistPhotoSize/2)
 			})
@@ -202,5 +207,169 @@ func (a *app) userRow(c *ui.Context, u *netease.User) {
 	})
 	if row.Clicked() {
 		a.open(route{page: pageUser, id: u.UserID})
+	}
+}
+
+// userPhonePage is a user's page on the phone, as the mobile app's: the
+// avatar blurred and darkened under the nav bar, the person over it, and
+// a card of tabs over what they made and follow.
+func (a *app) userPhonePage(c *ui.Context, d *userData) {
+	id := a.route.id
+	if d.user == nil {
+		if d.loading == 0 {
+			a.centered(c, d.err, func() { a.loadUser(id) })
+			return
+		}
+		s := a.pageShimmer(c)
+		a.scrollPage(c, func() {
+			top, _ := a.insets(c)
+			pad := a.pagePadding()
+			ui.Box(c).Margin(-(top + pageGap), -pad, 0, -pad).Height(190).Background(a.pal.hover)
+			ui.Row(c).Margin(-40, 0, 0, 0).PaddingX(4).Gap(14).AlignItems(ui.Center).Children(func() {
+				s.bone(c, 38).Size(76, 76)
+				ui.Column(c).Grow(1).Gap(8).Children(func() {
+					s.text(c, 20, 1.2).Width(140)
+					s.text(c, 13, 1.3).Width(90)
+				})
+			})
+			ui.Column(c).Margin(16, -pad, 0, -pad).Radius(16, 16, 0, 0).Background(a.pal.bg).Padding(14, pad, 0, pad).Children(func() {
+				for i := range 3 {
+					if i > 0 {
+						ui.Box(c).Height(1).Margin(0, 0, 0, 62).Background(a.pal.hairline)
+					}
+					ui.Row(c).Height(68).Gap(10).AlignItems(ui.Center).Children(func() {
+						s.bone(c, 6).Size(52, 52)
+						ui.Column(c).Grow(1).Gap(6).Children(func() {
+							s.text(c, 16, 1.2).WidthPercent(55)
+							s.text(c, 13, 1.3).WidthPercent(30)
+						})
+					})
+				}
+			})
+		})
+		return
+	}
+	u := d.user
+	own := a.profile != nil && a.profile.UserID == id
+	a.scrollPage(c, func() {
+		p := a.pal
+		top, _ := a.insets(c)
+		pad := a.pagePadding()
+		ui.Box(c.Key("user-head")).Margin(-(top + pageGap), -pad, 0, -pad).Clip().TextColor(white).Children(func() {
+			a.coverFill(c, u.AvatarURL, 400, 0)
+			ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Material(glass.Blur{Radius: 30}).PassThrough()
+			ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().Background(ui.RGBA(0, 0, 0, 0.35))
+			ui.Row(c).ZIndex(1).Padding(top+pageGap+12, pad, 24, pad).Gap(14).AlignItems(ui.Center).Children(func() {
+				ui.Box(c).Size(80, 80).Radius(40).Border(2, white.Alpha(0.8)).Shrink(0).Children(func() {
+					a.coverFill(c, u.AvatarURL, 200, 40)
+				})
+				ui.Column(c).Grow(1).MinWidth(0).Gap(5).Children(func() {
+					ui.Text(c, u.Nickname).FontSize(20).FontWeight(700).SingleLine()
+					ui.Text(c, fmt.Sprintf("%s 关注 · %s 粉丝", count(u.Follows), count(u.Followeds))).FontSize(13).TextColor(white.Alpha(0.75)).SingleLine()
+					if u.Signature != "" {
+						ui.Text(c, u.Signature).FontSize(12).TextColor(white.Alpha(0.6)).MaxLines(2).LineHeight(1.3)
+					}
+				})
+			})
+		})
+		// The tabbed card rides over the header's bottom, full-bleed.
+		ui.Column(c).Margin(-16, -pad, 0, -pad).Radius(16, 16, 0, 0).Background(p.bg).Children(func() {
+			labels := []string{"创建的歌单"}
+			if own && d.podcastsShown && len(d.podcasts) > 0 {
+				labels = append(labels, "订阅的播客")
+			}
+			if own && d.artistsShown && len(d.artists) > 0 {
+				labels = append(labels, "关注的歌手")
+			}
+			if a.phoneUserTab >= len(labels) {
+				a.phoneUserTab = 0
+			}
+			if len(labels) > 1 {
+				ui.Box(c).Padding(8, pad, 0, pad).Children(func() {
+					a.phoneTabs(c, &a.phoneUserTab, labels...)
+				})
+			}
+			ui.Column(c).PaddingX(pad).Margin(4, 0, 0, 0).Children(func() {
+				switch labels[a.phoneUserTab] {
+				case "创建的歌单":
+					switch {
+					case d.loading > 0:
+						s := a.pageShimmer(c)
+						for range 3 {
+							ui.Row(c).Height(68).Gap(10).AlignItems(ui.Center).Children(func() {
+								s.bone(c, 6).Size(52, 52)
+								ui.Column(c).Grow(1).Gap(6).Children(func() {
+									s.text(c, 16, 1.2).WidthPercent(55)
+									s.text(c, 13, 1.3).WidthPercent(30)
+								})
+							})
+						}
+					case len(d.playlists) == 0:
+						a.empty(c, "暂无公开歌单")
+					default:
+						a.phonePlaylistRows(c, d.playlists, own)
+					}
+				case "订阅的播客":
+					a.userPhonePodcasts(c, d.podcasts)
+				case "关注的歌手":
+					a.userPhoneArtists(c, d.artists)
+				}
+			})
+		})
+	})
+}
+
+// userPhonePodcasts lists the podcasts a user subscribes to on their
+// phone page: a cover, the name and the count of episodes.
+func (a *app) userPhonePodcasts(c *ui.Context, pods []netease.Podcast) {
+	p := a.pal
+	for i := range pods {
+		pod := &pods[i]
+		if i > 0 {
+			ui.Box(c).Height(1).Margin(0, 0, 0, 62).Background(p.hairline)
+		}
+		b := ui.ButtonBase(c.Key(pod.ID)).Height(68).Gap(10).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false).Label(pod.Name)
+		if b.Pressed() || b.Hovered() {
+			b.Background(p.hover)
+		}
+		b.Children(func() {
+			a.cover(c, pod.PicURL, 120, 52, 6)
+			ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
+				ui.Text(c, pod.Name).FontSize(16).SingleLine()
+				ui.Textf(c, "%d 期", pod.ProgramCount).FontSize(13).TextColor(p.muted).SingleLine()
+			})
+		})
+		if b.Clicked() {
+			a.open(route{page: pagePodcast, id: pod.ID})
+		}
+	}
+}
+
+// userPhoneArtists lists the artists a user follows on their phone page:
+// a round photo and the name.
+func (a *app) userPhoneArtists(c *ui.Context, artists []netease.ArtistProfile) {
+	p := a.pal
+	for i := range artists {
+		ar := &artists[i]
+		if i > 0 {
+			ui.Box(c).Height(1).Margin(0, 0, 0, 58).Background(p.hairline)
+		}
+		b := ui.ButtonBase(c.Key(ar.ID)).Height(64).Gap(10).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false).Label(ar.Name)
+		if b.Pressed() || b.Hovered() {
+			b.Background(p.hover)
+		}
+		b.Children(func() {
+			photo := ar.Avatar
+			if photo == "" {
+				photo = ar.PicURL
+			}
+			ui.Box(c).Size(48, 48).Radius(24).Shrink(0).Children(func() {
+				a.coverFill(c, photo, 120, 24)
+			})
+			ui.Text(c, ar.Name).FontSize(16).SingleLine().Grow(1).MinWidth(0)
+		})
+		if b.Clicked() {
+			a.open(route{page: pageArtist, id: ar.ID})
+		}
 	}
 }

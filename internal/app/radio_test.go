@@ -61,3 +61,71 @@ func TestExitHeartMode(t *testing.T) {
 		t.Fatalf("from Now Playing: radio %q, current %v", a.pl.Radio(), a.pl.Current())
 	}
 }
+
+// A canceled tune and an earlier mode request cannot take over a restarted FM.
+func TestPhoneFMDiscardsEarlierTune(t *testing.T) {
+	a := newTestApp()
+	a.phone = true
+	a.settings = defaultSettings()
+	a.route = route{page: pageFM}
+	a.pl.Cue([]netease.Track{{ID: 7, Name: "当前歌曲"}})
+
+	requested := make(chan string, 3)
+	personal := fetchPersonalFM
+	defer func() { fetchPersonalFM = personal }()
+	fetchPersonalFM = func(mode string) ([]netease.Track, error) {
+		requested <- mode
+		return []netease.Track{{ID: 9}}, nil
+	}
+	tt := ui.NewTester(a.view, 390, 780)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tt.Frame()
+	tapPhone(t, tt, "开始收听")
+	canceled := a.radioStarting
+	if mode := wait(t, requested, "first tune"); mode != netease.FMDefault {
+		t.Fatalf("first tune requested %q", mode)
+	}
+	tt.Frame()
+	tapPhone(t, tt, "取消调频")
+	if a.radioStarting != nil || a.pl.Radio() != "" || a.pl.Current().ID != 7 {
+		t.Fatal("canceling the tune changed playback")
+	}
+	tt.Frame()
+	tapPhone(t, tt, "开始收听")
+	restarted := a.radioStarting
+	if mode := wait(t, requested, "restarted tune"); mode != netease.FMDefault {
+		t.Fatalf("restarted tune requested %q", mode)
+	}
+	feed := func(func([]netease.Track)) {}
+	a.fmStarted(canceled, []netease.Track{{ID: 9}}, feed)
+	if a.radioStarting != restarted || a.pl.Radio() != "" || a.pl.Current().ID != 7 {
+		t.Fatal("the canceled response took over the restarted tune")
+	}
+	tt.Frame()
+	tapPhone(t, tt, "探索")
+	exploring := a.radioStarting
+	if mode := wait(t, requested, "explore tune"); mode != netease.FMExplore {
+		t.Fatalf("switching modes requested %q", mode)
+	}
+	a.fmStarted(restarted, []netease.Track{{ID: 10}}, feed)
+	if a.radioStarting != exploring || a.pl.Radio() != "" || a.pl.Current().ID != 7 {
+		t.Fatal("an earlier response changed playback or cleared the latest tune")
+	}
+	a.fmStarted(exploring, []netease.Track{{ID: 11, LocalPath: "/missing/explore.flac"}}, feed)
+	if a.radioStarting != nil || a.pl.Radio() != fmRadio(netease.FMExplore) || a.pl.Current().ID != 11 {
+		t.Fatalf("latest tune left radio %q and current %v", a.pl.Radio(), a.pl.Current())
+	}
+}
+
+// Selecting a queued song while FM loads keeps the selected song when FM returns.
+func TestPhoneFMTuneRespectsQueueSelection(t *testing.T) {
+	a := newTestApp()
+	a.phone = true
+	a.pl.Cue([]netease.Track{{ID: 7}, {ID: 8, LocalPath: "/missing/queue.flac"}})
+	start := a.beginRadioStart(fmRadio(netease.FMDefault))
+	a.pl.Jump(1)
+	a.fmStarted(start, []netease.Track{{ID: 9}}, func(func([]netease.Track)) {})
+	if a.radioStarting != nil || a.pl.Radio() != "" || a.pl.Current().ID != 8 {
+		t.Fatalf("the pending tune left radio %q and current %v", a.pl.Radio(), a.pl.Current())
+	}
+}

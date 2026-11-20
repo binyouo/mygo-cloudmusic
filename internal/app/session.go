@@ -29,17 +29,27 @@ func (a *app) saveSession() {
 	if !ok {
 		return
 	}
-	b, err := json.Marshal(s)
-	if err != nil || string(b) == a.savedSession {
-		return
-	}
 	path, err := sessionPath()
 	if err != nil {
+		return
+	}
+	if a.phone {
+		s.Queue = mapPhoneTrackPaths(s.Queue, filepath.Dir(path), relativePhonePath)
+	}
+	b, err := json.Marshal(s)
+	if err != nil || string(b) == a.savedSession {
 		return
 	}
 	if os.WriteFile(path+".part", b, 0o600) == nil && os.Rename(path+".part", path) == nil {
 		a.savedSession = string(b)
 	}
+}
+
+// A lock-screen command or audio interruption can be the last event the
+// app handles before iOS suspends it. Keep the resulting position now.
+func (a *app) nativePlaybackChanged() {
+	a.saveSession()
+	a.redraw()
 }
 
 // sessionEvery is how long after playback changed, and how often as it
@@ -75,6 +85,10 @@ func (a *app) restoreSession() {
 		return
 	}
 	a.restored = true
+	// Account restoration can finish after the listener has selected a song.
+	if a.pl.Current() != nil {
+		return
+	}
 	path, err := sessionPath()
 	if err != nil {
 		return
@@ -86,6 +100,9 @@ func (a *app) restoreSession() {
 	var s player.Session
 	if json.Unmarshal(b, &s) != nil {
 		return
+	}
+	if a.phone {
+		s.Queue = mapPhoneTrackPaths(s.Queue, filepath.Dir(path), resolvePhonePath)
 	}
 	a.savedSession = string(b)
 	a.pl.Restore(s)

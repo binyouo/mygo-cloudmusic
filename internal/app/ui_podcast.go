@@ -189,7 +189,7 @@ func (a *app) podcastPage(c *ui.Context) {
 	pod := d.podcast
 	cur := a.pl.Current()
 	a.scrollPage(c, func() {
-		ui.Row(c).Gap(28).AlignItems(ui.End).Padding(0, 0, 8, 0).Children(func() {
+		a.detailHeader(c).Padding(0, 0, 8, 0).Children(func() {
 			ui.Box(c).Size(212, 212).Radius(14).Shadow(0, 18, 40, -10, p.cardShade).Children(func() {
 				a.coverFill(c, pod.PicURL, 600, 14)
 			})
@@ -210,7 +210,7 @@ func (a *app) podcastPage(c *ui.Context) {
 				if desc := strings.TrimSpace(pod.Description); desc != "" {
 					ui.Text(c, strings.ReplaceAll(desc, "\n", " ")).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
 				}
-				ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
+				ui.Row(c).Wrap().Gap(10).Margin(10, 0, 0, 0).Children(func() {
 					if pillButton(c.Key("play"), iconPlay, "播放", p.accent, p.onAccent).Clicked() {
 						a.playProgram(d, 0)
 					}
@@ -240,8 +240,9 @@ func (a *app) programRow(c *ui.Context, d *podcastData, i int, cur *netease.Trac
 	p := a.pal
 	pr := &d.programs[i]
 	playing := cur != nil && cur.ProgramID == pr.ID
+	playable := pr.MainSong.ID != 0
 	row := ui.ButtonBase(c).Height(60).PaddingX(12).Gap(14).Radius(8).AlignItems(ui.Center).FocusRing(false).
-		Label(pr.Name).Disabled(pr.MainSong.ID == 0)
+		Label(pr.Name).Disabled(!playable && !a.phone)
 	switch {
 	case playing:
 		row.Background(p.accent.Alpha(0.08))
@@ -264,17 +265,28 @@ func (a *app) programRow(c *ui.Context, d *podcastData, i int, cur *netease.Trac
 		if playing {
 			a.nowPlayingBars(c)
 		}
-		// A liked episode's heart shows; the others' as the pointer is on them.
-		ui.Box(c).Size(32, 32).Center().Children(func() {
-			if a.likedPrograms[pr.ID] || row.Hovered() {
-				tr := pr.Track(d.podcast)
-				a.likeButton(c.Key("like"), &tr, 15, p.muted)
-			}
-		})
+		if !a.phone {
+			// A liked episode's heart shows; the others' as the pointer is on them.
+			ui.Box(c).Size(32, 32).Center().Children(func() {
+				if a.likedPrograms[pr.ID] || row.Hovered() {
+					tr := pr.Track(d.podcast)
+					a.likeButton(c.Key("like"), &tr, 15, p.muted)
+				}
+			})
+		}
 		ui.Text(c, clock(time.Duration(pr.Duration)*time.Millisecond)).FontSize(12).FontFeatures("tnum").TextColor(p.muted)
+		if a.phone {
+			tr := pr.Track(d.podcast)
+			a.phoneTrackActions(c.Key("program-actions"), &tr, 0, p.muted)
+		}
 	})
 	if row.Clicked() {
-		a.playProgram(d, i)
+		if playable {
+			a.playProgram(d, i)
+		} else if a.phone {
+			tr := pr.Track(d.podcast)
+			a.openPhoneProgram(&tr)
+		}
 	}
 }
 
@@ -306,13 +318,33 @@ func (a *app) podcastRow(c *ui.Context, pod *netease.Podcast) {
 
 // programPane is what the episode playing is about, in Now Playing, in
 // place of a song's lyrics.
-func (a *app) programPane(c *ui.Context, tr *netease.Track) {
-	ui.Scroll(c.Key(tr.ProgramID)).Grow(1).Padding(4, 12, 48, 0).Children(func() {
+func (a *app) programPane(c *ui.Context, tr *netease.Track, ink ui.Color) {
+	ui.Scroll(c.Key(tr.ProgramID)).Grow(1).MinHeight(0).Padding(4, 12, 48, 0).Children(func() {
 		desc := strings.TrimSpace(tr.Description)
 		if desc == "" {
 			desc = "这期节目没有简介"
 		}
-		ui.Text(c, desc).FontSize(15).LineHeight(1.7).TextColor(white.Alpha(0.75))
+		ui.Text(c, desc).FontSize(15).LineHeight(1.7).TextColor(ink.Alpha(0.75))
+	})
+}
+
+func (a *app) openPhoneProgram(tr *netease.Track) {
+	selected := *tr
+	a.phoneProgram = &selected
+}
+
+func (a *app) phoneProgramSheet(c *ui.Context) {
+	tr := a.phoneProgram
+	if tr == nil {
+		return
+	}
+	ink := a.pal.text
+	if a.nowPlaying {
+		ink = white
+	}
+	a.phoneBottomSheet(c.Key(tr.ProgramID), "节目简介", 0, a.nowPlaying, func() { a.phoneProgram = nil }, nil, nil, func() {
+		ui.Text(c.Key("program-title"), tr.Name).FontSize(17).FontWeight(700).MaxLines(2).Padding(8, 0).Shrink(0)
+		a.programPane(c, tr, ink)
 	})
 }
 
@@ -415,7 +447,7 @@ func (a *app) podcastsPage(c *ui.Context) {
 		return
 	}
 	top, bottom := a.insets(c)
-	ui.Scroll(c.Key("podcasts")).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, pagePad, bottom+48, pagePad).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
+	ui.Scroll(c.Key("podcasts")).TrackScroll(a.ps()).Grow(1).Padding(top+pageGap, a.pagePadding(), bottom+48, a.pagePadding()).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
 		a.startMark(c)
 		defer a.endMark(c)
 		a.heading(c, "播客", "")

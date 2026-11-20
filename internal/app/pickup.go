@@ -25,29 +25,49 @@ type pickedUp struct {
 // pickUp queues the songs the listener played last, paused, if nothing is
 // in the player.
 func (a *app) pickUp(uid int64) {
+	if a.pl.Current() != nil {
+		return
+	}
+	revision, fetch := a.accountRevision, recentPlays
 	go func() {
-		plays, err := recentPlays(100)
-		a.post(func() {
-			if err != nil || a.profile == nil || a.profile.UserID != uid || a.pl.Current() != nil {
-				return
-			}
-			songs, last, ok := lastStretch(plays, time.Now())
-			if !ok {
-				return
-			}
-			order := make([]int, len(songs))
-			for i := range order {
-				order[i] = i
-			}
-			a.pl.Restore(player.Session{Queue: songs, Order: order, At: len(songs) - 1})
-			a.picked = pickedUp{id: last.Track.ID, heard: heardAt(last, time.Now())}
-			where := "上次"
-			if d := deviceName(last.Device); d != "" {
-				where = "在" + d + "上"
-			}
-			a.toast = "已接上你" + where + "听的《" + last.Track.Name + "》，按空格键继续"
-		})
+		plays, err := fetch(100)
+		if err == nil {
+			a.post(func() { a.applyRecentPlays(revision, uid, plays, time.Now()) })
+		}
 	}()
+}
+
+func (a *app) applyRecentPlays(revision uint64, uid int64, plays []netease.Play, now time.Time) {
+	if a.accountRevision != revision || a.profile == nil || a.profile.UserID != uid || a.pl.Current() != nil {
+		return
+	}
+	songs, last, ok := lastStretch(plays, now)
+	if !ok {
+		return
+	}
+	order := make([]int, len(songs))
+	for i := range order {
+		order[i] = i
+	}
+	a.pl.Restore(player.Session{Queue: songs, Order: order, At: len(songs) - 1})
+	a.picked = pickedUp{id: last.Track.ID, heard: heardAt(last, now)}
+	where := "上次"
+	if d := deviceName(last.Device); d != "" {
+		where = "在" + d + "上"
+	}
+	action := "按空格键继续"
+	if a.phone {
+		action = "点按播放继续"
+	}
+	a.toast = "已接上你" + where + "听的《" + last.Track.Name + "》，" + action
+}
+
+// pickupHint lasts until the listener plays or replaces the picked-up song.
+func (a *app) pickupHint(tr *netease.Track) string {
+	if a.picked.id != 0 && (tr == nil || tr.ID != a.picked.id || a.pl.Playing()) {
+		a.picked = pickedUp{}
+	}
+	return a.picked.heard
 }
 
 // lastStretch returns the songs of the listener's last stretch of

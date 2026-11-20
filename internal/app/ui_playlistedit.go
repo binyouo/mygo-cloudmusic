@@ -50,6 +50,67 @@ func (a *app) editable(id int64) *netease.Playlist {
 	return nil
 }
 
+func (a *app) playlistManagementActions(pl *netease.Playlist, mine bool, item func(string, func()), separator func()) {
+	if !mine {
+		item("取消收藏", func() { a.toggleSaved(*pl) })
+		return
+	}
+	item("重命名…", func() { a.startRename(pl) })
+	separator()
+	item("删除歌单…", func() { a.confirmDelete(pl) })
+}
+
+func (a *app) playlistManagementItems(pl *netease.Playlist, mine bool) func(*ui.Menu) {
+	return func(m *ui.Menu) {
+		a.playlistManagementActions(pl, mine, func(label string, run func()) {
+			if m.Item(label).Chosen() {
+				run()
+			}
+		}, m.Separator)
+	}
+}
+
+func (a *app) phonePlaylistActions(c *ui.Context, pl *netease.Playlist) {
+	iconButton(c, iconMore, 18, a.pal.muted, "歌单操作："+pl.Name).Size(44, 44).OnClick(func() {
+		a.phonePlaylistTarget = pl.ID
+	})
+}
+
+func (a *app) phonePlaylistActionsSheet(c *ui.Context) {
+	id := a.phonePlaylistTarget
+	if id == 0 {
+		return
+	}
+	pl := a.editable(id)
+	mine := pl != nil
+	height := float32(224)
+	if !mine {
+		i := slices.IndexFunc(a.saved, func(pl netease.Playlist) bool { return pl.ID == id })
+		if i < 0 {
+			a.phonePlaylistTarget = 0
+			return
+		}
+		pl = &a.saved[i]
+		height = 166
+	}
+	dismiss := func() { a.phonePlaylistTarget = 0 }
+	fg := a.pal.text
+	a.phoneBottomSheet(c, "歌单操作", height, false, dismiss, nil, nil, func() {
+		ui.Scroll(c.Key("playlist-actions")).Grow(1).MinHeight(0).Children(func() {
+			ui.Row(c.Key("playlist")).Height(52).Shrink(0).PaddingX(11).Gap(12).AlignItems(ui.Center).Children(func() {
+				a.cover(c, pl.Cover(), 120, 40, 6)
+				ui.Text(c, pl.Name).Grow(1).MinWidth(0).FontSize(16).FontWeight(700).SingleLine()
+			})
+			a.playlistManagementActions(pl, mine, func(label string, run func()) {
+				phoneOptionRow(c.Key(label), label, nil, nil, fg, func() {
+					dismiss()
+					run()
+				})
+			}, func() { phoneOptionDivider(c.Key("actions-divider"), fg) })
+		})
+	})
+}
+
 // isSaved reports whether the listener saved playlist pl, as its page or
 // the sidebar says.
 func (a *app) isSaved(pl *netease.Playlist) bool {
@@ -326,28 +387,48 @@ func (a *app) playlistItems(m *ui.Menu, tr *netease.Track, pid int64) {
 		return
 	}
 	m.Separator()
-	m.Submenu("添加到歌单", func(m *ui.Menu) {
-		if m.Item("新建歌单…").Chosen() {
-			a.newPlaylist(tr)
+	if a.phone {
+		if m.Item("添加到歌单…").Chosen() {
+			a.phoneAddTo = &trackSelection{track: *tr, from: pid}
 		}
-		var to []*netease.Playlist
-		for i := range a.mine {
-			if pl := &a.mine[i]; pl.SpecialType != 5 && pl.ID != pid {
-				to = append(to, pl)
+	} else {
+		m.Submenu("添加到歌单", func(m *ui.Menu) {
+			if m.Item("新建歌单…").Chosen() {
+				a.newPlaylist(tr)
 			}
-		}
-		if len(to) > 0 {
-			m.Separator()
-		}
-		for _, pl := range to {
-			if m.Item(pl.Name).Chosen() {
-				a.addTo(pl.ID, tr)
+			to := a.playlistDestinations(pid)
+			if len(to) > 0 {
+				m.Separator()
 			}
-		}
-	})
+			for _, pl := range to {
+				if m.Item(pl.Name).Chosen() {
+					a.addTo(pl.ID, tr)
+				}
+			}
+		})
+	}
 	if a.editable(pid) != nil && m.Item("从歌单中移除").Chosen() {
 		a.removeFrom(pid, tr)
 	}
+}
+
+func (a *app) playlistDestinations(from int64) []*netease.Playlist {
+	var to []*netease.Playlist
+	for i := range a.mine {
+		if pl := &a.mine[i]; pl.SpecialType != 5 && pl.ID != from {
+			to = append(to, pl)
+		}
+	}
+	return to
+}
+
+func (a *app) playlistDialogWidth(c *ui.Context) float32 {
+	if a.phone {
+		width, _ := c.Size()
+		_, right, _, left := phoneSafeArea(c)
+		return min(360, max(0, width-left-right-24))
+	}
+	return 360
 }
 
 // playlistNameDialog asks for the name of a playlist to make, or a new
@@ -357,7 +438,7 @@ func (a *app) playlistNameDialog(c *ui.Context) {
 	d := &a.naming
 	ui.DialogBase(c.Key("playlist-name"), &d.open, func(backdrop, panel ui.Element) {
 		backdrop.Background(ui.RGBA(0, 0, 0, 0.35))
-		panel.Width(360).Padding(24).Radius(18).Gap(16).
+		panel.Width(a.playlistDialogWidth(c)).Padding(24).Radius(18).Gap(16).
 			Background(p.bg).Border(1, p.hairline).Shadow(0, 24, 60, -12, ui.RGBA(0, 0, 0, 0.4)).
 			Transition(ui.ElementTransition{Animation: &ui.Snappy, Enter: &ui.Motion{Scale: 0.94}, Exit: &ui.Motion{Scale: 0.96}})
 		title, action := "新建歌单", "创建"
@@ -394,7 +475,7 @@ func (a *app) deletePlaylistDialog(c *ui.Context) {
 	d := &a.deleting
 	ui.DialogBase(c.Key("playlist-delete"), &d.open, func(backdrop, panel ui.Element) {
 		backdrop.Background(ui.RGBA(0, 0, 0, 0.35))
-		panel.Width(360).Padding(24).Radius(18).Gap(8).
+		panel.Width(a.playlistDialogWidth(c)).Padding(24).Radius(18).Gap(8).
 			Background(p.bg).Border(1, p.hairline).Shadow(0, 24, 60, -12, ui.RGBA(0, 0, 0, 0.4)).
 			Transition(ui.ElementTransition{Animation: &ui.Snappy, Enter: &ui.Motion{Scale: 0.94}, Exit: &ui.Motion{Scale: 0.96}})
 		ui.Text(c, "删除歌单").FontSize(17).FontWeight(700)

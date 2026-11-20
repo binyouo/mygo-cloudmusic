@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/netease"
@@ -11,8 +12,9 @@ import (
 
 // searchResults and searchSuggest search NetEase; tests replace them.
 var (
-	searchResults = netease.SearchPage
-	searchSuggest = netease.SearchSuggest
+	searchResults    = netease.SearchPage
+	searchSuggest    = netease.SearchSuggest
+	fetchHotSearches = netease.HotSearches
 )
 
 // searchLimit is how many results load at a time.
@@ -189,7 +191,11 @@ func (a *app) searchHeader(c *ui.Context, d *searchData) {
 		}
 	}
 	a.heading(c, "“"+r.query+"”", sub)
-	ui.Row(c).Margin(0, 0, 18, 0).Children(func() {
+	if a.phone {
+		a.phoneSearchKinds(c.Key("kind"), r)
+		return
+	}
+	ui.Row(c).Wrap().Margin(0, 0, 18, 0).Children(func() {
 		labels := make([]string, len(searchKinds))
 		for i, k := range searchKinds {
 			labels[i] = k.label
@@ -198,6 +204,38 @@ func (a *app) searchHeader(c *ui.Context, d *searchData) {
 			r.kind = searchKinds[at].kind
 			a.show(r)
 		}
+	})
+}
+
+// phoneSearchKinds is the bleeding row of capsules that picks what a
+// phone search's results are of, as Apple Music's filters are.
+func (a *app) phoneSearchKinds(c *ui.Context, r route) {
+	p := a.pal
+	pad := a.pagePadding()
+	// The box pins the row's height: a bare ScrollHorizontal in a List
+	// measures zero and swallows the capsules whole.
+	ui.Box(c).Height(34).Margin(0, -pad, 18, -pad).Children(func() {
+		ui.ScrollHorizontal(c).Scrollbars(false).Gap(8).Fill().Padding(0, pad).Children(func() {
+			for _, k := range searchKinds {
+				selected := r.kind == k.kind
+				bg, fg := p.hover, p.text
+				if selected {
+					bg, fg = p.accent, p.onAccent
+				}
+				ui.ButtonBase(c.Key(k.kind)).Shrink(0).Height(34).PaddingX(14).Center().Radius(17).Background(bg).TextColor(fg).
+					Role(ui.RoleRadio).Checked(selected).Label(k.label).OnClick(func() {
+					if !selected {
+						mygo.Haptics.Selection()
+						next := r
+						next.kind = k.kind
+						a.phoneNavDir = 0
+						a.show(next)
+					}
+				}).Children(func() {
+					ui.Text(c, k.label).FontSize(14).FontWeight(600).SingleLine()
+				})
+			}
+		})
 	})
 }
 

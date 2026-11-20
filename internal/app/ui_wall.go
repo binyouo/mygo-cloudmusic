@@ -176,9 +176,10 @@ func (a *app) wallSong(c *ui.Context, tr *netease.Track, art *artwork, top, h fl
 			if cur >= 0 {
 				sung = lines[cur].Text
 			}
-			ui.Text(c, sung).FontSize(17).FontWeight(700).TextColor(white.Alpha(0.85)).MaxLines(2).Margin(14, 0, 0, 0)
+			lang := lyrics.Lang(lines)
+			ui.Text(c, sung).Lang(lang).FontSize(17).FontWeight(700).TextColor(white.Alpha(0.85)).MaxLines(2).Margin(14, 0, 0, 0)
 			if cur+1 < len(lines) {
-				ui.Text(c, lines[cur+1].Text).FontSize(14).FontWeight(600).TextColor(white.Alpha(0.38)).SingleLine()
+				ui.Text(c, lines[cur+1].Text).Lang(lang).FontSize(14).FontWeight(600).TextColor(white.Alpha(0.38)).SingleLine()
 			}
 		})
 	})

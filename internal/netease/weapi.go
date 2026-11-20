@@ -1,6 +1,7 @@
 package netease
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -53,14 +54,18 @@ var weapiSecret = func() string {
 // data, and decodes the JSON it answers into out. The session's cookies,
 // the jar's, go with it, as the website's own requests do.
 func weapiPost(path string, data map[string]any, out any) error {
-	data["csrf_token"] = csrfToken()
+	return weapiPostAs(currentHTTPClient(), context.Background(), path, data, out)
+}
+
+func weapiPostAs(client *http.Client, ctx context.Context, path string, data map[string]any, out any) error {
+	data["csrf_token"] = csrfToken(client.Jar)
 	data["e_r"] = false
 	params, encSecKey, err := weapiEncrypt(data)
 	if err != nil {
 		return err
 	}
 	form := url.Values{"params": {params}, "encSecKey": {encSecKey}}
-	req, err := http.NewRequest("POST", apiBase+"/weapi/"+strings.TrimPrefix(path, "/api/"), strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBase+"/weapi/"+strings.TrimPrefix(path, "/api/"), strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -79,18 +84,18 @@ func weapiPost(path string, data map[string]any, out any) error {
 	} {
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
-	res, err := httpClient.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
 	// Keep what it sets for the site, whichever host set it.
-	if set := res.Cookies(); len(set) > 0 && httpClient.Jar != nil {
+	if set := res.Cookies(); len(set) > 0 && client.Jar != nil {
 		for _, c := range set {
 			c.Domain = ""
 			c.Path = "/"
 		}
-		httpClient.Jar.SetCookies(siteURL, set)
+		client.Jar.SetCookies(siteURL, set)
 	}
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -100,11 +105,11 @@ func weapiPost(path string, data map[string]any, out any) error {
 }
 
 // csrfToken is the CSRF cookie the session was given, sent as csrf_token.
-func csrfToken() string {
-	if httpClient.Jar == nil {
+func csrfToken(jar http.CookieJar) string {
+	if jar == nil {
 		return ""
 	}
-	for _, c := range httpClient.Jar.Cookies(siteURL) {
+	for _, c := range jar.Cookies(siteURL) {
 		if c.Name == "__csrf" {
 			return c.Value
 		}

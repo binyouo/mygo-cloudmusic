@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/netease"
@@ -46,13 +47,16 @@ func (a *app) toggleProgramLike(id int64) {
 	a.setProgramLiked(id, like)
 	go func() {
 		err := likeProgram(id, like)
-		a.post(func() {
-			if err != nil {
-				a.setProgramLiked(id, !like)
-				a.toast = "操作失败，请稍后再试"
-			}
-		})
+		a.post(func() { a.programLikeAnswered(id, like, err) })
 	}()
+}
+
+func (a *app) programLikeAnswered(id int64, like bool, err error) {
+	if err == nil {
+		return
+	}
+	a.setProgramLiked(id, !like)
+	a.toast = "操作失败，请稍后再试"
 }
 
 // isLiked reports whether the listener likes tr, a song or an episode.
@@ -159,7 +163,9 @@ func (a *app) likeButton(c *ui.Context, tr *netease.Track, size float32, color u
 	// The burst goes on a wrapper, which the heart's pop does not scale.
 	wrap := ui.Box(c).Center()
 	var b ui.Element
-	wrap.Children(func() { b = iconButton(c, icon, size, color, label).Disabled(tr.LocalPath != "") })
+	wrap.Children(func() {
+		b = iconButton(c, icon, size, color, label).Disabled(tr.LocalPath != "")
+	})
 	scale := b.AnimateTo("pop", 1, ui.Animation{Spring: ui.SpringOptions{Duration: 550 * time.Millisecond, Bounce: 0.55}})
 	b.Scale(scale, scale)
 	burst := ui.Local(wrap, "burst", func() time.Time { return time.Time{} })
@@ -173,6 +179,9 @@ func (a *app) likeButton(c *ui.Context, tr *netease.Track, size float32, color u
 			*burst = c.Now()
 		}
 		a.toggleLike(tr)
+		if a.phone {
+			mygo.Haptics.Light()
+		}
 	}
 	if !burst.IsZero() {
 		start, accent := *burst, a.pal.accent

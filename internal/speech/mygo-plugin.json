@@ -1,0 +1,13 @@
+{
+  "mobile": {
+    "id": "cloudmusic_speech",
+    "ios": {
+      "sources": ["ios/*.swift"],
+      "class": "CloudMusicSpeechPlugin",
+      "frameworks": ["Speech"],
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "在设备上将正在播放的播客生成字幕。"
+      }
+    }
+  }
+}

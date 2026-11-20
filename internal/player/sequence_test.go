@@ -46,6 +46,43 @@ func testPCM(t *testing.T, rate, frames int, value float32) *pcmTrack {
 	return p
 }
 
+type analysisSource struct {
+	stream
+	uses int
+}
+
+func (s *analysisSource) source() (*download, *spectrum) {
+	s.uses++
+	return nil, nil
+}
+
+// AutoMix used to start analysis before checking that there was a boundary it could mix.
+func TestAutoMixAnalyzesOnlyEligibleBoundaries(t *testing.T) {
+	a := testPCM(t, outputRate, 8*outputRate, .25)
+	b := testPCM(t, outputRate, 8*outputRate, .5)
+	c := testPCM(t, outputRate, 8*outputRate, .75)
+	a.track.ID, a.track.Album.ID = 1, 10
+	b.track.ID, b.track.Album.ID = 2, 10
+	c.track.ID, c.track.Album.ID = 3, 20
+	audioA, audioB, audioC := &analysisSource{stream: a.raw}, &analysisSource{stream: b.raw}, &analysisSource{stream: c.raw}
+	a.raw, b.raw, c.raw = audioA, audioB, audioC
+	s := newSequence(a, nil)
+	defer s.Close()
+	p := &Player{sequence: s, AutoMix: func() bool { return true }}
+	p.ApplyTransitions()
+	if audioA.uses != 0 {
+		t.Fatal("a song without a successor started analysis")
+	}
+	p.queueAudio(b)
+	if audioA.uses != 0 || audioB.uses != 0 {
+		t.Fatal("the same-album handoff started analysis")
+	}
+	p.queueAudio(c)
+	if audioA.uses != 1 || audioC.uses != 1 {
+		t.Fatal("the mixable handoff did not start analysis for both tracks")
+	}
+}
+
 // End callbacks previously left silence between tracks; a single read
 // must now contain the exact tail and head, without losing or adding samples.
 func TestSequenceJoinsWithinRead(t *testing.T) {

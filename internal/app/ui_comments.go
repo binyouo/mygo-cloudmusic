@@ -9,8 +9,8 @@ import (
 	"netease-music-mygo/internal/netease"
 )
 
-// These load a page of a thread's comments, and like a comment or unlike
-// it, with NetEase; tests replace them.
+// These load a page of a thread's comments, like a comment or unlike it,
+// and ask what NetEase knows of a resource; tests replace them.
 var (
 	threadComments = netease.ThreadComments
 	likeComment    = netease.LikeComment
@@ -21,6 +21,8 @@ var (
 // the hot ones, and the latest, loaded a page at a time as they scroll.
 type commentState struct {
 	track   int64
+	program int64
+	name    string // title of the song or episode shown in the phone sheet
 	thread  string // whose comments they are, as NetEase names it
 	hot     []netease.Comment
 	latest  []netease.Comment
@@ -46,22 +48,38 @@ const commentPage = 30
 // once it changed: Now Playing does it as it shows, for the count on the
 // pane's tab.
 func (a *app) commentsFor(tr *netease.Track) *commentState {
-	cs := &a.comments
-	if cs.track != tr.ID {
-		*cs = commentState{track: tr.ID, thread: tr.Thread()}
-		if tr.LocalPath == "" {
-			a.loadComments()
-		} else {
-			cs.loaded = true
-		}
+	if a.comments.matchesTrack(tr) {
+		return a.comments
 	}
-	return cs
+	a.comments = &commentState{track: tr.ID, program: tr.ProgramID, thread: tr.Thread(), loaded: tr.LocalPath != ""}
+	if !a.comments.loaded {
+		a.loadComments()
+	}
+	return a.comments
+}
+
+func (cs *commentState) matchesTrack(tr *netease.Track) bool {
+	if cs == nil || cs.program != tr.ProgramID {
+		return false
+	}
+	return cs.program != 0 || cs.track == tr.ID
+}
+
+// An open comments sheet keeps its original thread when the account changes.
+func (a *app) resetTrackComments() {
+	previous := a.comments
+	a.comments = nil
+	if previous != nil && a.phoneSheet == phoneSheetComments {
+		a.comments = &commentState{track: previous.track, program: previous.program, thread: previous.thread, name: previous.name}
+		a.loadComments()
+	}
 }
 
 // loadComments loads the next page of comments.
 func (a *app) loadComments(states ...*commentState) {
-	cs := &a.comments
-	if len(states) > 0 {
+	trackThread := len(states) == 0
+	cs := a.comments
+	if !trackThread {
 		cs = states[0]
 	}
 	if cs.loading {
@@ -73,7 +91,7 @@ func (a *app) loadComments(states ...*commentState) {
 	go func() {
 		page, err := comments(thread, offset, commentPage)
 		a.post(func() {
-			if cs.thread != thread {
+			if cs.thread != thread || trackThread && a.comments != cs {
 				return
 			}
 			cs.loading = false
@@ -117,10 +135,10 @@ func (a *app) commentsTab() string {
 // commentCount is the count the comments' tab shows: the last song's
 // while the next one's loads, so that it rolls from one to the other.
 func (a *app) commentCount() int {
-	switch cs := &a.comments; {
-	case cs.loaded:
+	switch cs := a.comments; {
+	case cs != nil && cs.loaded:
 		return cs.total
-	case cs.err != "":
+	case cs != nil && cs.err != "":
 		return 0
 	}
 	return a.tabCount.n
@@ -191,10 +209,10 @@ type commentKey struct {
 	id  int64
 }
 
-// commentsPane lists the comments of tr: the hot ones, then the latest,
+// commentsPane lists the opened thread: the hot ones, then the latest,
 // which load on as they scroll into view.
-func (a *app) commentsPane(c *ui.Context, tr *netease.Track) {
-	cs := a.commentsFor(tr)
+func (a *app) commentsPane(c *ui.Context) {
+	cs := a.comments
 	if len(cs.hot) == 0 && len(cs.latest) == 0 {
 		if cs.loading || !cs.loaded && cs.err == "" {
 			ui.Column(c).Grow(1).Padding(4, 8, 0, 0).Gap(2).Children(func() {
@@ -219,7 +237,7 @@ func (a *app) commentsPane(c *ui.Context, tr *netease.Track) {
 		return
 	}
 	now := c.Now()
-	scroll := ui.Scroll(c.Key("comments")).Grow(1).TrackScroll(&cs.scroll).Padding(4, 8, 48, 0)
+	scroll := ui.Scroll(c.Key("comments")).Grow(1).MinHeight(0).TrackScroll(&cs.scroll).Padding(4, 8, 48, 0)
 	var end ui.Rect
 	scroll.Children(func() {
 		ui.Column(c).Gap(2).Children(func() {
@@ -302,7 +320,11 @@ func (a *app) commentRow(c *ui.Context, cm *netease.Comment, now time.Time, stat
 				if len(states) > 0 {
 					cs := states[0]
 					ui.Spacer(c)
-					if ui.ButtonBase(c.Key("reply")).Disabled(cs.sending).Label("回复").Children(func() {
+					reply := ui.ButtonBase(c.Key("reply")).Disabled(cs.sending).Label("回复")
+					if a.phone {
+						reply.MinWidth(44).MinHeight(44).Center()
+					}
+					if reply.Children(func() {
 						ui.Text(c, "回复").FontSize(12).TextColor(ink.Alpha(0.6))
 					}).Clicked() {
 						if a.profile == nil {
@@ -326,6 +348,9 @@ func (a *app) commentLike(c *ui.Context, cm *netease.Comment, ink ui.Color, stat
 		label, fg = "取消赞", a.pal.accent
 	}
 	b := ui.ButtonBase(c).Gap(4).Padding(3, 6).Margin(-3, -6).Radius(999).AlignItems(ui.Center).FocusRing(false).Label(label)
+	if a.phone {
+		b.MinWidth(44).MinHeight(44).Center()
+	}
 	if b.Hovered() && !cm.Liked {
 		fg = ink.Alpha(0.75)
 	}
@@ -353,8 +378,9 @@ func (a *app) toggleCommentLike(id int64, states ...*commentState) {
 		a.openLogin()
 		return
 	}
-	cs := &a.comments
-	if len(states) > 0 {
+	trackThread := len(states) == 0
+	cs := a.comments
+	if !trackThread {
 		cs = states[0]
 	}
 	thread, like := cs.thread, true
@@ -363,10 +389,11 @@ func (a *app) toggleCommentLike(id int64, states ...*commentState) {
 	}
 	cs.setLiked(id, like)
 	submit := likeComment
+	account := a.accountRevision
 	go func() {
 		err := submit(thread, id, like)
 		a.post(func() {
-			if err != nil && cs.thread == thread {
+			if err != nil && a.accountRevision == account && cs.thread == thread && (!trackThread || a.comments == cs) {
 				cs.setLiked(id, !like)
 				a.toast = "操作失败，请稍后再试"
 			}

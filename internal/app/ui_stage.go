@@ -51,12 +51,12 @@ func easeOutCubic(t float32) float32 {
 }
 
 // stageShapes lays out the words of a line at font size f.
-func stageShapes(c *ui.Context, l *lyrics.Line, f float32) []wordShape {
+func stageShapes(c *ui.Context, l *lyrics.Line, f float32, lang string) []wordShape {
 	seed := float64(l.At / time.Millisecond)
 	shapes := make([]wordShape, len(l.Words))
 	widths := make([]float32, len(l.Words))
 	for i, w := range l.Words {
-		widths[i], _ = c.MeasureText(0, ui.Span{Text: w.Text, Size: f, Weight: 800})
+		widths[i], _ = c.MeasureText(0, ui.Span{Text: w.Text, Size: f, Weight: 800, Lang: lang})
 	}
 	for i := range l.Words {
 		ws := seed + float64(i)
@@ -92,9 +92,13 @@ func spaceWords(shapes []wordShape, widths []float32, gap float32) {
 
 // stage shows the lyrics of tr on the whole stage.
 func (a *app) stage(c *ui.Context, tr *netease.Track, accent ui.Color) {
+	w, h := c.Size()
+	a.stageIn(c, tr, accent, w, h)
+}
+
+func (a *app) stageIn(c *ui.Context, tr *netease.Track, accent ui.Color, w, h float32) {
 	pl := a.pl
 	lines, loaded := pl.Lyrics()
-	w, h := c.Size()
 	f := min(64, max(36, w*0.045))
 	box := ui.Box(c.Key("stage")).Grow(1)
 	a.npRise(box, 1)
@@ -127,9 +131,12 @@ func (a *app) stage(c *ui.Context, tr *netease.Track, accent ui.Color) {
 		stageNextFrame(c, lines, cur, pos, lead)
 	}
 
+	// Japanese lyrics are drawn in a Japanese font, kanji and kana alike;
+	// their translations in the app's language.
+	lang := lyrics.Lang(lines)
 	box.Children(func() {
 		defer a.stageQuiet(c, dim, f, w)
-		quietUnder(ui.Box(c.Key("sung")).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough(), dim).Children(func() {
+		quietUnder(ui.Box(c.Key("sung")).Lang(lang).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough(), dim).Children(func() {
 			// The line before goes as the new one comes.
 			if cur > 0 {
 				gone := float32((pos - lines[cur].At).Seconds()) / 0.4
@@ -150,7 +157,7 @@ func (a *app) stage(c *ui.Context, tr *netease.Track, accent ui.Color) {
 			// The translation, and the line coming next, along the foot.
 			ui.Column(c).Absolute().Left(0).Right(0).Bottom(24).AlignItems(ui.Center).Gap(8).PassThrough().Children(func() {
 				if cur >= 0 && lines[cur].Translation != "" {
-					ui.Text(c.Key("translation"), lines[cur].Translation).FontSize(18).FontWeight(600).TextColor(white.Alpha(0.72)).TextAlign(ui.Center)
+					ui.Text(c.Key("translation"), lines[cur].Translation).Lang(c.Locale()).FontSize(18).FontWeight(600).TextColor(white.Alpha(0.72)).TextAlign(ui.Center)
 				}
 				if cur+1 < len(lines) {
 					ui.Text(c.Key("next"), lines[cur+1].Text).FontSize(14).TextColor(white.Alpha(0.32)).TextAlign(ui.Center).SingleLine()
@@ -206,7 +213,8 @@ func (a *app) stageLine(c *ui.Context, l *lyrics.Line, pos time.Duration, f, w, 
 		return
 	}
 	seed := float64(l.At / time.Millisecond)
-	shapes := stageShapes(c, l, f)
+	lines, _ := a.pl.Lyrics()
+	shapes := stageShapes(c, l, f, lyrics.Lang(lines))
 	// Where the line sits: to one side or the middle, a little up or down.
 	justify := []ui.Align{ui.Start, ui.Center, ui.End}[int(seed)%3]
 	lift := []float32{-0.14, 0, 0.12}[int(seed*2)%3] * h

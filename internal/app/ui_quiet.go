@@ -41,6 +41,9 @@ func (a *app) quietComment(tr *netease.Track, lines []lyrics.Line, loaded bool, 
 		return nil, 0
 	}
 	qs := &a.quiet
+	if qs.track != tr.ID {
+		qs.cm = nil
+	}
 	if qs.track != tr.ID || qs.lines != len(lines) || qs.quiets == nil {
 		qs.track, qs.lines = tr.ID, len(lines)
 		qs.quiets = lyrics.Quiets(lines, tr.Length(), quietLeast)
@@ -52,7 +55,7 @@ func (a *app) quietComment(tr *netease.Track, lines []lyrics.Line, loaded bool, 
 		}
 	}
 	var hot []*netease.Comment
-	if cs := &a.comments; cs.track == tr.ID {
+	if cs := a.comments; cs.matchesTrack(tr) {
 		for i := range cs.hot {
 			if n := utf8.RuneCountInString(cs.hot[i].Content); n > 0 && n <= quietRunes {
 				hot = append(hot, &cs.hot[i])
@@ -174,6 +177,10 @@ func (a *app) hotCard(c *ui.Context, dim, size float32, place func(ui.Element)) 
 		})
 	})
 	if card.Clicked() {
-		a.npPane = paneComments
+		if a.phone {
+			a.openPhoneComments(a.pl.Current())
+		} else {
+			a.npPane = paneComments
+		}
 	}
 }

@@ -78,6 +78,7 @@ type AlbumProfile struct {
 	Artists     []Artist `json:"artists"`
 	PublishTime int64    `json:"publishTime"` // Unix milliseconds
 	Size        int      `json:"size"`        // how many songs it has
+	Company     string   `json:"company"`
 	Description string   `json:"description"`
 	Songs       []Track  `json:"-"`
 }

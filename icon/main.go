@@ -1,9 +1,11 @@
 // Command icon draws the app icons: the layers of AppIcon.icon, the Icon
 // Composer document that macOS 26 and later render in Liquid Glass, and
-// resources/icon.png, the same icon as macOS draws it, on the grid of older
-// macOS icons, for older macOS and Windows; and from AppIcon-dev.icon, cream
-// where the app's is red, resources/icon-dev.png, the icon of mygo dev
-// builds.
+// AppIcon-dev.icon, cream where the app's is red. From them it renders the
+// PNGs the other platforms take: resources/icon.png and
+// resources/icon-dev.png, opaque and full-bleed, as iOS wants its app icon
+// (and as Windows, Linux and Android scale theirs); and the dark
+// variant's files of the home screen's alternate icon,
+// resources/AppIconDark*.png, which the app offers in its settings.
 //
 // Run it from the repository root on a Mac with Xcode 26 or later:
 //
@@ -14,6 +16,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -25,20 +28,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	xdraw "golang.org/x/image/draw"
 )
 
-const ictool = "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
-
-// icons are the documents drawn, with the PNG rendered from each and the
-// colors of its tonearm: the gradient and the cap on its pivot.
+// icons are the documents drawn, with the PNG rendered from each, the dark
+// alternate icon's file names, and the colors of its tonearm: the gradient
+// and the cap on its pivot.
 var icons = []struct {
-	document, output   string
-	top, bottom, pivot string
+	document, output, dark string
+	top, bottom, pivot     string
 }{
 	// Red, with a white tonearm.
-	{"icon/AppIcon.icon", "resources/icon.png", "#FFFFFF", "#E6E3E5", "#D9D5D8"},
+	{"icon/AppIcon.icon", "resources/icon.png", "AppIconDark", "#FFFFFF", "#E6E3E5", "#D9D5D8"},
 	// Cream, with a red one to match the label.
-	{"icon/AppIcon-dev.icon", "resources/icon-dev.png", "#FF5B5B", "#E3122C", "#FFE1DE"},
+	{"icon/AppIcon-dev.icon", "resources/icon-dev.png", "", "#FF5B5B", "#E3122C", "#FFE1DE"},
 }
 
 // A record on Icon Composer's 1024-point full-bleed canvas, seen close up:
@@ -49,6 +53,18 @@ var (
 	pivot = image.Pt(820, 214)
 	head  = image.Pt(585, 520)
 )
+
+// darkFiles are the files of the dark alternate icon, at the home screen's
+// sizes of each device, named as CFBundleIconFiles names them.
+var darkFiles = []struct {
+	file string
+	px   int
+}{
+	{"resources/AppIconDark60x60@2x.png", 120},
+	{"resources/AppIconDark60x60@3x.png", 180},
+	{"resources/AppIconDark76x76@2x~ipad.png", 152},
+	{"resources/AppIconDark83.5x83.5@2x~ipad.png", 167},
+}
 
 func main() {
 	for _, ic := range icons {
@@ -62,8 +78,17 @@ func main() {
 				log.Fatal(err)
 			}
 		}
-		if err := render(ic.document, ic.output); err != nil {
+		fills, err := iconFills(ic.document)
+		if err != nil {
 			log.Fatal(err)
+		}
+		if err := writeIcon(ic.document, ic.output, fills.def); err != nil {
+			log.Fatal(err)
+		}
+		if ic.dark != "" {
+			if err := writeDark(ic.document, ic.dark, fills.dark); err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 }
@@ -145,76 +170,198 @@ func labelSVG() string {
 <circle cx="%[1]s" cy="%[2]s" r="%[5]s" fill="#FFF6F2"/>`, n(rec.cx), n(rec.cy), n(rec.r*0.358), n(rec.r*0.247), n(rec.r*0.052)))
 }
 
-// render has ictool draw document as macOS does, and lays it on the
-// 1024-pixel grid of macOS icons at output: an 824-pixel body, centered,
-// over a soft shadow.
-func render(document, output string) error {
-	const canvas, body = 1024, 824
+// The Icon Composer's command line tool, inside Xcode.
+func ictool() (string, error) {
+	if out, err := exec.Command("xcode-select", "-p").Output(); err == nil {
+		p := filepath.Join(strings.TrimSpace(string(out)), "..",
+			"Applications", "Icon Composer.app", "Contents", "Executables", "ictool")
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	const p = "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+	if _, err := os.Stat(p); err != nil {
+		return "", fmt.Errorf("no ictool (it comes with Xcode 26 or later): %v", err)
+	}
+	return p, nil
+}
+
+// export draws document as iOS shows rendition of it, at the icon's full
+// 1024 pixels, in a temporary directory.
+func export(document, rendition string) (image.Image, error) {
+	tool, err := ictool()
+	if err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp("", "icon")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(dir)
 	drawn := filepath.Join(dir, "icon.png")
-	size := fmt.Sprint(body)
-	if out, err := exec.Command(ictool, document, "--export-image", "--output-file", drawn,
-		"--platform", "macOS", "--rendition", "Default", "--width", size, "--height", size, "--scale", "1").CombinedOutput(); err != nil {
-		return fmt.Errorf("ictool (it comes with Xcode 26 or later): %v\n%s", err, out)
+	if out, err := exec.Command(tool, document, "--export-image", "--output-file", drawn,
+		"--platform", "iOS", "--rendition", rendition, "--width", "1024", "--height", "1024", "--scale", "1").CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("ictool (it comes with Xcode 26 or later): %v\n%s", err, out)
 	}
 	// ictool draws in Display P3, and the PNG this writes carries no
 	// profile, which readers take as sRGB: convert, or the reds go dull.
 	if out, err := exec.Command("sips", "--matchTo", "/System/Library/ColorSync/Profiles/sRGB Profile.icc", drawn).CombinedOutput(); err != nil {
-		return fmt.Errorf("sips: %v\n%s", err, out)
+		return nil, fmt.Errorf("sips: %v\n%s", err, out)
 	}
 	f, err := os.Open(drawn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
-	src, err := png.Decode(f)
+	return png.Decode(f)
+}
+
+// writeIcon renders document for iOS and flattens it over its background
+// gradient: the system's squircle ends where the render's alpha does, so
+// the corners take the document's fill, opaque as icons must be.
+func writeIcon(document, output string, bg image.Image) error {
+	drawn, err := export(document, "Default")
 	if err != nil {
 		return err
 	}
+	return writePNG(output, flattened(bg, drawn))
+}
 
-	at := image.Pt((canvas-body)/2, (canvas-body)/2)
-	dst := image.NewNRGBA(image.Rect(0, 0, canvas, canvas))
-	shadow := image.NewAlpha(dst.Bounds())
-	draw.Draw(shadow, src.Bounds().Add(at).Add(image.Pt(0, 12)), src, src.Bounds().Min, draw.Src)
-	blur(shadow, 10)
-	draw.DrawMask(dst, dst.Bounds(), image.NewUniform(color.NRGBA{A: 72}), image.Point{}, shadow, image.Point{}, draw.Over)
-	draw.Draw(dst, src.Bounds().Add(at), src, src.Bounds().Min, draw.Over)
-
-	out, err := os.Create(output)
+// writeDark renders document's dark appearance for iOS and writes the
+// alternate icon's files at the home screen's sizes.
+func writeDark(document, name string, bg image.Image) error {
+	drawn, err := export(document, "Dark")
 	if err != nil {
 		return err
 	}
-	if err := png.Encode(out, dst); err != nil {
+	icon := flattened(bg, drawn)
+	for _, f := range darkFiles {
+		out := image.NewNRGBA(image.Rect(0, 0, f.px, f.px))
+		xdraw.CatmullRom.Scale(out, out.Bounds(), icon, icon.Bounds(), xdraw.Over, nil)
+		path := strings.Replace(f.file, "AppIconDark", name, 1)
+		if err := writePNG(path, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flattened draws img over bg, opaque, for icons that take no transparency.
+func flattened(bg, img image.Image) *image.NRGBA {
+	b := img.Bounds()
+	out := image.NewNRGBA(b)
+	draw.Draw(out, b, bg, image.Point{}, draw.Src)
+	draw.Draw(out, b, img, b.Min, draw.Over)
+	return out
+}
+
+func writePNG(path string, img image.Image) error {
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := png.Encode(out, img); err != nil {
 		out.Close()
 		return err
 	}
 	return out.Close()
 }
 
-// blur approximates a Gaussian blur of the given radius with three box
-// blurs in each direction.
-func blur(m *image.Alpha, radius int) {
-	w, h := m.Rect.Dx(), m.Rect.Dy()
-	buf := make([]uint8, len(m.Pix))
-	pass := func(src, dst []uint8, count, length, stride, step int) {
-		for line := range count {
-			base := line * stride
-			sum := 0
-			for i := -radius; i <= radius; i++ {
-				sum += int(src[base+min(max(i, 0), length-1)*step])
-			}
-			for i := range length {
-				dst[base+i*step] = uint8(sum / (2*radius + 1))
-				sum += int(src[base+min(i+radius+1, length-1)*step]) - int(src[base+max(i-radius, 0)*step])
-			}
+// iconFills are the document's background gradients: the default one and
+// the dark appearance's, each a two-stop gradient across the canvas.
+func iconFills(document string) (fills struct{ def, dark image.Image }, err error) {
+	var doc struct {
+		Specs []struct {
+			Appearance string `json:"appearance"`
+			Value      struct {
+				Stops       []string `json:"linear-gradient"`
+				Orientation struct {
+					Start, Stop struct{ X, Y float64 }
+				} `json:"orientation"`
+			} `json:"value"`
+		} `json:"fill-specializations"`
+	}
+	data, err := os.ReadFile(filepath.Join(document, "icon.json"))
+	if err != nil {
+		return fills, err
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fills, fmt.Errorf("%s/icon.json: %w", document, err)
+	}
+	for _, s := range doc.Specs {
+		g, err := gradient(s.Value.Stops, s.Value.Orientation.Start.X, s.Value.Orientation.Start.Y,
+			s.Value.Orientation.Stop.X, s.Value.Orientation.Stop.Y)
+		if err != nil {
+			return fills, fmt.Errorf("%s/icon.json: %w", document, err)
+		}
+		if s.Appearance == "dark" {
+			fills.dark = g
+		} else {
+			fills.def = g
 		}
 	}
-	for range 3 {
-		pass(m.Pix, buf, h, w, m.Stride, 1)
-		pass(buf, m.Pix, w, h, 1, m.Stride)
+	if fills.def == nil || fills.dark == nil {
+		return fills, fmt.Errorf("%s/icon.json: fill-specializations need a default and a dark gradient", document)
+	}
+	return fills, nil
+}
+
+// linearGradient is a two-stop gradient over the 1024-pixel canvas, from
+// (x0, y0) to (x1, y1), each a fraction of the canvas's side.
+type linearGradient struct {
+	x0, y0, x1, y1 float64
+	c0, c1         color.NRGBA
+}
+
+func gradient(stops []string, x0, y0, x1, y1 float64) (*linearGradient, error) {
+	if len(stops) != 2 {
+		return nil, fmt.Errorf("gradient has %d stops, wants 2", len(stops))
+	}
+	c0, err := srgb(stops[0])
+	if err != nil {
+		return nil, err
+	}
+	c1, err := srgb(stops[1])
+	if err != nil {
+		return nil, err
+	}
+	return &linearGradient{x0, y0, x1, y1, c0, c1}, nil
+}
+
+// srgb parses a color of icon.json's, "srgb:r,g,b,a" with 0-1 channels.
+func srgb(s string) (color.NRGBA, error) {
+	v, ok := strings.CutPrefix(s, "srgb:")
+	var c color.NRGBA
+	if !ok {
+		return c, fmt.Errorf("%q is not an srgb color", s)
+	}
+	f := strings.Split(v, ",")
+	if len(f) != 4 {
+		return c, fmt.Errorf("%q is not r,g,b,a", s)
+	}
+	var ch [4]float64
+	for i, s := range f {
+		if _, err := fmt.Sscanf(s, "%f", &ch[i]); err != nil {
+			return c, fmt.Errorf("%q: %w", s, err)
+		}
+	}
+	c = color.NRGBA{uint8(math.Round(ch[0] * 255)), uint8(math.Round(ch[1] * 255)),
+		uint8(math.Round(ch[2] * 255)), uint8(math.Round(ch[3] * 255))}
+	return c, nil
+}
+
+func (*linearGradient) ColorModel() color.Model { return color.NRGBAModel }
+
+func (g *linearGradient) Bounds() image.Rectangle { return image.Rect(0, 0, 1024, 1024) }
+
+func (g *linearGradient) At(x, y int) color.Color {
+	dx, dy := g.x1-g.x0, g.y1-g.y0
+	t := ((float64(x)-g.x0*1024)*dx + (float64(y)-g.y0*1024)*dy) / (dx*dx + dy*dy)
+	t = max(0, min(1, t))
+	return color.NRGBA{
+		uint8(math.Round(float64(g.c0.R)*(1-t) + float64(g.c1.R)*t)),
+		uint8(math.Round(float64(g.c0.G)*(1-t) + float64(g.c1.G)*t)),
+		uint8(math.Round(float64(g.c0.B)*(1-t) + float64(g.c1.B)*t)),
+		uint8(math.Round(float64(g.c0.A)*(1-t) + float64(g.c1.A)*t)),
 	}
 }

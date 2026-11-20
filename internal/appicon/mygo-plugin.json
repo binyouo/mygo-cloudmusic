@@ -1,0 +1,36 @@
+{
+  "mobile": {
+    "id": "cloudmusic_icon",
+    "ios": {
+      "sources": ["ios/*.swift"],
+      "class": "CloudMusicIconPlugin",
+      "frameworks": ["UIKit"],
+      "infoPlist": {
+        "CFBundleIcons": {
+          "CFBundlePrimaryIcon": {
+            "CFBundleIconFiles": ["AppIcon60x60"],
+            "CFBundleIconName": "AppIcon"
+          },
+          "CFBundleAlternateIcons": {
+            "AppIconDark": {
+              "CFBundleIconFiles": ["AppIconDark60x60"],
+              "UIPrerenderedIcon": false
+            }
+          }
+        },
+        "CFBundleIcons~ipad": {
+          "CFBundlePrimaryIcon": {
+            "CFBundleIconFiles": ["AppIcon60x60", "AppIcon76x76"],
+            "CFBundleIconName": "AppIcon"
+          },
+          "CFBundleAlternateIcons": {
+            "AppIconDark": {
+              "CFBundleIconFiles": ["AppIconDark60x60", "AppIconDark76x76", "AppIconDark83.5x83.5"],
+              "UIPrerenderedIcon": false
+            }
+          }
+        }
+      }
+    }
+  }
+}

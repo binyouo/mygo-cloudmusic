@@ -30,6 +30,37 @@ go tool mygo build   # 打包到 build/
 go test ./...        # 运行测试
 ```
 
+### iOS 本地开发
+
+运行 iOS 模拟器需要完整的 Xcode 和 iOS 模拟器运行时。将仓库放在 T7 上时，脚本默认使用同盘的 `mygo-ios-dev` 保存开发缓存，并识别其中的 `Xcode.app`。可用 `CLOUDMUSIC_IOS_DEV_DIR` 指定开发目录。
+
+macOS 15.6 可以使用 Xcode 26.3。把解压后的 `Xcode.app` 放进开发目录，脚本会为当前命令选用它。 [Apple 兼容性说明](https://developer.apple.com/xcode/system-requirements/) · [Xcode 下载](https://developer.apple.com/download/all/?q=Xcode%2026.3)
+
+```bash
+./scripts/mygo-ios.sh doctor                  # 检查 SDK 和模拟器
+./scripts/mygo-ios.sh prepare-coreml          # 检查并准备自动混音模型
+./scripts/mygo-ios.sh devices                 # 查看模拟器和已连接的 iPhone
+./scripts/mygo-ios.sh dev -device <名称或UDID> # 启动指定模拟器并开发
+./scripts/mygo-ios.sh build                   # 打包 iOS 模拟器版
+./scripts/mygo-ios.sh dev -device <UDID>       # 用开发签名安装到已连接的 iPhone
+./scripts/mygo-ios.sh build -platform ios     # 用分发签名构建 IPA
+```
+
+已启动模拟器时，可以直接运行 `./scripts/mygo-ios.sh dev`。如需将模拟器运行时的下载文件留在 T7，将 `DEVELOPER_DIR` 指向 T7 上的 `Xcode.app/Contents/Developer`，再运行 `xcodebuild -downloadPlatform iOS -exportPath <T7目录>`。安装后的运行时由 macOS 管理。 [Apple 的运行时下载和安装说明](https://developer.apple.com/documentation/xcode/downloading-and-installing-additional-xcode-components)
+
+如果 MyGo 随包的 iOS 着色器库与源码不匹配，构建脚本会用 Xcode 的 Metal 工具链重新生成并缓存。缺少该组件时，运行 `xcodebuild -downloadComponent MetalToolchain` 安装。
+
+真机签名使用自己的 Apple Developer App ID、证书和配置描述文件。在当前工作树的 `mygo.json` 设置所属团队的 `identifier`，并可用 `ios.team` 或 `ios.provisioningProfile` 指定签名配置。开发版会给标识符加 `.dev`，其开发配置描述文件需覆盖该标识符和测试设备。分发版使用原始标识符。
+
+模拟器运行和构建会自动准备模型。默认使用 `mygo-ios-dev/coreml/verified-models`，也可以把 `CLOUDMUSIC_COREML_DIR` 指向 `scripts/smart_fades/export_coreml.py` 导出的目录。S-KEY 的预训练权重只授权用于非商业研究。 [S-KEY 权重许可](https://github.com/deezer/skey#-license)
+
+macOS 版手机界面预览可以用 Command Line Tools 构建。预览包、设置、播放队列和缓存都保存在 `build/ios-preview`。
+
+```bash
+./scripts/mygo-ios.sh preview-build          # 构建并验签 macOS 预览包
+./scripts/mygo-ios.sh preview                # 重建并在副屏打开预览
+```
+
 ## 致谢
 
 - [MyGo](https://github.com/egoist/mygo)：原生应用框架

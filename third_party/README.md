@@ -18,3 +18,10 @@ Local changes:
 
 This fixes stale highlights in both the song list and sidebar playlists. When
 upstream includes the fix, remove the replacement and this snapshot together.
+
+Upstream fixes backported without replacing the local input patches:
+
+- `egoist/mygo#1393`: sweep transient Metal textures after deferred frames,
+  with the upstream pending-frame regression.
+- `egoist/mygo#1428`: retain growing clip masks and their texture mapping,
+  with the upstream coverage and allocation regression.

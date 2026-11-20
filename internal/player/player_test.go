@@ -20,6 +20,18 @@ func TestPlayEmptyQueue(t *testing.T) {
 	}
 }
 
+// Seeking before audio is ready publishes the pending position immediately to media controls.
+func TestSeekWhileLoadingPublishesPosition(t *testing.T) {
+	p := New(func(func()) {})
+	p.Cue([]netease.Track{{ID: 7, Duration: 120000}})
+	var published []time.Duration
+	p.Changed = func() { published = append(published, p.Position()) }
+	p.Seek(37 * time.Second)
+	if len(published) != 1 || published[0] != 37*time.Second || p.Playing() {
+		t.Fatalf("published %v while playing = %t", published, p.Playing())
+	}
+}
+
 // silence is a long song of nothing.
 type silence struct{}
 
@@ -81,6 +93,33 @@ func TestPauseFades(t *testing.T) {
 	}
 }
 
+// A system interruption cuts a running pause fade at once, including after the app already reports paused.
+func TestInterruptCutsPendingFade(t *testing.T) {
+	_, p := posted()
+	defer p.out.Close()
+	p.TogglePlay()
+	p.Interrupt()
+	if p.Playing() || p.out.Playing() || !p.fade.silent() {
+		t.Fatal("the audio output was not paused and muted for the interruption")
+	}
+}
+
+// A seek already in progress lands where requested without restarting a system-paused player.
+func TestInterruptKeepsPendingSeekPaused(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	p.Seek(37 * time.Second)
+	p.Interrupt()
+	next(t, ch)
+	if p.Playing() || p.out.Playing() || p.seeking || p.Position() != 37*time.Second {
+		t.Fatalf("seek ended at %v, playing=%v, output playing=%v", p.Position(), p.Playing(), p.out.Playing())
+	}
+	p.TogglePlay()
+	if !p.Playing() || !p.out.Playing() || p.Position() < 37*time.Second {
+		t.Fatal("manual play failed to resume the same selection")
+	}
+}
+
 // A seek playing pauses, which fades out over a few milliseconds, and
 // plays again once there, its position the one asked for meanwhile.
 func TestSeekWithoutClick(t *testing.T) {
@@ -139,6 +178,41 @@ func TestRadioRefills(t *testing.T) {
 	p.endRadio()
 	if p.Radio() != "" || p.feed != nil {
 		t.Error("radio still on")
+	}
+}
+
+// A delayed radio refill obeys the latest play or pause intent instead of always starting its first track.
+func TestRadioRefillPreservesPlaybackIntent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		act  func(*Player)
+		play bool
+	}{
+		{name: "skip from a pause", play: true},
+		{name: "interrupted while waiting", act: (*Player).Interrupt},
+		{name: "pause while waiting", act: (*Player).TogglePlay},
+		{name: "explicitly resume while waiting", play: true, act: func(p *Player) {
+			p.Interrupt()
+			p.TogglePlay()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(func(func()) {})
+			p.Cue([]netease.Track{{ID: 1}})
+			var reply func([]netease.Track)
+			p.AttachRadio("fm:DEFAULT", func(got func([]netease.Track)) { reply = got })
+			p.Next()
+			if !p.Loading() || !p.Playing() || reply == nil {
+				t.Fatal("skipping at the end of a radio did not wait for the next track")
+			}
+			if tc.act != nil {
+				tc.act(p)
+			}
+			reply([]netease.Track{{ID: 2, LocalPath: filepath.Join(t.TempDir(), "next.mp3")}})
+			if p.Current().ID != 2 || p.Playing() != tc.play {
+				t.Fatalf("radio loaded track %d playing=%v, want track 2 playing=%v", p.Current().ID, p.Playing(), tc.play)
+			}
+		})
 	}
 }
 

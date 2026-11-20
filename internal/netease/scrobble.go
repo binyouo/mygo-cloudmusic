@@ -36,7 +36,7 @@ func Scrobble(id, sourceID int64, played time.Duration, source string) error {
 // PrepareScrobble snapshots authentication before work leaves the UI thread.
 // The returned function neither reads nor updates a later account's session.
 func PrepareScrobble(id, sourceID int64, played time.Duration, source string, start bool) (func(context.Context) error, error) {
-	return prepareScrobble(id, sourceID, played, source, start, httpClient.Jar.Cookies(siteURL))
+	return prepareScrobble(id, sourceID, played, source, start, currentHTTPClient().Jar.Cookies(siteURL))
 }
 
 func prepareScrobble(id, sourceID int64, played time.Duration, source string, start bool, cookies []*http.Cookie) (func(context.Context) error, error) {
@@ -88,7 +88,7 @@ func prepareScrobble(id, sourceID int64, played time.Duration, source string, st
 		var res struct {
 			Code int `json:"code"`
 		}
-		if err := eapiPostAsSession(ctx, "/api/feedback/weblog", map[string]any{"logs": string(logs)}, &res, "https://clientlog.music.163.com", scrobbleClient, scrobbleUA, cookies, false); err != nil {
+		if err := eapiPostWithJar(ctx, "/api/feedback/weblog", map[string]any{"logs": string(logs)}, &res, "https://clientlog.music.163.com", scrobbleClient, scrobbleUA, cookies, nil); err != nil {
 			return err
 		}
 		if res.Code != 200 {
@@ -102,7 +102,7 @@ func prepareScrobble(id, sourceID int64, played time.Duration, source string, st
 // later goroutine happens to run. Never persist or log this closure's cookies.
 // A successful response is API acceptance, not proof of history ingestion.
 func PlaybackReporter(id int64) func(context.Context, time.Duration) error {
-	cookies := httpClient.Jar.Cookies(siteURL)
+	cookies := currentHTTPClient().Jar.Cookies(siteURL)
 	return func(ctx context.Context, played time.Duration) error {
 		// Match the desktop client's event order; do not send play if start fails.
 		for _, start := range []bool{true, false} {

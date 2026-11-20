@@ -22,6 +22,7 @@ type mixEdgeAnalysis struct {
 	beat        int64
 	phase       int64
 	confidence  float64
+	meter       int // from the device's downbeat model when a bar fit is available
 }
 
 // mixVocalWindow is an optional, independently supplied activity interval on
@@ -40,18 +41,26 @@ type trackAnalysis struct {
 	headPCM, tailPCM []float32 // immutable 48 kHz stereo; each edge is at most 45 s.
 	vocals           []mixVocalWindow
 	vocalsKnown      bool
+	key              mixKey
+	bands            *mixBandProfile
+	deviceTiming     *deviceMixTiming
 	neural           *neuralAnalysis
 }
+
+var analyzeDeviceMix func(context.Context, *download, int64) (deviceMixProfile, error)
 
 // startMixAnalysis owns a separate decoder: seeking to the outro never moves
 // playback, and downloading/analysis never delays the prepared track's handoff.
 func startMixAnalysis(p *pcmTrack) {
 	dl, _ := p.raw.source()
-	if dl == nil || p.track.ProgramID != 0 || p.dec.Len() < 8*outputRate || !p.analysisStarted.CompareAndSwap(false, true) || !dl.share() {
+	if dl == nil || !p.analysisStarted.CompareAndSwap(false, true) {
 		return
 	}
 	ms := p.raw.Len() * 1000 / int64(p.raw.SampleRate())
 	go func() {
+		if !dl.share() {
+			return
+		}
 		defer dl.release()
 		s, err := openShared(dl, ms)
 		if err != nil {
@@ -70,7 +79,13 @@ func startMixAnalysis(p *pcmTrack) {
 			p.analysis.Store(a)
 			// Heavy inference has its own sequential decoder, cancellation and
 			// global concurrency budget; the basic profile stays usable meanwhile.
-			if result, err := analyzeNeuralTrack(ctx, dl, ms); err == nil && ctx.Err() == nil {
+			if analyzeDeviceMix != nil {
+				if profile, err := analyzeDeviceMix(ctx, dl, ms); err == nil && ctx.Err() == nil {
+					updated := *a
+					profile.apply(&updated, dec.Len())
+					p.analysis.Store(&updated)
+				}
+			} else if result, err := analyzeNeuralTrack(ctx, dl, ms); err == nil && ctx.Err() == nil {
 				updated := *a
 				updated.neural = result
 				p.analysis.Store(&updated)

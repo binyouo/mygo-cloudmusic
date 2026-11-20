@@ -1,6 +1,7 @@
 package netease
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,11 +166,15 @@ type apiError struct {
 }
 
 func get(path string, query url.Values, out any) error {
+	return getWithContext(context.Background(), path, query, out)
+}
+
+func getWithContext(ctx context.Context, path string, query url.Values, out any) error {
 	u := apiBase + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return err
 	}
@@ -186,9 +191,13 @@ func post(path string, form url.Values, out any) error {
 }
 
 func do(req *http.Request, out any) error {
+	return doWithClient(currentHTTPClient(), req, out)
+}
+
+func doWithClient(client *http.Client, req *http.Request, out any) error {
 	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Referer", apiBase+"/")
-	res, err := httpClient.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -552,7 +561,7 @@ func Fetch(url string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", UserAgent)
-	res, err := httpClient.Do(req)
+	res, err := currentHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}

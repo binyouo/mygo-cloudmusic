@@ -14,7 +14,7 @@ func (a *app) wallpaperView(c *ui.Context) {
 		c.OnShortcut(local[2].Mods, local[2].Key, a.pl.Next)
 	}
 	if a.pl.Current() == nil {
-		ui.Box(c).Fill().Background(ui.Hex("#0b0b0d"))
+		ui.Box(c).Fill().Background(ui.Hex("#151519"))
 		return
 	}
 	for i, tab := range a.npTabs() {

@@ -1,6 +1,7 @@
 package netease
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -14,15 +15,15 @@ func TestQRLoginLive(t *testing.T) {
 	}
 	// A device of the test's own, out of the keychain.
 	deviceOnce.Do(func() { deviceID = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123" })
-	key, err := QRKey()
+	attempt, err := BeginQRLogin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, msg, _, _, err := QRCheck(key)
-	if err != nil || code != QRWaiting {
-		t.Fatalf("check: %d %q %v", code, msg, err)
+	status, err := attempt.Check(context.Background())
+	if err != nil || status.Code != QRWaiting {
+		t.Fatalf("check: %d %q %v", status.Code, status.Message, err)
 	}
-	t.Logf("key %s: %d %s", key, code, msg)
+	t.Logf("new QR request: %d %s", status.Code, status.Message)
 }
 
 func TestSongURLEapiLive(t *testing.T) {
@@ -174,7 +175,7 @@ func TestSearchPageLive(t *testing.T) {
 			t.Fatalf("kind %d: %d of %d, %v", kind, res.Len(), res.Total, err)
 		}
 	}
-	s, err := SearchSuggest("周杰")
+	s, err := SearchSuggest(context.Background(), "周杰")
 	if err != nil || len(s.Songs) == 0 || len(s.Songs[0].Artists) == 0 || len(s.Albums) == 0 || len(s.Albums[0].Artists) == 0 {
 		t.Fatalf("suggestions %+v, %v", s, err)
 	}

@@ -3,10 +3,7 @@ package player
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"sync"
@@ -18,7 +15,6 @@ var errStretchUnavailable = errors.New("player: pitch-preserving stretcher unava
 // rubberBandAPI uses the public C API (unsigned sample counts, planar float
 // buffers). The library stays loaded because these function pointers are cached.
 type rubberBandAPI struct {
-	handle       uintptr
 	new          func(uint32, uint32, int32, float64, float64) uintptr
 	delete       func(uintptr)
 	engine       func(uintptr) int32
@@ -31,45 +27,7 @@ type rubberBandAPI struct {
 	retrieve     func(uintptr, unsafe.Pointer, uint32) uint32
 }
 
-var loadTailStretcher = sync.OnceValues(func() (*rubberBandAPI, error) {
-	var last error
-	for _, path := range rubberBandLibraryPaths() {
-		api, err := openRubberBandLibrary(path)
-		if err == nil {
-			return api, nil
-		}
-		last = err
-	}
-	return nil, fmt.Errorf("%w: %v", errStretchUnavailable, last)
-})
-
-// rubberBandLibraryPaths prefers the application bundle. Homebrew/system paths
-// are development fallbacks; production packages must carry their own library.
-func rubberBandLibraryPaths() []string {
-	var paths []string
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "Frameworks"))
-		switch runtime.GOOS {
-		case "darwin":
-			paths = append(paths, filepath.Join(dir, "librubberband.3.dylib"), filepath.Join(dir, "librubberband.2.dylib"), filepath.Join(dir, "librubberband.dylib"))
-		case "linux":
-			paths = append(paths, filepath.Join(dir, "librubberband.so.3"), filepath.Join(dir, "librubberband.so.2"), filepath.Join(dir, "librubberband.so"))
-		}
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		paths = append(paths,
-			"/opt/homebrew/opt/rubberband/lib/librubberband.3.dylib",
-			"/opt/homebrew/opt/rubberband/lib/librubberband.2.dylib",
-			"/opt/homebrew/opt/rubberband/lib/librubberband.dylib",
-			"/usr/local/opt/rubberband/lib/librubberband.3.dylib",
-			"/usr/local/opt/rubberband/lib/librubberband.2.dylib",
-			"/usr/local/opt/rubberband/lib/librubberband.dylib")
-	case "linux":
-		paths = append(paths, "librubberband.so.3", "librubberband.so.2", "librubberband.so")
-	}
-	return paths
-}
+var loadTailStretcher = sync.OnceValues(openTailStretcher)
 
 // stretchTempoAt is the outgoing playback speed at a source frame: an S-curve
 // reaches the incoming tempo before the overlap, then holds it during the mix.

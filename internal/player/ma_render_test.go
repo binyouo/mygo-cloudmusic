@@ -156,6 +156,37 @@ func TestMASmartPromotionKeepsIncomingOffset(t *testing.T) {
 	}
 }
 
+// A pending device render must survive playback past the start of the analysis buffer.
+func TestDeviceTransitionStartsAtRenderedBoundary(t *testing.T) {
+	a, b := testPCM(t, outputRate, 100, .1), testPCM(t, outputRate, 100, .2)
+	s := newSequence(a, nil)
+	defer s.Close()
+	s.queue(b)
+	aa := &trackAnalysis{deviceTiming: &deviceMixTiming{}}
+	a.analysis.Store(aa)
+	s.plan = &mixPlan{full: true, smart: true, outAnalysis: aa}
+	s.render = &smartRenderJob{a: a, b: b, cancel: func() {}}
+	prefix := make([]float32, 20)
+	if n, err := s.Read(prefix); n != len(prefix) || err != nil || prefix[19] != .1 || s.render == nil {
+		t.Fatalf("playback discarded the pending transition at the analysis boundary: n=%d err=%v", n, err)
+	}
+	resume := &samplesStream{samples: make([]float32, 200), rate: outputRate}
+	prepared := &smartAudio{
+		sourceStart: 20, outgoing: make([]float32, 40), incoming: make([]float32, 30),
+		pre: 10, overlap: 10, release: 5, enter: 3, clock: newSmartClock(20, 0, 1, 20),
+		headroomOff: make([]float32, 25), resume: &smartResume{stream: resume, decoder: resume},
+	}
+	s.render.ready.Store(prepared)
+	s.render.done.Store(true)
+	if _, err := s.Read(make([]float32, 42)); err != nil {
+		t.Fatal(err)
+	}
+	part, _, _ := s.state(s.pos)
+	if part.track != b || part.start != 30 || part.offset != 3 {
+		t.Fatalf("incoming track started at the wrong rendered boundary: %+v", part)
+	}
+}
+
 // A truncated or corrupt cache cannot become a trusted beat grid or vocal-activity mask.
 func TestNeuralCacheRejectsCorruptTimelines(t *testing.T) {
 	base := map[string]any{"version": 1, "duration": 40, "bpm": 120, "beats": []float64{0, .5, 1}, "downbeats": []float64{0}, "beats_per_bar": 4, "vocal_activity": make([]float64, 1800)}

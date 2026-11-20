@@ -247,7 +247,7 @@ func finishSmartAudio(ctx context.Context, a, b *pcmTrack, out, in []float32, cl
 	for i, v := range in {
 		combined[pre*2+int64(i)] += v
 	}
-	levels := newSpectrum(outputRate, frames+releaseFrames)
+	levels := newSpectrumSlots(outputRate, int((frames+releaseFrames)/fftSize)+2)
 	levels.feed(0, combined)
 	resume, err := prepareSmartResume(ctx, b, enter+overlap+releaseFrames)
 	if err != nil {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ type suggestState struct {
 	loading bool
 	failed  bool
 	timer   *time.Timer // waiting for typing to pause
+	cancel  context.CancelFunc
 }
 
 // suggestion is a page a query may be after: a song's search, or an
@@ -38,15 +40,18 @@ func (a *app) suggest(q string) {
 		return
 	}
 	a.dismissSuggestions()
-	s.query, s.loading = q, true
+	ctx, cancel := context.WithCancel(context.Background())
+	s.query, s.loading, s.cancel = q, true, cancel
+	fetch := searchSuggest
 	s.timer = time.AfterFunc(suggestDelay, func() {
-		res, err := searchSuggest(q)
+		res, err := fetch(ctx, q)
 		a.post(func() {
-			// Typed on, or searched since.
-			if q != s.query {
+			// Even the same query can have been dismissed and started again.
+			if ctx.Err() != nil {
 				return
 			}
-			s.timer, s.loading, s.failed = nil, false, err != nil
+			cancel()
+			s.timer, s.cancel, s.loading, s.failed = nil, nil, false, err != nil
 			s.items = suggestionList(res)
 		})
 	})
@@ -56,6 +61,9 @@ func (a *app) dismissSuggestions() {
 	s := &a.suggestions
 	if s.timer != nil {
 		s.timer.Stop()
+	}
+	if s.cancel != nil {
+		s.cancel()
 	}
 	*s = suggestState{}
 }
@@ -88,15 +96,29 @@ func suggestionList(res netease.Suggestions) []suggestion {
 	return out[:min(len(out), 10)]
 }
 
+func phoneSearchFill(p palette) ui.Color {
+	if p.dark {
+		return ui.RGBA(118, 118, 128, 0.24)
+	}
+	return ui.RGBA(118, 118, 128, 0.12)
+}
+
 // searchField is the search field atop the sidebar, which suggests what
 // its query may be after as it is typed, and, empty, lists the searches
 // before.
-func (a *app) searchField(c *ui.Context) {
+func (a *app) searchField(c *ui.Context) bool {
 	p := a.pal
+	popupOpen := false
 	field := ui.Row(c).Height(32).Radius(9).AlignItems(ui.Stretch).Margin(0, 0, 14, 0)
-	if c.Focused(a.searchBox) {
+	if a.phone {
+		field.Height(40).Radius(12).Margin(0)
+	}
+	switch {
+	case a.phone:
+		field.Background(phoneSearchFill(p))
+	case c.Focused(a.searchBox):
 		field.Background(p.bg).Shadow(0, 0, 0, 3, p.accent.Alpha(0.25)).Border(1, p.accent.Alpha(0.6))
-	} else {
+	default:
 		field.Background(p.hover).Border(1, p.hairline)
 	}
 	field.Children(func() {
@@ -104,14 +126,36 @@ func (a *app) searchField(c *ui.Context) {
 		end := float32(10)
 		if clearable {
 			end = 28
+			if a.phone {
+				end = 46
+			}
 		}
 		cb := ui.ComboboxBase(c.Key("search"), &a.query)
 		in := cb.Input.Bind(&a.searchBox).Grow(1).MinWidth(0).PaddingStart(31).PaddingEnd(end).
 			Placeholder("搜索歌曲、歌手、播客").FontSize(13).Label("搜索")
-		ui.Icon(c, iconSearch).Size(14, 14).TextColor(p.muted).Absolute().Left(10).Top(8).IgnoreInput(true)
+		searchIcon := ui.Icon(c, iconSearch).Size(14, 14).TextColor(p.muted).Absolute().Left(10).Top(8).IgnoreInput(true)
+		var focusAnchor ui.Element
+		if a.phone {
+			in.FocusBind(&a.phoneSearchEditing, true).FontSize(15)
+			searchIcon.Top(13)
+			// Where the keyboard's focus goes as a search runs: a sibling of
+			// the input that is always built, so the binding's write-back of
+			// the actual focus can't rearm phoneSearchEditing. Blurring to
+			// nothing would come back to the input as the popup's opener.
+			focusAnchor = ui.Box(c).Size(0, 0).Focusable()
+			// 取消 lives in the header, outside the field, so it closes the
+			// popup through this: blur alone returns focus to the input as
+			// the popup's opener and rearms editing. The body's chips and
+			// hot rows end editing the same way through phoneSearchBlur.
+			a.phoneSearchPopup = cb.SetOpen
+			a.phoneSearchBlur = func() { focusAnchor.Focus() }
+		}
 		if clearable {
 			x := ui.ButtonBase(c.Key("clear-search")).Size(22, 22).Center().Absolute().Right(4).Top(4).
 				KeepFocus().FocusRing(false).Label("清除搜索")
+			if a.phone {
+				x.Size(40, 40).Right(0).Top(0)
+			}
 			fill := p.faint
 			if x.Hovered() {
 				fill = p.muted
@@ -134,65 +178,111 @@ func (a *app) searchField(c *ui.Context) {
 		case s.query != "":
 			a.dismissSuggestions()
 		}
+		if a.phone {
+			// On the phone the history lives in the page body, so an empty
+			// query never opens the popup. A typed one opens it only as the
+			// focus arrives: reopening on every frame it stays closed
+			// fights the popup's own close and flashes the page.
+			if q == "" {
+				cb.SetOpen(false)
+			} else if in.Focused() && !cb.Open() && (!a.phoneSearchFieldWas || q != a.phoneSearchPopupQuery) {
+				cb.SetOpen(true)
+			}
+			a.phoneSearchFieldWas = in.Focused()
+		}
 		// Empty, it lists the searches before, if any.
-		if q == "" && len(a.settings.SearchHistory) == 0 {
+		if q == "" && !a.phone && len(a.settings.SearchHistory) == 0 {
 			cb.SetOpen(false)
 		}
 		pop := popoverColors(p.dark)
 		cb.Popup(func(panel ui.Element) {
+			box := field.Bounds()
 			panel.AttachTo(field, ui.AnchorBottomStart, ui.AnchorTopStart).
-				MinWidth(field.Bounds().W).MaxWidth(sidebarWidth+60).Padding(5).Gap(1).Margin(6, 0, 0, 0).Radius(12).
+				MinWidth(box.W).MaxWidth(sidebarWidth+60).Padding(5).Gap(1).Margin(6, 0, 0, 0).Radius(12).
 				Background(pop.fill).Border(0.5, pop.edge).
 				Shadow(0, 8, 24, -4, ui.RGBA(0, 0, 0, 0.2))
 			option := func(key, label string) ui.Element {
 				row := cb.Item(key).MinHeight(26).Padding(4, 8).Gap(8).Radius(6).AlignItems(ui.Center).Label(label)
+				if a.phone {
+					row.MinHeight(44)
+				}
 				if row.Highlighted() {
 					row.Background(p.press)
 				}
 				return row
 			}
-			if q == "" {
-				panel.Label("搜索历史")
-				ui.Text(c, "搜索历史").FontSize(11).FontWeight(600).TextColor(p.faint).Padding(4, 8, 2, 8)
-				for _, h := range a.settings.SearchHistory {
-					option("history:"+h, h).Children(func() {
-						ui.Text(c, h).FontSize(13).SingleLine().Shrink(1).MinWidth(0)
-					})
-				}
-				ui.Box(c).Height(0.5).Margin(4, 8).Background(pop.edge)
-				option("clear", "清空搜索历史").Children(func() {
-					ui.Text(c, "清空搜索历史").FontSize(13)
-				})
-				return
-			}
-			panel.Label("搜索建议")
-			// The query first, which Enter searches as typed.
-			option("query", "搜索“"+q+"”").Children(func() {
-				ui.Icon(c, iconSearch).Size(13, 13).TextColor(p.muted)
-				ui.Text(c, "搜索“"+q+"”").FontSize(13).FontWeight(500).SingleLine().Shrink(1).MinWidth(0)
-			})
-			if s.query == q {
-				for _, sg := range s.items {
-					option(sg.key, sg.kind+"："+sg.name).Children(func() {
-						ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
-							ui.Text(c, sg.name).FontSize(13).SingleLine()
-							if sg.detail != "" {
-								ui.Text(c, sg.detail).FontSize(11.5).TextColor(p.muted).SingleLine()
-							}
+			rows := func() {
+				if q == "" {
+					panel.Label("搜索历史")
+					ui.Text(c, "搜索历史").FontSize(11).FontWeight(600).TextColor(p.faint).Padding(4, 8, 2, 8)
+					for _, h := range a.settings.SearchHistory {
+						label := h
+						if a.phone {
+							label = "重新搜索：" + h
+						}
+						option("history:"+h, label).Children(func() {
+							ui.Text(c, h).FontSize(13).SingleLine().Shrink(1).MinWidth(0)
 						})
-						ui.Text(c, sg.kind).FontSize(11.5).TextColor(p.faint)
+					}
+					ui.Box(c).Height(0.5).Margin(4, 8).Background(pop.edge)
+					option("clear", "清空搜索历史").Children(func() {
+						ui.Text(c, "清空搜索历史").FontSize(13)
 					})
+					return
 				}
+				panel.Label("搜索建议")
+				// The query first, which Enter searches as typed.
+				option("query", "搜索“"+q+"”").Children(func() {
+					ui.Icon(c, iconSearch).Size(13, 13).TextColor(p.muted)
+					ui.Text(c, "搜索“"+q+"”").FontSize(13).FontWeight(500).SingleLine().Shrink(1).MinWidth(0)
+				})
+				if s.query == q {
+					for _, sg := range s.items {
+						option(sg.key, sg.kind+"："+sg.name).Children(func() {
+							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+								ui.Text(c, sg.name).FontSize(13).SingleLine()
+								if sg.detail != "" {
+									ui.Text(c, sg.detail).FontSize(11.5).TextColor(p.muted).SingleLine()
+								}
+							})
+							ui.Text(c, sg.kind).FontSize(11.5).TextColor(p.faint)
+						})
+					}
+				}
+			}
+			if a.phone {
+				_, height := c.Size()
+				_, _, bottom, _ := phoneSafeArea(c)
+				room := max(0, height-bottom-box.Y-box.H-8)
+				panel.Width(box.W).MaxWidth(box.W).MaxHeight(room).Clip()
+				ui.Scroll(c.Key("options")).Grow(1).MinHeight(0).MaxHeight(max(0, room-10)).Children(func() {
+					ui.Column(c).Gap(1).Children(rows)
+				})
+			} else {
+				rows()
 			}
 		})
 		if key, ok := cb.Chosen(); ok {
 			cb.SetOpen(false)
+			if a.phone && key != "clear" {
+				a.phoneSearchEditing = false
+				focusAnchor.Focus()
+			}
 			a.choose(key, q)
 		} else if in.Submitted() && q != "" {
 			cb.SetOpen(false)
+			if a.phone {
+				a.phoneSearchEditing = false
+				focusAnchor.Focus()
+			}
 			a.search(q)
 		}
+		popupOpen = cb.Open()
+		if a.phone && popupOpen {
+			a.phoneSearchPopupQuery = q
+		}
 	})
+	return popupOpen
 }
 
 // choose goes where the option chosen in the search field's popup goes.
@@ -231,6 +321,10 @@ func (a *app) clearSearch() {
 	a.searched, a.query = route{}, ""
 	a.dismissSuggestions()
 	if a.route.page == pageSearch && !a.nowPlaying {
+		if a.phone {
+			a.show(route{page: pageSearch})
+			return
+		}
 		a.open(route{page: pageHome})
 	}
 }

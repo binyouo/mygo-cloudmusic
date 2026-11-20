@@ -58,9 +58,6 @@ func (p *Player) queueAudio(track *pcmTrack) {
 		if p.nextJob != nil && p.nextJob.pcm == track && p.nextJob.mixLyricsReady {
 			track.vocals.Store(mixHintsFromLyrics(p.nextJob.mixLyrics))
 		}
-		if p.AutoMix != nil && p.AutoMix() {
-			startMixAnalysis(track)
-		}
 		g := 1.0
 		if p.Normalize != nil && p.Normalize() {
 			g = normGain(track.info)

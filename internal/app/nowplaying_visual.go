@@ -83,6 +83,28 @@ func (a *app) visualProgress(now time.Time) (float32, bool) {
 	return a.npVisual.opacity(now, progress, mixing), mixing
 }
 
+func (a *app) prepareNowPlayingArt(c *ui.Context, tr *netease.Track) (*artwork, ui.Color) {
+	art := a.art.get(netease.Sized(tr.Album.PicURL, 600), true)
+	if tr.Album.PicURL == "" {
+		a.npVisual.clearArtwork()
+	}
+	if a.npVisual.track != tr.ID {
+		a.prefetchNowPlaying()
+	}
+	progress, duration, mixing := a.pl.TransitionProgress()
+	a.npVisual.step(c.Now(), tr.ID, art, c.Preferences().ReduceMotion, progress, duration, mixing, a.settings.CoverTransition)
+	// Keep the last cover and its colors until the new art arrives.
+	a.npArt = art
+	if art == nil && tr.Album.PicURL != "" {
+		a.npArt = a.npVisual.current
+	}
+	tint := ui.RGB(120, 120, 130)
+	if a.npArt != nil && !a.npArt.failed {
+		tint = a.npArt.tint
+	}
+	return art, tint
+}
+
 func (a *app) prefetchNowPlaying() {
 	order, at := a.pl.PlayOrder()
 	if at < 0 || at+1 >= len(order) {
@@ -95,7 +117,7 @@ func (a *app) prefetchNowPlaying() {
 func (a *app) paintPlayingArtwork(p *ui.Painter, r ui.Rect, track int64, art *artwork) {
 	v := &a.npVisual
 	// A departing slide keeps its own image after the current song changes.
-	if track != v.track {
+	if track != v.track || a.phonePlayerMoving {
 		paintCoverBitmap(p, r, a.playingArtworkStill(art), 1)
 		return
 	}

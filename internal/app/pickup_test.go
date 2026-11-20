@@ -1,8 +1,11 @@
 package app
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/netease"
 )
@@ -45,5 +48,64 @@ func TestLastStretch(t *testing.T) {
 	}
 	if _, _, ok := lastStretch([]netease.Play{play(1, 8*24*time.Hour, "iphone", 0)}, now); ok {
 		t.Error("picked up a week-old song")
+	}
+}
+
+// Recent listening appears in the phone mini player until its play button is tapped.
+func TestPhoneRecentPlaysResumeThroughMiniPlayer(t *testing.T) {
+	a := newTestApp()
+	a.phone = true
+	a.profile = &netease.Profile{UserID: 7}
+	a.accountRevision = 1
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	plays := []netease.Play{
+		{
+			Track:  netease.Track{ID: 9, Name: "继续播放", LocalPath: filepath.Join(dir, "current.flac"), Duration: 90000},
+			At:     now.Add(-3 * time.Minute),
+			Device: "osx",
+		},
+		{
+			Track:  netease.Track{ID: 8, Name: "上一首", LocalPath: filepath.Join(dir, "previous.flac"), Duration: 90000},
+			At:     now.Add(-6 * time.Minute),
+			Device: "osx",
+		},
+	}
+	a.applyRecentPlays(1, 7, plays, now)
+	order, at := a.pl.PlayOrder()
+	queue := a.pl.Queue()
+	if len(order) != 2 || at != 1 || queue[order[0]].ID != 8 || a.pl.Current().ID != 9 || a.pl.Playing() {
+		t.Fatalf("picked-up order=%v at %d, current=%v, playing=%t", order, at, a.pl.Current(), a.pl.Playing())
+	}
+	tt := ui.NewTester(a.view, 390, 780)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tt.Frame()
+	hint := heardAt(plays[0], now)
+	if !tt.HasText(hint) {
+		t.Fatal("the mini player did not identify the listening being resumed")
+	}
+	tapPhone(t, tt, "播放/暂停")
+	tt.Frame()
+	if !a.pl.Playing() || a.pl.Current().ID != 9 || tt.HasText(hint) {
+		t.Fatal("playing did not resume the picked-up song and dismiss its hint")
+	}
+}
+
+// A recent-plays response cannot cross a new login or replace a newly selected queue.
+func TestPhoneRecentPlaysLeavesNewerStateAlone(t *testing.T) {
+	a := newTestApp()
+	a.phone = true
+	a.profile = &netease.Profile{UserID: 7}
+	a.accountRevision = 2
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	plays := []netease.Play{{Track: netease.Track{ID: 9}, At: now, Device: "osx"}}
+	a.applyRecentPlays(1, 7, plays, now)
+	if a.pl.Current() != nil {
+		t.Fatal("a response from the previous login restored its queue")
+	}
+	a.pl.Cue([]netease.Track{{ID: 11}})
+	a.applyRecentPlays(2, 7, plays, now)
+	if a.pl.Current().ID != 11 {
+		t.Fatal("a recent-plays response replaced the listener's selection")
 	}
 }

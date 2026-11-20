@@ -89,7 +89,7 @@ func (a *app) albumPage(c *ui.Context) {
 		a.trackSkeleton(c, s, false, func(c *ui.Context) { a.playlistHeaderSkeleton(c, s) })
 		return
 	}
-	if d.tab == 1 {
+	if !a.phone && d.tab == 1 {
 		a.scrollPage(c, func() {
 			a.albumHeader(c, d)
 			a.albumComments(c, d)
@@ -101,8 +101,18 @@ func (a *app) albumPage(c *ui.Context) {
 
 func (a *app) albumHeader(c *ui.Context, d *albumData) {
 	al := d.album
+	if a.phone {
+		a.albumPhoneHeader(c, d)
+		return
+	}
 	p := a.pal
-	ui.Row(c).Gap(28).AlignItems(ui.End).Padding(0, 0, 26, 0).Children(func() {
+	commentLabel := "评论"
+	if d.comments.loaded {
+		commentLabel += " " + count(d.comments.total)
+	} else if d.activity != nil {
+		commentLabel += " " + count(d.activity.CommentCount)
+	}
+	a.detailHeader(c).Padding(0, 0, 26, 0).Children(func() {
 		ui.Box(c).Size(212, 212).Radius(14).Shadow(0, 18, 40, -10, p.cardShade).Children(func() {
 			a.coverFill(c, al.PicURL, 600, 14)
 		})
@@ -132,7 +142,7 @@ func (a *app) albumHeader(c *ui.Context, d *albumData) {
 			if d := strings.TrimSpace(al.Description); d != "" {
 				ui.Text(c, strings.ReplaceAll(d, "\n", " ")).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
 			}
-			ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
+			ui.Row(c).Wrap().Gap(10).Margin(10, 0, 0, 0).Children(func() {
 				if pillButton(c.Key("play"), iconPlay, "播放", p.accent, p.onAccent).Clicked() {
 					if a.pl.Shuffle() {
 						a.pl.ToggleShuffle()
@@ -150,22 +160,52 @@ func (a *app) albumHeader(c *ui.Context, d *albumData) {
 					Label(action).Disabled(d.subscribing || a.profile != nil && (d.activity == nil || d.activityLoading)).Clicked() {
 					a.toggleAlbumSubscription(d)
 				}
+				if a.phone {
+					pillButton(c.Key("comments"), iconComment, commentLabel, p.hover.Over(p.bg), p.text).
+						Label("查看专辑评论").Height(44).OnClick(func() {
+						a.phoneAlbumID = al.ID
+						a.loadAlbumComments(d)
+					})
+				}
 			})
 		})
 	})
-	label := "评论"
-	if d.comments.loaded {
-		label += " " + count(d.comments.total)
-	} else if d.activity != nil {
-		label += " " + count(d.activity.CommentCount)
+	if a.phone {
+		return
 	}
 	ui.Row(c).Margin(0, 0, 18, 0).Children(func() {
-		if segmented(c.Key("album-tabs"), &d.tab, "歌曲", label) && d.tab == 1 && !d.comments.loaded {
-			if d.comments.thread == "" {
-				d.comments.thread = fmt.Sprintf("R_AL_3_%d", al.ID)
-			}
-			a.loadComments(&d.comments)
+		if segmented(c.Key("album-tabs"), &d.tab, "歌曲", commentLabel) && d.tab == 1 {
+			a.loadAlbumComments(d)
 		}
+	})
+}
+
+func (a *app) loadAlbumComments(d *albumData) {
+	cs := &d.comments
+	if cs.loaded {
+		return
+	}
+	if cs.thread == "" {
+		cs.thread = fmt.Sprintf("R_AL_3_%d", d.album.ID)
+	}
+	a.loadComments(cs)
+}
+
+func (a *app) phoneAlbumComments(c *ui.Context) {
+	id := a.phoneAlbumID
+	if id == 0 {
+		return
+	}
+	d := a.albums[id]
+	if a.route != (route{page: pageAlbum, id: id}) || a.nowPlaying || d == nil || d.album == nil {
+		a.phoneAlbumID = 0
+		return
+	}
+	a.phoneBottomSheet(c.Key(id), "专辑评论", 0, false, func() { a.phoneAlbumID = 0 }, nil, nil, func() {
+		ui.Scroll(c.Key("thread")).Grow(1).MinHeight(0).TrackScroll(&d.comments.scroll).Children(func() {
+			ui.Column(c).Gap(2).Children(func() { a.albumCommentList(c, &d.comments) })
+		})
+		a.albumCommentEditor(c.Key("editor"), d)
 	})
 }
 
@@ -216,81 +256,116 @@ func (a *app) albumSubscribed(d *albumData, before netease.AlbumActivity, err er
 
 // albumComments keeps its thread separate from the song Now Playing shows.
 func (a *app) albumComments(c *ui.Context, d *albumData) {
-	cs, p := &d.comments, a.pal
 	ui.Column(c.Key("album-comments")).Gap(2).Children(func() {
 		a.albumCommentEditor(c.Key("editor"), d)
-		if len(cs.hot) > 0 {
-			commentHeading(c, "精彩评论", p.text)
-			for i := range cs.hot {
-				a.commentRow(c.Key(commentKey{true, cs.hot[i].ID}), &cs.hot[i], c.Now(), cs)
-			}
+		a.albumCommentList(c, &d.comments)
+	})
+}
+
+func (a *app) albumCommentList(c *ui.Context, cs *commentState) {
+	p := a.pal
+	if len(cs.hot) > 0 {
+		commentHeading(c, "精彩评论", p.text)
+		for i := range cs.hot {
+			a.commentRow(c.Key(commentKey{true, cs.hot[i].ID}), &cs.hot[i], c.Now(), cs)
 		}
-		if len(cs.latest) > 0 {
-			commentHeading(c, "最新评论 "+count(cs.total), p.text)
-			for i := range cs.latest {
-				a.commentRow(c.Key(commentKey{false, cs.latest[i].ID}), &cs.latest[i], c.Now(), cs)
-			}
+	}
+	if len(cs.latest) > 0 {
+		commentHeading(c, "最新评论 "+count(cs.total), p.text)
+		for i := range cs.latest {
+			a.commentRow(c.Key(commentKey{false, cs.latest[i].ID}), &cs.latest[i], c.Now(), cs)
 		}
-		if cs.loading {
-			commentSkeleton(c.Key("loading"), a.pageShimmer(c), 3)
-			return
-		}
-		switch {
-		case cs.err != "":
-			ui.Row(c).Gap(12).Padding(24, 12).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, cs.err).FontSize(13).TextColor(p.muted)
-				if ui.Button(c.Key("retry"), "重试").Clicked() {
-					a.loadComments(cs)
-				}
-			})
-		case cs.loaded && cs.more:
-			if ui.Button(c.Key("more"), "加载更多评论").AlignSelf(ui.Center).Margin(20, 0).Clicked() {
+	}
+	if cs.loading {
+		commentSkeleton(c.Key("loading"), a.pageShimmer(c), 3)
+		return
+	}
+	switch {
+	case cs.err != "":
+		ui.Row(c).Gap(12).Padding(24, 12).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, cs.err).FontSize(13).TextColor(p.muted)
+			if a.settingButton(c, "retry", "重试", false).Clicked() {
 				a.loadComments(cs)
 			}
-		case cs.loaded && len(cs.latest) == 0 && len(cs.hot) == 0:
-			a.empty(c, "还没有评论")
-		case cs.loaded:
-			a.empty(c, "没有更多评论了")
+		})
+	case cs.loaded && cs.more:
+		if a.settingButton(c, "more", "加载更多评论", false).AlignSelf(ui.Center).Margin(20, 0).Clicked() {
+			a.loadComments(cs)
 		}
-	})
+	case cs.loaded && len(cs.latest) == 0 && len(cs.hot) == 0:
+		a.empty(c, "还没有评论")
+	case cs.loaded:
+		a.empty(c, "没有更多评论了")
+	}
 }
 
 // albumCommentEditor keeps a draft with its album, including when sending fails.
 func (a *app) albumCommentEditor(c *ui.Context, d *albumData) {
 	cs, p := &d.comments, a.pal
-	ui.Column(c).Gap(10).Padding(12).Children(func() {
+	editor := ui.Column(c).Gap(10).Padding(12)
+	if a.phone {
+		editor.Gap(5).Padding(6, 2, 2, 2).Shrink(0).BorderWidth(1, 0, 0, 0).BorderColor(p.hairline)
+	}
+	editor.Children(func() {
 		if a.profile == nil {
-			if pillButton(c.Key("login"), iconComment, "登录后发表评论", p.hover, p.text).Clicked() {
+			login := pillButton(c.Key("login"), iconComment, "登录后发表评论", p.hover, p.text)
+			if a.phone {
+				login.Height(44)
+			}
+			if login.Clicked() {
 				a.openLogin()
 			}
 			return
 		}
 		if cs.replyID != 0 {
 			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "回复 @"+cs.replyTo).FontSize(12.5).TextColor(p.muted)
-				if ui.ButtonBase(c.Key("cancel-reply")).Disabled(cs.sending).Label("取消回复").Children(func() {
+				target := ui.Text(c, "回复 @"+cs.replyTo).FontSize(12.5).TextColor(p.muted)
+				cancel := ui.ButtonBase(c.Key("cancel-reply")).Disabled(cs.sending).Label("取消回复")
+				if a.phone {
+					target.SingleLine().Shrink(1).MinWidth(0)
+					cancel.MinWidth(44).MinHeight(44).Center()
+				}
+				if cancel.Children(func() {
 					ui.Text(c, "取消").FontSize(12).TextColor(p.muted)
 				}).Clicked() {
 					cs.replyID, cs.replyTo = 0, ""
 				}
 			})
 		}
-		ui.TextArea(c.Key("draft"), &cs.draft).Bind(&cs.editor).Height(88).ReadOnly(cs.sending).Placeholder("说说你对这张专辑的感受…").Label("专辑评论")
+		if a.phone {
+			ui.Row(c.Key("compose")).Gap(8).AlignItems(ui.Center).Children(func() {
+				albumCommentInput(c, cs).Label("专辑评论正文").MinHeight(46).Height(46).Grow(1).MinWidth(0)
+				a.albumCommentSend(c, d, "发送").MinHeight(44)
+			})
+			if cs.sendErr != "" {
+				ui.Text(c, cs.sendErr).FontSize(12).TextColor(p.muted)
+			}
+			return
+		}
+		albumCommentInput(c, cs).Height(88)
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 			if cs.sendErr != "" {
 				ui.Text(c, cs.sendErr).FontSize(12).TextColor(p.muted).Grow(1)
 			} else {
 				ui.Spacer(c)
 			}
-			label := "发表评论"
-			if cs.sending {
-				label = "正在发送…"
-			}
-			if ui.Button(c.Key("send"), label).Disabled(cs.sending || cs.loading || strings.TrimSpace(cs.draft) == "").Clicked() {
-				a.publishAlbumComment(d)
-			}
+			a.albumCommentSend(c, d, "发表评论")
 		})
 	})
+}
+
+func albumCommentInput(c *ui.Context, cs *commentState) ui.Element {
+	return ui.TextArea(c.Key("draft"), &cs.draft).Bind(&cs.editor).ReadOnly(cs.sending).
+		Placeholder("说说你对这张专辑的感受…").Label("专辑评论")
+}
+
+func (a *app) albumCommentSend(c *ui.Context, d *albumData, label string) ui.Element {
+	cs := &d.comments
+	if cs.sending {
+		label = "正在发送…"
+	}
+	return a.settingButton(c, "send", label, cs.sending || cs.loading || strings.TrimSpace(cs.draft) == "").
+		OnClick(func() { a.publishAlbumComment(d) })
 }
 
 func (a *app) publishAlbumComment(d *albumData) {

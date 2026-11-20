@@ -85,12 +85,11 @@ func eapiPost(path string, data map[string]any, out any) error {
 }
 
 func eapiPostAs(path string, data map[string]any, out any, domain string, client map[string]string, userAgent string) error {
-	return eapiPostAsSession(context.Background(), path, data, out, domain, client, userAgent, httpClient.Jar.Cookies(siteURL), true)
+	jar := currentHTTPClient().Jar
+	return eapiPostWithJar(context.Background(), path, data, out, domain, client, userAgent, jar.Cookies(siteURL), jar)
 }
 
-// eapiPostAsSession keeps a queued request tied to the session that created it.
-// Playback requests must not read a later account's cookies or overwrite its jar.
-func eapiPostAsSession(ctx context.Context, path string, data map[string]any, out any, domain string, client map[string]string, userAgent string, cookies []*http.Cookie, storeCookies bool) error {
+func eapiPostWithJar(ctx context.Context, path string, data map[string]any, out any, domain string, client map[string]string, userAgent string, cookies []*http.Cookie, jar http.CookieJar) error {
 	header := map[string]string{
 		"osver":       client["osver"],
 		"deviceId":    device(),
@@ -131,20 +130,20 @@ func eapiPostAsSession(ctx context.Context, path string, data map[string]any, ou
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// Sent by hand: the jar would add the site's cookies to these.
-	res, err := (&http.Client{Timeout: httpClient.Timeout}).Do(req)
+	res, err := (&http.Client{Timeout: currentHTTPClient().Timeout}).Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
 	// Keep what it sets for the site, whichever host set it.
-	if set := res.Cookies(); storeCookies && len(set) > 0 {
+	if set := res.Cookies(); jar != nil && len(set) > 0 {
 		for _, c := range set {
 			c.Domain = ""
 			c.Path = "/"
 		}
-		httpClient.Jar.SetCookies(siteURL, set)
+		jar.SetCookies(siteURL, set)
 	}
-	if !storeCookies && (res.StatusCode < 200 || res.StatusCode >= 300) {
+	if jar == nil && (res.StatusCode < 200 || res.StatusCode >= 300) {
 		return &playbackError{kind: "http", code: res.StatusCode}
 	}
 	body, err := io.ReadAll(res.Body)

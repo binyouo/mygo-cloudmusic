@@ -25,10 +25,11 @@ func TestNowPlayingClosesAsOneLayer(t *testing.T) {
 	if !tt.HasText("待播清单") {
 		t.Fatal("now playing did not open")
 	}
-	// Mid-way out, it still covers the page and the sidebar alike.
+	// Mid-way out, it still covers the page and the sidebar alike. The
+	// spring is quick, so "mid-way" is early: a quarter of the way out.
 	a.nowPlaying = false
 	tt.Frame()
-	tt.Advance(60 * time.Millisecond)
+	tt.Advance(25 * time.Millisecond)
 	tt.Frame()
 	img := tt.Image()
 	sx, sy := img.Bounds().Dx(), img.Bounds().Dy()

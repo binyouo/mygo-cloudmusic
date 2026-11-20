@@ -94,3 +94,27 @@ func Events(uid int64, limit int, before int64) (events []Event, last int64, mor
 	}
 	return events, res.LastTime, res.More, nil
 }
+
+// FollowFeed returns up to limit events of the accounts the listener
+// follows, posted before a time in Unix milliseconds, or the latest ones
+// for -1, with the time of the last returned to go on from, and whether
+// there are more. It wants the listener signed in.
+func FollowFeed(limit int, before int64) (events []Event, last int64, more bool, err error) {
+	var res struct {
+		Events []struct {
+			Event
+			JSON string `json:"json"`
+		} `json:"event"`
+		LastTime int64 `json:"lasttime"`
+		More     bool  `json:"more"`
+	}
+	q := url.Values{"pagesize": {strconv.Itoa(limit)}, "lasttime": {strconv.FormatInt(before, 10)}}
+	if err := get("/api/v1/event/get", q, &res); err != nil {
+		return nil, 0, false, err
+	}
+	for _, e := range res.Events {
+		e.Content = decodeEvent(e.JSON)
+		events = append(events, e.Event)
+	}
+	return events, res.LastTime, res.More, nil
+}

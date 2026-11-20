@@ -45,6 +45,9 @@ type Player struct {
 	// Changed, if set, hears that what plays, where it is or whether it
 	// plays changed.
 	Changed func()
+	// ArtworkChanged hears the cover for system playback controls. A nil
+	// cover clears the previous song's image before the new one arrives.
+	ArtworkChanged func([]byte)
 	// Ended runs before playback is stopped, replaced, or naturally restarted.
 	Ended func()
 
@@ -155,6 +158,9 @@ func (p *Player) announce(t *netease.Track, artwork []byte) {
 		State:    state,
 		Commands: mygo.MediaPlay | mygo.MediaPause | mygo.MediaNext | mygo.MediaPrevious | mygo.MediaSeek,
 	})
+	if p.ArtworkChanged != nil {
+		p.ArtworkChanged(artwork)
+	}
 }
 
 func (p *Player) ended() {
@@ -184,11 +190,25 @@ func (p *Player) ended() {
 
 // PlayQueue replaces the queue with tracks and plays the one at start.
 func (p *Player) PlayQueue(tracks []netease.Track, start int) {
+	p.playQueue(tracks, max(start, 0))
+}
+
+// PlayShuffled starts a list on any song, rather than pinning its first song.
+func (p *Player) PlayShuffled(tracks []netease.Track) {
+	if len(tracks) == 0 {
+		return
+	}
+	p.shuffle = true
+	p.playQueue(tracks, -1)
+}
+
+// A negative start lets shuffle choose the first song as well.
+func (p *Player) playQueue(tracks []netease.Track, start int) {
 	if len(tracks) == 0 {
 		return
 	}
 	p.endRadio()
-	start = min(max(start, 0), len(tracks)-1)
+	start = min(start, len(tracks)-1)
 	p.queue = append([]netease.Track(nil), tracks...)
 	p.order = make([]int, len(p.queue))
 	for i := range p.order {
@@ -235,6 +255,7 @@ func (p *Player) AttachRadio(name string, feed func(got func([]netease.Track))) 
 	p.radio, p.feed = name, feed
 	p.refill()
 	p.prepareNext()
+	p.sync()
 }
 
 // EndRadio stops the radio playing: the song playing plays on, but the
@@ -259,8 +280,8 @@ func (p *Player) EndRadio() {
 	if awaiting {
 		// At its end, waiting for more: nothing plays on.
 		p.playing = false
-		p.sync()
 	}
+	p.sync()
 }
 
 func (p *Player) endRadio() {
@@ -289,7 +310,7 @@ func (p *Player) refill() {
 		case !p.awaiting:
 		case p.at+1 < len(p.order):
 			p.awaiting = false
-			p.load(p.at + 1)
+			p.loadSkipping(p.at+1, 0, p.playing, 0)
 		default:
 			// The radio has nothing more: it stops at its end.
 			p.awaiting, p.playing = false, false
@@ -303,6 +324,9 @@ func (p *Player) refill() {
 func (p *Player) awaitFeed() {
 	p.awaiting = true
 	p.refill()
+	if p.awaiting {
+		p.sync()
+	}
 }
 
 // appendTracks adds tracks to the end of the queue, but those in it.
@@ -320,7 +344,7 @@ func (p *Player) appendTracks(tracks []netease.Track) {
 	}
 }
 
-// shuffleOrder shuffles the order, with first first.
+// shuffleOrder shuffles the order, pinning first only when it is nonnegative.
 func (p *Player) shuffleOrder(first int) {
 	rand.Shuffle(len(p.order), func(i, j int) { p.order[i], p.order[j] = p.order[j], p.order[i] })
 	for i, v := range p.order {
@@ -346,11 +370,13 @@ func (p *Player) ToggleShuffle() {
 		p.at = cur
 	}
 	p.prepareNext()
+	p.sync()
 }
 
 func (p *Player) CycleRepeat() {
 	p.repeat = (p.repeat + 1) % 3
 	p.prepareNext()
+	p.sync()
 }
 
 // Current returns the track playing or loading, or nil.
@@ -426,6 +452,7 @@ func (p *Player) Next() {
 	if at >= len(p.order) {
 		if p.feed != nil {
 			p.stop()
+			p.playing = true
 			p.awaitFeed()
 			return
 		}
@@ -460,6 +487,11 @@ func (p *Player) Jump(i int) {
 
 // TogglePlay pauses, fading out, or plays, fading in.
 func (p *Player) TogglePlay() {
+	if p.awaiting {
+		p.playing = !p.playing
+		p.sync()
+		return
+	}
 	if !p.playing && p.sequence != nil {
 		p.pollAudio(p.sequence)
 	}
@@ -502,6 +534,17 @@ func (p *Player) TogglePlay() {
 	p.sync()
 }
 
+// Interrupt pauses for the system without the user-facing fade. Muting
+// first also prevents an in-flight seek from restarting the paused output.
+func (p *Player) Interrupt() {
+	p.playing = false
+	if p.out != nil {
+		p.fade.attach(p.out, 0)
+		p.out.Pause()
+	}
+	p.sync()
+}
+
 // seekGap is how long a seek waits for what plays to fade out, which the
 // audio player does over 5 ms, as it pauses: within the next buffer or
 // two it sends the system.
@@ -513,6 +556,9 @@ const seekGap = 30 * time.Millisecond
 func (p *Player) Seek(t time.Duration) {
 	if p.out == nil {
 		p.pending = t
+		if p.track != nil {
+			p.sync()
+		}
 		return
 	}
 	out := p.out

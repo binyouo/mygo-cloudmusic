@@ -27,7 +27,7 @@ func TestMergeLocalTracks(t *testing.T) {
 func TestSaveLocalLibrary(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "library", "local-library.json")
 	track := netease.Track{ID: -7, LocalPath: "/音乐/歌曲.mp3", LocalLyrics: "[00:01]歌词", LocalLyricsPath: "/歌词/歌曲.lrc", Album: netease.Album{PicURL: "file:///音乐/封面.cover"}}
-	if err := saveLocalLibrary(path, []netease.Track{track}); err != nil {
+	if err := saveLocalLibrary(path, []netease.Track{track}, false); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -52,7 +52,7 @@ func TestImportStandaloneLRC(t *testing.T) {
 		t.Fatal(err)
 	}
 	track := netease.Track{ID: -1, LocalPath: filepath.Join(dir, "歌曲.mp3")}
-	result := readLocalImports([]string{source}, []netease.Track{track}, "", filepath.Join(dir, "art"))
+	result := readLocalImports([]string{source}, []netease.Track{track}, filepath.Join(dir, "art"), localImportOptions{})
 	if result.lyrics != 1 || result.audio != 0 || len(result.failures) != 0 || result.tracks[0].LocalLyrics != text || result.tracks[0].LocalLyricsPath == "" {
 		t.Fatalf("standalone LRC was ignored: %+v", result)
 	}
@@ -75,7 +75,8 @@ func TestImportLRCMatching(t *testing.T) {
 		t.Fatal(err)
 	}
 	tracks := []netease.Track{{ID: -1, LocalPath: filepath.Join(dir, "a", "歌曲.mp3")}, {ID: -2, LocalPath: filepath.Join(dir, "b", "歌曲.flac")}}
-	result := readLocalImports([]string{source}, tracks, tracks[1].LocalPath, filepath.Join(dir, "art"))
+	options := localImportOptions{currentPath: tracks[1].LocalPath}
+	result := readLocalImports([]string{source}, tracks, filepath.Join(dir, "art"), options)
 	if result.lyrics != 1 || result.tracks[0].LocalLyrics != "" || result.tracks[1].LocalLyrics == "" {
 		t.Fatalf("current song did not receive explicit lyrics: %+v", result)
 	}
@@ -83,7 +84,7 @@ func TestImportLRCMatching(t *testing.T) {
 	if err := os.Rename(source, matchedSource); err != nil {
 		t.Fatal(err)
 	}
-	result = readLocalImports([]string{matchedSource}, tracks, tracks[1].LocalPath, filepath.Join(dir, "art"))
+	result = readLocalImports([]string{matchedSource}, tracks, filepath.Join(dir, "art"), options)
 	if result.lyrics != 0 || len(result.failures) != 1 || result.tracks[0].LocalLyrics != "" || result.tracks[1].LocalLyrics != "" {
 		t.Fatalf("ambiguous lyrics were attached to the wrong song: %+v", result)
 	}
@@ -105,7 +106,7 @@ func TestImportAudioAndLRCInEitherOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, paths := range [][]string{{source, path}, {path, source}} {
-		result := readLocalImports(paths, nil, "", filepath.Join(dir, "art"))
+		result := readLocalImports(paths, nil, filepath.Join(dir, "art"), localImportOptions{})
 		if result.audio != 1 || result.lyrics != 1 || len(result.tracks) != 1 || len(result.failures) > 0 || result.tracks[0].LocalLyricsPath == "" {
 			t.Fatalf("pairing depends on selection order: %+v", result)
 		}
