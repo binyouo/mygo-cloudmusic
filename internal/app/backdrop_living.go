@@ -39,9 +39,8 @@ func Fragment(dst vec4, pos vec2) vec4 {
 	b := cover(rot(p+vec2(0.22*cos(t*0.06), 0.16*sin(t*0.08)), 2.1-t*0.06) / 0.95)
 	d := cover(rot(p+vec2(0.1*sin(t*0.09+1.0), -0.2), 4.2+t*0.03) / 1.9)
 	col := a*0.5 + b*0.3 + d*0.2
-	// Vibrancy: richer and a little darker, so white reads over it.
 	l := dot(col, vec3(0.2126, 0.7152, 0.0722))
-	col = mix(vec3(l), col, 1.35) * 0.82
+	col = mix(vec3(l), col, 0.92) * 0.82
 	return vec4(clamp(col, 0.0, 1.0), 1)
 }
 `
@@ -67,10 +66,10 @@ func drawVibrancy(p *ui.Painter, r ui.Rect, phone bool) {
 		// behind the controls keeps it legible with very bright covers.
 		ink := ui.Hex("#101016")
 		p.FillGradient(r, ui.LinearGradient{Angle: 180, Stops: []ui.GradientStop{
-			{Color: ink.Alpha(0.54), At: 0},
-			{Color: ink.Alpha(0.16), At: 0.20},
-			{Color: ink.Alpha(0.30), At: 0.50},
-			{Color: ink.Alpha(0.76), At: 0.76},
+			{Color: ink.Alpha(0.60), At: 0},
+			{Color: ink.Alpha(0.32), At: 0.20},
+			{Color: ink.Alpha(0.43), At: 0.50},
+			{Color: ink.Alpha(0.78), At: 0.76},
 			{Color: ink.Alpha(0.98), At: 1},
 		}}, 0)
 		return

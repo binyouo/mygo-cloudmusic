@@ -409,16 +409,10 @@ func (a *app) phonePlayerTitle(c *ui.Context, tr *netease.Track, titleSize, subt
 				a.artistLinks(c, tr, white.Alpha(0.72), white, true).FontSize(subtitleSize).SingleLine()
 			}
 		})
-		ui.Row(c.Key("track-actions")).Shrink(0).Height(44).AlignItems(ui.Center).
-			Radius(22).Background(white.Alpha(0.10)).Children(func() {
-			ui.Box(c).Size(44, 44).Center().Children(func() {
-				a.likeButton(c.Key("like"), tr, 17, white.Alpha(0.92))
-			})
-			ui.Box(c).Size(1, 18).Background(white.Alpha(0.14))
-			ui.ButtonBase(c.Key("more")).Size(44, 44).Radius(22).Center().Label("更多").
-				OnClick(func() { a.phoneSheet = phoneSheetOptions }).Children(func() {
-				ui.Icon(c, iconMore).Size(18, 18).TextColor(white.Alpha(0.92))
-			})
+		ui.Row(c.Key("track-actions")).Shrink(0).AlignItems(ui.Center).Children(func() {
+			a.likeButton(c.Key("like"), tr, 19, white.Alpha(0.82)).Size(44, 44)
+			iconButton(c.Key("more"), iconMore, 19, white.Alpha(0.82), "更多").Size(44, 44).
+				OnClick(func() { a.phoneSheet = phoneSheetOptions })
 		})
 	})
 }
@@ -524,11 +518,11 @@ func (a *app) phonePlayerMedia(c *ui.Context, tr *netease.Track, art *artwork, a
 		})
 	}
 	if !details {
-		// Apple's cover keeps clear margins on every side rather than
-		// filling the media area wall to wall.
-		size := min(max(0, width-40), max(0, height-24), 400)
+		const inset = 32
+		size := min(max(0, width-16), max(0, height-inset), 400)
 		if size > 0 {
-			ui.Column(c.Key("cover")).Fill().Center().Padding(phoneCoverDrop, 0, 0, 0).Children(func() {
+			drop := min(phoneCoverDrop, max(0, height-size-inset))
+			ui.Column(c.Key("cover")).Fill().Center().Padding(drop, 0, 0, 0).Children(func() {
 				box := ui.Box(c).Size(size, size)
 				// Lyrics opening flies it into the header's thumbnail, as
 				// Apple's artwork shrinks into the title row.
@@ -554,8 +548,7 @@ func (a *app) phonePlayerMedia(c *ui.Context, tr *netease.Track, art *artwork, a
 }
 
 func (a *app) phonePlayerActions(c *ui.Context, tr *netease.Track, hasText bool) {
-	ui.Row(c.Key("phone-player-actions")).Height(48).Shrink(0).AlignItems(ui.Center).
-		Radius(16).Background(white.Alpha(0.09)).Children(func() {
+	ui.Row(c.Key("phone-player-actions")).Height(48).Shrink(0).AlignItems(ui.Center).Children(func() {
 		if hasText {
 			label, name := "歌词", "歌词"
 			if tr.ProgramID != 0 {
@@ -590,20 +583,22 @@ func (a *app) phonePlayerActions(c *ui.Context, tr *netease.Track, hasText bool)
 }
 
 func phonePlayerAction(c *ui.Context, icon *ui.SVG, label, title, value string, selected bool, run func()) ui.Element {
-	fg := white.Alpha(0.78)
-	b := ui.ButtonBase(c).Grow(1).Basis(0).MinWidth(0).Height(44).Radius(13).
-		Margin(0, 2).Center().Label(label).OnClick(run)
+	fg := white.Alpha(0.70)
+	b := ui.ButtonBase(c).Grow(1).Basis(0).MinWidth(0).Height(48).Radius(12).
+		Margin(0, 4).Center().Label(label).OnClick(run)
 	if selected || b.Pressed() {
-		b.Background(white.Alpha(0.15))
+		b.Background(white.Alpha(0.10))
 		fg = white
 	}
 	b.Children(func() {
-		ui.Row(c).Gap(5).AlignItems(ui.Center).TextColor(fg).Children(func() {
-			ui.Icon(c, icon).Size(17, 17).Shrink(0)
-			ui.Text(c, title).FontSize(11.5).FontWeight(600).SingleLine()
-			if value != "" {
-				ui.Text(c, value).FontSize(10).FontFeatures("tnum").TextColor(fg.Alpha(0.72)).SingleLine()
-			}
+		ui.Column(c).Gap(3).AlignItems(ui.Center).TextColor(fg).Children(func() {
+			ui.Icon(c, icon).Size(19, 19).Shrink(0)
+			ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, title).FontSize(11).FontWeight(600).SingleLine()
+				if value != "" {
+					ui.Text(c, value).FontSize(10).FontFeatures("tnum").TextColor(white.Alpha(0.56)).SingleLine()
+				}
+			})
 		})
 	})
 	return b
@@ -656,12 +651,12 @@ func (a *app) phoneTransport(c *ui.Context, compact bool) {
 	ui.Row(c).Height(height).Shrink(0).AlignItems(ui.Center).Justify(ui.Center).Gap(18).Children(func() {
 		phoneSkipButton(c.Key("prev"), "上一首", height, -1, iconPrev, a.pl.Prev)
 		play := ui.ButtonBase(c.Key("play")).Size(playSize, playSize).Radius(playSize / 2).Center().
-			Background(white.Alpha(0.96)).TextColor(ui.Hex("#17171b")).Label("播放/暂停").OnClick(func() {
+			Background(white.Alpha(0.93)).TextColor(ui.Hex("#17171b")).Label("播放/暂停").OnClick(func() {
 			a.pl.TogglePlay()
 			mygo.Haptics.Light()
 		})
 		phonePressScale(c, play, 0.9)
-		play.Children(func() { phonePlayPause(c, play, a.pl.Playing(), playSize*0.59) })
+		play.Children(func() { phonePlayPause(c, play, a.pl.Playing(), playSize*0.52) })
 		phoneSkipButton(c.Key("next"), "下一首", height, 1, iconNext, a.pl.Next)
 	})
 }
