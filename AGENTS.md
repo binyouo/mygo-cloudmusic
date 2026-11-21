@@ -29,7 +29,7 @@ Only write a test for behaviour that can actually break. If the code under test 
 
 ## iOS checkout
 
-- This checkout builds against the MyGo in `go.ios.mod` (module cache), not `third_party/mygo`, which lacks `ui/mobile`. Run tests as `GOFLAGS=-modfile=go.ios.mod go test ./internal/...`.
+- The desktop build uses `third_party/mygo` through `go.mod` and carries a local fix for pointer hover during momentum scrolling. iOS builds use the module pinned in `go.ios.mod` through `scripts/mygo-ios.sh`. Keep the MyGo versions aligned and run iOS tests with `GOFLAGS=-modfile=go.ios.mod go test ./internal/...`.
 
 ### iOS device delivery and acceptance
 

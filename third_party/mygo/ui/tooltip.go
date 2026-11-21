@@ -32,6 +32,17 @@ type tooltips struct {
 	dismissed uint64
 	// lastShown is when a tip last showed, or went.
 	lastShown time.Time
+	// pending holds the Tooltip modifiers queued during the view pass so
+	// they run after any chained Key.
+	pending []pendingTip
+}
+
+type pendingTip struct {
+	anchor *node
+	text   string
+	theme  *Theme
+	dir    uint8
+	inert  bool
 }
 
 // TooltipBase shows a tip without a look by anchor: fn styles the tip and
@@ -40,9 +51,10 @@ type tooltips struct {
 // keyboard, and at once too within 0.4 seconds of another tip going, as
 // the pointer moves along a toolbar; the theme's TooltipDelay changes
 // both. It goes as the pointer leaves anchor
-// or presses it, and with Escape, until the pointer comes back or the
-// focus does. Over elements inside one another, the innermost one's tip
-// shows; one shows at a time.
+// or presses it, as a menu or popover of anchor opens, and with Escape,
+// until the pointer comes back or the focus does; it does not show while
+// that menu or popover shows. Over elements inside one another, the
+// innermost one's tip shows; one shows at a time.
 //
 // The tip goes above anchor, centered, or below it where there is no room
 // above; fn may place it elsewhere with AttachTo, as after it:
@@ -94,6 +106,23 @@ func tooltipBase(c *context, anchor *node, fn func(tip *node)) (*node, bool) {
 	return tip, rt.tips.byFocus
 }
 
+// popupShows notes that a popup attached to e shows in the frame: its
+// menu, its popover or its options, while which its tip does not show.
+func (e *node) popupShows() {
+	if e.hasState() {
+		e.st.popped = e.c.rt.frame
+	}
+}
+
+// hideTip hides the tip of the element of s as its menu opens, by the
+// pointer, the keys or assistive technology, until neither the pointer
+// nor the focus is on it, as a press on it does.
+func (rt *engine) hideTip(s *state) {
+	if s.tip {
+		rt.tips.dismissed = s.id
+	}
+}
+
 // Tooltip shows s by the element when the pointer rests on it, or the
 // keyboard focus comes to it, as TooltipBase does: above the element,
 // centered, or below it where there is no room above. It describes the
@@ -105,17 +134,54 @@ func (e *node) Tooltip(s string) *node {
 	if s == "" {
 		return e
 	}
+	e.flags |= flagHover
+	e.tip = true
 	c := e.c
-	t := c.theme
-	fill, text := t.inverse()
-	tooltipBase(c, e, func(tip *node) {
-		tip.MaxWidth(t.Space(80)).Padding(t.Space(1.25), t.Space(2)).Radius(t.Space(1.25)).
-			Background(fill).TextColor(text).FontSize(t.FontSize - 1)
-		tip.Shadow(0, 2, 8, 0, RGBA(0, 0, 0, 0.2))
-		tip.Children(func() { coreText(c, s) })
-		tip.AttachTo(e, AnchorTop, AnchorBottom).Margin(0, 0, t.Space(1.5), 0)
+	dir := e.dir
+	if c.parent != nil {
+		dir = c.parent.dir
+	}
+	// Replace an earlier Tooltip on the same node in this pass.
+	if n := len(c.rt.tips.pending); n > 0 && c.rt.tips.pending[n-1].anchor == e {
+		c.rt.tips.pending[n-1] = pendingTip{anchor: e, text: s, theme: c.theme, dir: dir, inert: c.inert}
+		return e
+	}
+	c.rt.tips.pending = append(c.rt.tips.pending, pendingTip{
+		anchor: e,
+		text:   s,
+		theme:  c.theme,
+		dir:    dir,
+		inert:  c.inert,
 	})
 	return e
+}
+
+// buildTooltips builds the Tooltip overlays queued during the view pass,
+// after any chained Key has given each anchor its final ID and state.
+func (rt *engine) buildTooltips(c *context) {
+	if len(rt.tips.pending) == 0 {
+		return
+	}
+	savedParent, savedTheme, savedInert := c.parent, c.theme, c.inert
+	savedDir := c.root.dir
+	for _, p := range rt.tips.pending {
+		t := p.theme
+		fill, text := t.inverse()
+		c.theme, c.inert = t, p.inert
+		c.parent = c.root
+		c.root.dir = p.dir
+		tooltipBase(c, p.anchor, func(tip *node) {
+			tip.MaxWidth(t.Space(80)).Padding(t.Space(1.25), t.Space(2)).Radius(t.Space(1.25)).
+				Background(fill).TextColor(text).FontSize(t.FontSize - 1)
+			tip.Shadow(0, 2, 8, 0, RGBA(0, 0, 0, 0.2))
+			tip.Children(func() { coreText(c, p.text) })
+			tip.AttachTo(p.anchor, AnchorTop, AnchorBottom).Margin(0, 0, t.Space(1.5), 0)
+		})
+	}
+	c.root.dir = savedDir
+	c.parent, c.theme, c.inert = savedParent, savedTheme, savedInert
+	clear(rt.tips.pending)
+	rt.tips.pending = rt.tips.pending[:0]
 }
 
 // showTooltip returns the element whose tip shows in the frame, deciding it
@@ -169,6 +235,15 @@ func (rt *engine) showTooltip(c *context) uint64 {
 	}
 	if rt.pressed != nil && hover != 0 {
 		t.dismissed = hover
+	}
+	// An element whose menu or popover shows, in this frame or the last
+	// one, shows no tip: the pointer coming back to a menu button while
+	// its menu shows, or the focus coming back to it as the menu closes,
+	// leaves it hidden until they leave it.
+	for _, id := range [2]uint64{hover, focus} {
+		if s := rt.states[id]; id != 0 && s != nil && s.popped != 0 && s.popped+1 >= rt.frame {
+			t.dismissed = id
+		}
 	}
 	if hover == t.dismissed {
 		hover = 0

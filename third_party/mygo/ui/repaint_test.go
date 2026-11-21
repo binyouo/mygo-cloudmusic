@@ -383,6 +383,38 @@ func TestAnimationFrameRate(t *testing.T) {
 	}
 }
 
+// TestAnimationFrameRateInput checks that a frame built anew for input,
+// as the pointer coming onto an element that reads its hover, does not
+// wait for the lower rate a drawing that moves slowly told the surface:
+// the surface is told of the display's rate at once, and of the drawing's
+// again once the frame painted it.
+func TestAnimationFrameRateInput(t *testing.T) {
+	tt := newRepaintTester(func(c *context) {
+		coreBox(c).Size(100, 20).Draw(func(p *Painter, r Rect) { p.AnimationFrameRate(8) })
+		row := coreBox(c).Size(100, 20)
+		if row.Hovered() {
+			row.Background(RGB(0, 0, 0))
+		}
+	})
+	tt.h.hz = 120
+	tt.rt.changed()
+	tt.frame(0)
+	tt.frame(time.Second / 120)
+	if tt.h.frameRate != 8 {
+		t.Fatalf("pacing at 8 frames a second: told the surface %v", tt.h.frameRate)
+	}
+	tt.rt.event(platform.SurfaceEvent{Kind: platform.PointerMove, X: 50, Y: 30})
+	if tt.h.frameRate != 0 {
+		t.Errorf("the pointer came onto an element that reads its hover: the surface was told %v frames a second, want the display's (0)", tt.h.frameRate)
+	}
+	if built, _ := tt.frame(time.Second / 120); !built {
+		t.Error("the frame after the hover did not build the view")
+	}
+	if tt.h.frameRate != 8 {
+		t.Errorf("after the hover's frame: told the surface %v frames a second, want 8 again", tt.h.frameRate)
+	}
+}
+
 // TestAnimationFrameRateAtOnce checks the frames of AnimationFrameRate on a
 // surface whose frames asked for come at once, not at the display's next
 // refresh, as Windows': the refreshes between wait on the repaint timer,

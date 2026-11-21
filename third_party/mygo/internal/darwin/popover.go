@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && !ios
 
 package darwin
 
@@ -68,7 +68,7 @@ func (w *window) createPopover(content NSRect) {
 	send(w.view, "setAutoresizingMask:", nsViewWidthHeightSizable)
 	w.popoverController = alloc("NSViewController")
 	send(w.popoverController, "setView:", uintptr(w.view))
-	w.popover = alloc("NSPopover")
+	w.popover = w.b.takePopover()
 	send(w.popover, "setContentViewController:", uintptr(w.popoverController))
 	msgSetSize(w.popover, sel("setContentSize:"), content.Size)
 	behavior := uintptr(popoverBehaviorApplicationDefined)
@@ -115,6 +115,9 @@ func (w *window) showPopover() {
 		w.popoverHeld = false
 		send(w.popover, "setBehavior:", popoverBehaviorTransient)
 	}
+	// A status item's contrast appearance can differ from the app's theme.
+	// Give the whole popover (including its arrow) the content's appearance.
+	send(w.popover, "setAppearance:", uintptr(send(w.b.app, "effectiveAppearance")))
 	if w.flyout.Tray != nil {
 		// The popover of a menu bar app takes the keyboard of an app the
 		// user did not activate, as AppKit's own status items' do.
@@ -135,6 +138,12 @@ func (w *window) highlightTray(on bool) {
 }
 
 // adoptPopoverWindow makes the window the popover shows in the flyout's.
+// The flyout's delegate is the popover's, not that window's, so it hears
+// the window's occlusion changes (windowDidChangeOcclusionState:) from the
+// notification center instead, until it forgets the window: package ui
+// holds the frames asked for while the flyout is hidden (holdFrame), and
+// draws them once the surface tells it shows (SurfaceShown), as for
+// MyGo's own windows (#2053).
 func (w *window) adoptPopoverWindow() {
 	win := send(w.view, "window")
 	if win == 0 || win == w.win {
@@ -145,15 +154,54 @@ func (w *window) adoptPopoverWindow() {
 	w.b.byNSWindow[win] = w
 	if w.surface != nil {
 		send(win, "makeFirstResponder:", uintptr(w.surface.view))
+		send(send(class("NSNotificationCenter"), "defaultCenter"), "addObserver:selector:name:object:", uintptr(w.delegate),
+			uintptr(sel("windowDidChangeOcclusionState:")), uintptr(nsString(occlusionNotification)), uintptr(win))
+		w.tellPopoverOcclusion()
 	}
 }
+
+const occlusionNotification = "NSWindowDidChangeOcclusionStateNotification"
 
 func (w *window) forgetPopoverWindow() {
 	if w.win == 0 {
 		return
 	}
+	if w.surface != nil {
+		send(send(class("NSNotificationCenter"), "defaultCenter"), "removeObserver:name:object:", uintptr(w.delegate),
+			uintptr(nsString(occlusionNotification)), uintptr(w.win))
+	}
 	delete(w.b.byNSWindow, w.win)
 	w.win = 0
+	// Without its window the flyout shows nothing (surface.visible).
+	w.tellPopoverOcclusion()
+}
+
+// tellPopoverOcclusion tells a popover flyout's surface whether some of it
+// shows, as its window's occlusion changes, as the popover shows
+// (popoverDidShow:), in case AppKit tells nothing of its window's
+// occlusion, and as the flyout forgets its window: only when that changed
+// since it last told (popoverShown), as each of these may tell the same.
+func (w *window) tellPopoverOcclusion() {
+	if w.surface == nil {
+		return
+	}
+	if kind, ok := occlusionChange(&w.popoverShown, w.surface.visible()); ok {
+		w.surface.send(platform.SurfaceEvent{Kind: kind})
+	}
+}
+
+// occlusionChange returns the event that tells a surface last told shown
+// or hidden (shown) that it is visible or not now, and records it; ok is
+// false when it was told so already.
+func occlusionChange(shown *bool, visible bool) (kind platform.SurfaceEventKind, ok bool) {
+	if *shown == visible {
+		return 0, false
+	}
+	*shown = visible
+	if visible {
+		return platform.SurfaceShown, true
+	}
+	return platform.SurfaceHidden, true
 }
 
 // placePopover moves a popover that shows to the anchor, at the size.
@@ -191,15 +239,65 @@ func (w *window) closePopover() {
 
 func (w *window) cleanupPopover() {
 	w.forgetPopoverWindow()
-	send(w.popover, "setDelegate:", 0)
-	if sendBool(w.popover, "isShown") {
+	p := w.popover
+	w.popover = 0
+	// A popover that Hide closes with its animation still shows (isShown),
+	// and tells it closed (popoverDidClose:) only as the animation ends,
+	// which can be after the flyout is gone.
+	closing := w.popoverClosing || sendBool(p, "isShown")
+	w.b.givePopover(p, closing)
+	if sendBool(p, "isShown") {
 		w.highlightTray(false)
-		send(w.popover, "setAnimates:", 0)
-		send(w.popover, "close")
+		send(p, "setAnimates:", 0)
+		send(p, "close")
 	}
-	send(w.popover, "setContentViewController:", 0)
-	release(w.popover)
+	send(p, "setContentViewController:", 0)
 	release(w.popoverController)
+}
+
+// takePopover returns an NSPopover for a flyout to show in: one a closed
+// flyout gave back (givePopover), or a new one.
+func (b *Backend) takePopover() id {
+	if n := len(b.sparePopovers); n > 0 {
+		p := b.sparePopovers[n-1]
+		b.sparePopovers = b.sparePopovers[:n-1]
+		send(p, "setAnimates:", 1) // closePopover turned it off
+		return p
+	}
+	return alloc("NSPopover")
+}
+
+// givePopover keeps the NSPopover of a closed flyout for the next one to
+// show in, instead of releasing it. On macOS 26 an NSPopover that has
+// shown leaves its material's backdrop behind once it is released, a
+// graphics surface a little larger than the popover (3.4 MB for one of
+// 280×230), so an app that shows a new popover flyout at each click of
+// its tray icon grew by that much at each. Reused, a popover keeps one
+// backdrop: the app holds as many as it showed at once.
+//
+// A popover still closing becomes spare once it tells it closed, to
+// spareDelegate (spareClosed): shown by another flyout before that, it
+// showed nothing, and its late popoverDidClose: closed that flyout.
+func (b *Backend) givePopover(p id, closing bool) {
+	if b.spareDelegate == 0 {
+		b.spareDelegate = alloc("MyGoWindowDelegate") // in no window: windowFor is nil
+		b.closingPopovers = map[id]bool{}
+	}
+	send(p, "setDelegate:", uintptr(b.spareDelegate))
+	if closing {
+		b.closingPopovers[p] = true
+		return
+	}
+	b.sparePopovers = append(b.sparePopovers, p)
+}
+
+// spareClosed makes a popover a closed flyout gave back while it was
+// closing spare, as it tells it closed.
+func (b *Backend) spareClosed(p id) {
+	if b.closingPopovers[p] {
+		delete(b.closingPopovers, p)
+		b.sparePopovers = append(b.sparePopovers, p)
+	}
 }
 
 func popoverDelegateMethods() []objc.MethodDef {
@@ -217,7 +315,18 @@ func popoverDelegateMethods() []objc.MethodDef {
 			}
 			return true
 		}),
+		// The popover's window shows, its opening animation over: what
+		// waited for it draws, unless its occlusion told so already.
+		method("popoverDidShow:", func(self id, _ objc.SEL, n id) {
+			if w := b().windowFor(self); w != nil {
+				w.tellPopoverOcclusion()
+			}
+		}),
 		method("popoverDidClose:", func(self id, _ objc.SEL, n id) {
+			if self == b().spareDelegate {
+				b().spareClosed(send(n, "object"))
+				return
+			}
 			w := b().windowFor(self)
 			if w == nil {
 				return

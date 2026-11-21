@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf16"
 
 	"github.com/egoist/mygo/internal/scene"
 	"github.com/egoist/mygo/internal/wait"
@@ -60,6 +61,98 @@ func TestLayoutNewlinesAndEmpty(t *testing.T) {
 	empty := s.Layout(Params{Style: Style{Size: 14}})
 	if len(empty.Lines) != 1 || empty.Height <= 0 {
 		t.Errorf("empty text: %d lines, height %v", len(empty.Lines), empty.Height)
+	}
+}
+
+// TestLayoutTrailingLineSeparator verifies that a paragraph ending with
+// U+2028 lays out a trailing empty line matching trailing newline semantics,
+// with caret placement and hit-testing on that line.
+func TestLayoutTrailingLineSeparator(t *testing.T) {
+	s := Shared()
+	l := s.Layout(Params{Text: "alpha\u2028", Style: Style{Size: 14}})
+	if len(l.Lines) != 2 {
+		t.Fatalf("%d lines, want 2", len(l.Lines))
+	}
+	last := l.Lines[1]
+	if last.Start != len(l.Runes) || last.End != len(l.Runes) {
+		t.Errorf("empty line is %d:%d, want %d:%d", last.Start, last.End, len(l.Runes), len(l.Runes))
+	}
+	if last.Height <= 0 || last.Y < l.Lines[0].Height {
+		t.Errorf("empty line at y=%v height=%v", last.Y, last.Height)
+	}
+	if want := l.Lines[0].Height + last.Height; math.Abs(float64(l.Height-want)) > 0.5 {
+		t.Errorf("height %v, want %v", l.Height, want)
+	}
+	x, y, h := l.Caret(len(l.Runes))
+	if y != last.Y || h != last.Height {
+		t.Errorf("caret after the break at y=%v h=%v, want y=%v h=%v", y, h, last.Y, last.Height)
+	}
+	if got := l.IndexAt(x, last.Y+last.Height/2); got != len(l.Runes) {
+		t.Errorf("IndexAt on the empty line = %d, want %d", got, len(l.Runes))
+	}
+	// Wrapping reports the empty line itself: it is not added twice.
+	wide := s.Layout(Params{Text: "alpha\u2028", Style: Style{Size: 14}, Width: 1000})
+	if len(wide.Lines) != 2 || wide.Lines[1].Start != 6 || wide.Lines[1].End != 6 {
+		t.Errorf("trailing break with wrapping lines %+v", wide.Lines)
+	}
+	// A break inside the paragraph keeps two lines of text and adds none.
+	inner := s.Layout(Params{Text: "alpha\u2028beta", Style: Style{Size: 14}, Width: 1000})
+	if len(inner.Lines) != 2 || inner.Lines[1].Start != 6 || inner.Lines[1].End != 10 {
+		t.Errorf("inner break lines %+v", inner.Lines)
+	}
+}
+
+// TestLayoutTrailingLineSeparatorMaxLines verifies that MaxLines truncation
+// accounts for the trailing empty line after U+2028 just like a trailing \n.
+func TestLayoutTrailingLineSeparatorMaxLines(t *testing.T) {
+	s := Shared()
+	style := Style{Size: 14}
+	cases := []struct {
+		name      string
+		text      string
+		newline   string
+		maxLines  int
+		wantLines int
+		wantTrunc bool
+	}{
+		{
+			name:      "u2028_before_newline_max_2",
+			text:      "alpha\u2028\nbeta",
+			newline:   "alpha\n\nbeta",
+			maxLines:  2,
+			wantLines: 2,
+			wantTrunc: true,
+		},
+		{
+			name:      "trailing_u2028_max_1",
+			text:      "alpha\u2028",
+			newline:   "alpha\n",
+			maxLines:  1,
+			wantLines: 1,
+			wantTrunc: true,
+		},
+		{
+			name:      "trailing_u2028_max_2",
+			text:      "alpha\u2028",
+			newline:   "alpha\n",
+			maxLines:  2,
+			wantLines: 2,
+			wantTrunc: false,
+		},
+	}
+	for _, tc := range cases {
+		for _, width := range []float32{0, 1000} {
+			got := s.Layout(Params{Text: tc.text, Style: style, Width: width, MaxLines: tc.maxLines})
+			if len(got.Lines) != tc.wantLines || got.Truncated != tc.wantTrunc {
+				t.Errorf("%s (width=%v): got %d lines, truncated=%v; want %d lines, truncated=%v",
+					tc.name, width, len(got.Lines), got.Truncated, tc.wantLines, tc.wantTrunc)
+			}
+			nl := s.Layout(Params{Text: tc.newline, Style: style, Width: width, MaxLines: tc.maxLines})
+			if len(got.Lines) != len(nl.Lines) || got.Truncated != nl.Truncated {
+				t.Errorf("%s (width=%v): got (%d lines, truncated=%v) != newline (%d lines, truncated=%v)",
+					tc.name, width, len(got.Lines), got.Truncated, len(nl.Lines), nl.Truncated)
+			}
+		}
 	}
 }
 
@@ -481,6 +574,202 @@ func TestMakeRoomForLongMasks(t *testing.T) {
 	}
 }
 
+// TestTryMaskAsksForNoRoom draws a mask too long for the initial atlas
+// with TryMask, which a caller that draws it another way uses: it misses
+// without leaving it out of the frame, which then needs no room made,
+// and finds it once room was made for it otherwise.
+func TestTryMaskAsksForNoRoom(t *testing.T) {
+	s := newSystem()
+	s.BeginFrame()
+	draw := func() (int, int, []byte) {
+		pix := make([]byte, 2000*3)
+		for i := range pix {
+			pix[i] = 123
+		}
+		return 2000, 3, pix
+	}
+	for range 2 {
+		if s.TryMask(1, draw).OK || s.Full() {
+			t.Fatal("the long mask fit the initial atlas, or asked for room")
+		}
+	}
+	if s.Mask(1, draw).OK || !s.Full() {
+		t.Fatal("Mask did not ask for room for the mask TryMask missed")
+	}
+	s.MakeRoom()
+	if g := s.TryMask(1, draw); !g.OK || s.maskPixel(g) != 123 || s.Full() {
+		t.Fatalf("the mask does not fit after making room: %+v", g)
+	}
+	s.EndFrame()
+}
+
+func TestMaskCanDeferRasterizationUntilRoom(t *testing.T) {
+	for _, size := range []image.Point{{X: 256, Y: 3}, {X: 3, Y: 256}} {
+		s := newSystem()
+		s.BeginFrame()
+		calls, rasterized := 0, 0
+		draw := func() (int, int, []byte) {
+			calls++
+			if a := s.MaskAtlas; size.X >= a.W || size.Y >= a.H {
+				return size.X, size.Y, nil
+			}
+			rasterized++
+			pix := make([]byte, size.X*size.Y)
+			pix[0] = 123
+			return size.X, size.Y, pix
+		}
+		// The padding pixel makes even a 256-pixel mask need growth.
+		for range 2 {
+			if s.Mask(1, draw).OK || !s.MaskFull() {
+				t.Fatal("the mask fit before its dimensions had room")
+			}
+		}
+		if calls != 1 || rasterized != 0 {
+			t.Fatalf("before growth: %d requests, %d rasterizations", calls, rasterized)
+		}
+		s.MakeRoom()
+		if g := s.Mask(1, draw); !g.OK || s.maskPixel(g) != 123 || s.Full() || rasterized != 1 {
+			t.Fatalf("after growth: mask %+v, rasterizations %d, full %v", g, rasterized, s.Full())
+		}
+		s.EndFrame()
+	}
+}
+
+// Stale masks can fill a lasting shelf while an animation leaves a slot
+// in a transient one. A repeated mask must still request recovery before
+// using that slot, so it gets cached instead of rasterized every frame.
+func TestRepeatedMaskReclaimsStaleLastingRoom(t *testing.T) {
+	s := newSystem()
+	ignored, calls := 0, 0
+	for range 2 {
+		s.BeginFrame()
+		for key := uint64(1); key <= 2; key++ {
+			if !s.Mask(key, square(127, byte(key), &ignored)).OK {
+				t.Fatal("the masks did not fit while warming the lasting shelf")
+			}
+		}
+		s.EndFrame()
+	}
+	draw := square(127, 123, &calls)
+	s.BeginFrame()
+	if !s.Mask(3, draw).OK {
+		t.Fatal("the new mask did not fit in transient room")
+	}
+	s.EndFrame()
+	s.BeginFrame()
+	if !s.Mask(4, square(127, 4, &ignored)).OK {
+		t.Fatal("the animation did not fit in transient room")
+	}
+	if s.Mask(3, draw).OK || !s.MaskFull() {
+		t.Fatal("the repeated mask used transient room instead of requesting recovery")
+	}
+	s.MakeRoom()
+	if !s.Mask(4, square(127, 4, &ignored)).OK {
+		t.Fatal("the animation did not fit after recovery")
+	}
+	uses := s.TransientUses()
+	if g := s.Mask(3, draw); !g.OK || s.maskPixel(g) != 123 || s.Full() || s.TransientUses() != uses {
+		t.Fatalf("the repeated mask was not cached after recovery: %+v", g)
+	}
+	s.EndFrame()
+	for range 3 {
+		s.BeginFrame()
+		before := calls
+		if g := s.Mask(3, draw); !g.OK || s.maskPixel(g) != 123 || calls != before || s.TransientUses() != uses {
+			t.Fatalf("the stable mask was rasterized again or remained transient: %+v", g)
+		}
+		s.EndFrame()
+	}
+}
+
+func TestRepeatedMissingMaskUsesLastingRoom(t *testing.T) {
+	s := newSystem()
+	draw := func(w int) func() (int, int, []byte) {
+		return func() (int, int, []byte) {
+			pix := make([]byte, w*200)
+			pix[0] = 123
+			return w, 200, pix
+		}
+	}
+	s.BeginFrame()
+	s.Mask(1, draw(8))
+	s.EndFrame()
+	s.BeginFrame()
+	s.Mask(1, draw(8)) // a lasting shelf with room beside this mask
+	if s.Mask(2, draw(100)).OK || !s.MaskFull() {
+		t.Fatal("the new mask fit in transient room below the lasting shelf")
+	}
+	s.EndFrame()
+	s.BeginFrame()
+	s.Mask(1, draw(8))
+	if g := s.Mask(2, draw(100)); !g.OK || s.maskPixel(g) != 123 || s.Full() {
+		t.Fatalf("the repeated request did not use spare lasting room: %+v", g)
+	}
+	if a := s.MaskAtlas; a.W != 256 || a.H != 256 {
+		t.Fatalf("the atlas grew instead of sharing its lasting shelf: %dx%d", a.W, a.H)
+	}
+	s.EndFrame()
+}
+
+// A repeated miss prefers lasting storage, but cannot start a lasting
+// shelf when transient shelves occupy every row. It must still use an
+// empty slot after recovery and forget that bitmap at the next frame.
+func TestRepeatedMissingMaskUsesTransientRoom(t *testing.T) {
+	s := newSystem()
+	// At the size limit, recovery must reuse the four slots rather than
+	// grow room for another lasting shelf.
+	s.MaskAtlas = scene.NewAtlas(1, scene.MaxAtlasSize, scene.MaxAtlasSize)
+	const size = scene.MaxAtlasSize/2 - 1
+	pix := make([]byte, size*size)
+	calls := 0
+	draw := func() (int, int, []byte) {
+		calls++
+		pix[0] = byte(calls)
+		return size, size, pix
+	}
+	s.BeginFrame()
+	for key := uint64(1); key <= 4; key++ {
+		if !s.Mask(key, draw).OK {
+			t.Fatal("the four transient masks did not fit")
+		}
+	}
+	if s.Mask(5, draw).OK || !s.MaskFull() {
+		t.Fatal("the fifth mask fit the full atlas")
+	}
+	s.EndFrame()
+	s.BeginFrame()
+	for key := uint64(6); key <= 8; key++ {
+		if !s.Mask(key, draw).OK {
+			t.Fatal("the new transient masks did not fit")
+		}
+	}
+	if s.Mask(5, draw).OK || !s.MaskFull() {
+		t.Fatal("the repeated request did not ask for recovery before falling back")
+	}
+	s.MakeRoom()
+	for key := uint64(6); key <= 8; key++ {
+		if !s.Mask(key, draw).OK {
+			t.Fatal("the transient masks did not fit after recovery")
+		}
+	}
+	if g := s.Mask(5, draw); !g.OK || s.maskPixel(g) != byte(calls) || s.Full() {
+		t.Fatalf("the repeated request did not use spare transient room: %+v", g)
+	}
+	s.EndFrame()
+	s.BeginFrame()
+	before := calls
+	if g := s.Mask(5, draw); !g.OK || calls != before+1 || s.maskPixel(g) != byte(calls) {
+		t.Fatalf("the transient mask survived into the next frame: %+v, calls %d", g, calls-before)
+	}
+	s.EndFrame()
+	s.BeginFrame()
+	before = calls
+	if g := s.Mask(5, draw); !g.OK || calls != before {
+		t.Fatalf("the repeated mask was not cached once lasting room was free: %+v", g)
+	}
+	s.EndFrame()
+}
+
 func TestRightToLeft(t *testing.T) {
 	s := Shared()
 	l := s.Layout(Params{Text: "שלום עולם", Style: Style{Size: 16}})
@@ -616,6 +905,368 @@ func TestEllipsis(t *testing.T) {
 	}
 }
 
+// checkMiddleCut returns the runes a line that TruncateMiddle cut keeps
+// before its ellipsis and from where it keeps them after it, checking
+// that its glyphs hold no hidden rune and that one ellipsis stands
+// between them.
+func checkMiddleCut(t *testing.T, l *Layout) (cut, resume int) {
+	t.Helper()
+	if !l.Truncated || len(l.Lines) != 1 {
+		t.Fatalf("truncated %v, %d lines", l.Truncated, len(l.Lines))
+	}
+	line := l.Lines[0]
+	cut, resume = -1, len(l.Runes)
+	for _, g := range line.Glyphs {
+		if g.Runes == 0 {
+			if cut >= 0 && g.Cluster != cut {
+				t.Fatalf("ellipsis glyphs at %d and %d", cut, g.Cluster)
+			}
+			cut = g.Cluster
+		}
+	}
+	if cut < 0 {
+		t.Fatalf("no ellipsis in %+v", line.Glyphs)
+	}
+	for _, g := range line.Glyphs {
+		if g.Runes > 0 && g.Cluster >= cut {
+			resume = min(resume, g.Cluster)
+		}
+	}
+	for _, g := range line.Glyphs {
+		if g.Runes > 0 && g.Cluster < cut && g.Cluster+g.Runes > cut {
+			t.Errorf("glyph %+v holds runes the ellipsis hides from %d", g, cut)
+		}
+	}
+	if line.Start != 0 || line.End != len(l.Runes) || resume <= cut {
+		t.Fatalf("line %d to %d, cut at %d, resuming at %d", line.Start, line.End, cut, resume)
+	}
+	return cut, resume
+}
+
+func TestTruncateMiddle(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateMiddle()
+	path := "src/components/settings/appearance/theme/picker.go"
+	p := Params{Text: path, Style: Style{Size: 14}, Width: 160, MaxLines: 1, TruncateMiddle: true}
+	l := s.Layout(p)
+	cut, resume := checkMiddleCut(t, l)
+	if w := l.Lines[0].Width; w > p.Width {
+		t.Errorf("the line is %v wide in %v", w, p.Width)
+	}
+	if !strings.HasPrefix(path, "src/") || cut < 4 || resume > len(path)-len("picker.go") {
+		t.Errorf("kept %q…%q", path[:cut], path[resume:])
+	}
+	// Both sides are about as wide: they differ by less than a grapheme.
+	width := func(text string) float32 { return s.Layout(Params{Text: text, Style: p.Style}).Width }
+	head, tail, m := width(path[:cut]), width(path[resume:]), width("m")
+	if head-tail > m || tail-head > m {
+		t.Errorf("%q is %v wide, %q %v", path[:cut], head, path[resume:], tail)
+	}
+	// The runes it hides sit where the text resumes, after the ellipsis.
+	at, _, _ := l.Caret(resume)
+	for i := cut + 1; i < resume; i++ {
+		if x, _, _ := l.Caret(i); x != at {
+			t.Errorf("the caret before hidden rune %d is at %v, not %v", i, x, at)
+		}
+	}
+	prev := float32(-1)
+	for i := 0; i <= len(path); i++ {
+		x, _, _ := l.Caret(i)
+		if x < prev {
+			t.Errorf("the caret before rune %d is at %v, left of %v", i, x, prev)
+		}
+		prev = x
+	}
+	if i := l.IndexAt(l.Lines[0].Width+10, 5); i != len(path) {
+		t.Errorf("past the end is rune %d", i)
+	}
+}
+
+func TestTruncateMiddleGraphemes(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateMiddle()
+	// Each grapheme is two runes: an e and its accent, and a family of
+	// four joined into one emoji is seven.
+	for _, text := range []string{strings.Repeat("é", 40), strings.Repeat("👩‍👩‍👧‍👦", 12)} {
+		l := s.Layout(Params{Text: text, Style: Style{Size: 14}, Width: 90, MaxLines: 1, TruncateMiddle: true})
+		cut, resume := checkMiddleCut(t, l)
+		var b Boundaries
+		b.Reset(l.Runes)
+		for _, i := range []int{cut, resume} {
+			if _, ok := slices.BinarySearch(b.graphemes, i); !ok {
+				t.Errorf("%q is cut at rune %d, inside a grapheme", text, i)
+			}
+		}
+	}
+}
+
+func TestTruncateMiddleRTL(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateMiddle()
+	for _, text := range []string{
+		"שלום עולם זהו טקסט ארוך מאוד שצריך לקצר באמצע",
+		"مرحبا بالعالم هذا نص طويل جدا يجب اختصاره في المنتصف",
+		"docs/מדריכים/התחלה/מהירה/readme.md",
+	} {
+		p := Params{Text: text, Style: Style{Size: 14}, Width: 140, MaxLines: 1, TruncateMiddle: true}
+		l := s.Layout(p)
+		cut, resume := checkMiddleCut(t, l)
+		line := l.Lines[0]
+		// Arabic's letters join, and beside the ellipsis take other forms
+		// than those measured, as at the end of a line cut there.
+		joins := strings.ContainsFunc(text, func(r rune) bool { return unicode.Is(unicode.Arabic, r) })
+		if line.Width > p.Width && !joins || cut == 0 || resume == len(l.Runes) {
+			t.Errorf("%q: %v wide, cut at %d, resuming at %d", text, line.Width, cut, resume)
+		}
+		if want := isRTL(l.Runes, false); line.RTL != want {
+			t.Errorf("%q: RTL %v", text, line.RTL)
+		}
+	}
+}
+
+func TestTruncateMiddleSpans(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateMiddle()
+	// A folder in the style of the text, then a file's name larger.
+	text := "src/components/settings/theme/picker.go"
+	name := strings.Index(text, "picker")
+	spans := EncodeSpans([]Span{{End: name}, {End: len(text), Size: 20}})
+	l := s.Layout(Params{Text: text, Style: Style{Size: 12}, Spans: spans, Width: 180, MaxLines: 1, TruncateMiddle: true})
+	cut, resume := checkMiddleCut(t, l)
+	if resume > name {
+		t.Fatalf("resumes at %d, after the name at %d", resume, name)
+	}
+	for _, g := range l.Lines[0].Glyphs {
+		want := float32(12)
+		if g.Runes > 0 && g.Cluster >= name {
+			want = 20
+		}
+		if g.Size != want {
+			t.Errorf("glyph %+v of rune %d (cut at %d) is %v large", g, g.Cluster, cut, g.Size)
+		}
+	}
+}
+
+func TestTruncateMiddleEnds(t *testing.T) {
+	s := newSystem()
+	text := "src/components/settings/appearance/theme/picker.go"
+	p := Params{Text: text, Style: Style{Size: 14}, Width: 160, MaxLines: 1, TruncateMiddle: true}
+	endsWithEllipsis := func(l *Layout) bool {
+		gs := l.Lines[0].Glyphs
+		return l.Truncated && gs[len(gs)-1].Runes == 0 && l.Lines[0].End < len(l.Runes)
+	}
+	// Before UseTruncateMiddle the ellipsis ends the line.
+	if l := s.Layout(p); !endsWithEllipsis(l) {
+		t.Errorf("without UseTruncateMiddle: %+v", l.Lines[0])
+	}
+	s.UseTruncateMiddle()
+	// So it does where the paragraph fits and only the next one is cut,
+	// and without a width.
+	for _, q := range []Params{
+		{Text: "src/a.go\nsrc/b.go", Style: p.Style, Width: 160, MaxLines: 1, TruncateMiddle: true},
+		{Text: text + "\n" + text, Style: p.Style, MaxLines: 1, TruncateMiddle: true},
+	} {
+		if l := s.Layout(q); !endsWithEllipsis(l) {
+			t.Errorf("%q in %v: %+v", q.Text, q.Width, l.Lines[0])
+		}
+	}
+	// A text that fits is not cut.
+	p.Width = 1000
+	if l := s.Layout(p); l.Truncated {
+		t.Errorf("a text that fits is cut: %+v", l.Lines[0])
+	}
+	// The last of several lines is cut in its middle, keeping the end of
+	// its paragraph.
+	long := "The quick brown fox jumps over the lazy dog and keeps running to the end.txt"
+	l := s.Layout(Params{Text: long, Style: p.Style, Width: 160, MaxLines: 2, TruncateMiddle: true})
+	if len(l.Lines) != 2 || !l.Truncated {
+		t.Fatalf("%d lines, truncated %v", len(l.Lines), l.Truncated)
+	}
+	last := l.Lines[1]
+	if g := last.Glyphs[len(last.Glyphs)-1]; last.End != len(l.Runes) || g.Runes == 0 || g.Cluster+g.Runes != len(l.Runes) || last.Width > 160 {
+		t.Errorf("the last line ends at %d with %+v, %v wide", last.End, g, last.Width)
+	}
+}
+
+// checkStartCut returns from where a line that TruncateStart cut keeps
+// the runes of its paragraph, checking it as checkMiddleCut does and
+// that the ellipsis, before them, keeps none of its start.
+func checkStartCut(t *testing.T, l *Layout) (resume int) {
+	t.Helper()
+	cut, resume := checkMiddleCut(t, l)
+	if cut != 0 {
+		t.Fatalf("keeps %d runes before the ellipsis", cut)
+	}
+	return resume
+}
+
+func TestTruncateStart(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateStart()
+	path := "src/components/settings/appearance/theme/picker.go"
+	p := Params{Text: path, Style: Style{Size: 14}, Width: 160, MaxLines: 1, TruncateStart: true}
+	l := s.Layout(p)
+	resume := checkStartCut(t, l)
+	line := l.Lines[0]
+	if line.Width > p.Width {
+		t.Errorf("the line is %v wide in %v", line.Width, p.Width)
+	}
+	if g := line.Glyphs[0]; g.Runes != 0 {
+		t.Errorf("the line starts with %+v, not the ellipsis", g)
+	}
+	if resume > len(path)-len("theme/picker.go") {
+		t.Errorf("kept …%q", path[resume:])
+	}
+	// It keeps as much of the end as fits: one grapheme more does not.
+	width := func(text string) float32 { return s.Layout(Params{Text: text, Style: p.Style}).Width }
+	if w := width("…" + path[resume-1:]); w <= p.Width {
+		t.Errorf("…%q is %v wide, fitting %v", path[resume-1:], w, p.Width)
+	}
+	// The runes it hides, its first too, sit where the text resumes,
+	// after the ellipsis, as those an end cut hides sit before it.
+	at, _, _ := l.Caret(resume)
+	for i := 0; i < resume; i++ {
+		if x, _, _ := l.Caret(i); x != at {
+			t.Errorf("the caret before hidden rune %d is at %v, not %v", i, x, at)
+		}
+	}
+	prev := float32(-1)
+	for i := 0; i <= len(path); i++ {
+		x, _, _ := l.Caret(i)
+		if x < prev {
+			t.Errorf("the caret before rune %d is at %v, left of %v", i, x, prev)
+		}
+		prev = x
+	}
+	if i := l.IndexAt(-10, 5); i != resume {
+		t.Errorf("before the start is rune %d, not %d", i, resume)
+	}
+	if i := l.IndexAt(line.Width+10, 5); i != len(path) {
+		t.Errorf("past the end is rune %d", i)
+	}
+	// Asked for both, the start is cut.
+	p.TruncateMiddle = true
+	if r := checkStartCut(t, s.Layout(p)); r != resume {
+		t.Errorf("with TruncateMiddle too, resumes at %d, not %d", r, resume)
+	}
+}
+
+func TestTruncateStartGraphemes(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateStart()
+	for _, text := range []string{strings.Repeat("é", 40), strings.Repeat("👩‍👩‍👧‍👦", 12)} {
+		l := s.Layout(Params{Text: text, Style: Style{Size: 14}, Width: 90, MaxLines: 1, TruncateStart: true})
+		resume := checkStartCut(t, l)
+		var b Boundaries
+		b.Reset(l.Runes)
+		if _, ok := slices.BinarySearch(b.graphemes, resume); !ok {
+			t.Errorf("%q resumes at rune %d, inside a grapheme", text, resume)
+		}
+	}
+}
+
+func TestTruncateStartRTL(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateStart()
+	for _, text := range []string{
+		"שלום עולם זהו טקסט ארוך מאוד שצריך לקצר בהתחלה",
+		"مرحبا بالعالم هذا نص طويل جدا يجب اختصاره في البداية",
+		"docs/מדריכים/התחלה/מהירה/readme.md",
+	} {
+		p := Params{Text: text, Style: Style{Size: 14}, Width: 140, MaxLines: 1, TruncateStart: true}
+		l := s.Layout(p)
+		resume := checkStartCut(t, l)
+		line := l.Lines[0]
+		joins := strings.ContainsFunc(text, func(r rune) bool { return unicode.Is(unicode.Arabic, r) })
+		if line.Width > p.Width && !joins || resume == len(l.Runes) {
+			t.Errorf("%q: %v wide, resuming at %d", text, line.Width, resume)
+		}
+		if want := isRTL(l.Runes, false); line.RTL != want {
+			t.Errorf("%q: RTL %v", text, line.RTL)
+		}
+	}
+}
+
+func TestTruncateStartSpans(t *testing.T) {
+	s := newSystem()
+	s.UseTruncateStart()
+	// A folder in the style of the text, then a file's name larger.
+	text := "src/components/settings/theme/picker.go"
+	name := strings.Index(text, "picker")
+	spans := EncodeSpans([]Span{{End: name}, {End: len(text), Size: 20}})
+	l := s.Layout(Params{Text: text, Style: Style{Size: 12}, Spans: spans, Width: 180, MaxLines: 1, TruncateStart: true})
+	resume := checkStartCut(t, l)
+	if resume > name {
+		t.Fatalf("resumes at %d, after the name at %d", resume, name)
+	}
+	for _, g := range l.Lines[0].Glyphs {
+		want := float32(12)
+		if g.Runes > 0 && g.Cluster >= name {
+			want = 20
+		}
+		if g.Size != want {
+			t.Errorf("glyph %+v of rune %d (resuming at %d) is %v large", g, g.Cluster, resume, g.Size)
+		}
+	}
+	// Where only the name shows, the ellipsis takes its style, as it
+	// takes that of the text it ends at the end of a line.
+	l = s.Layout(Params{Text: text, Style: Style{Size: 12}, Spans: spans, Width: 80, MaxLines: 1, TruncateStart: true})
+	if resume := checkStartCut(t, l); resume < name {
+		t.Fatalf("resumes at %d, before the name at %d", resume, name)
+	}
+	for _, g := range l.Lines[0].Glyphs {
+		if g.Size != 20 {
+			t.Errorf("glyph %+v is %v large", g, g.Size)
+		}
+	}
+}
+
+func TestTruncateStartEnds(t *testing.T) {
+	s := newSystem()
+	text := "src/components/settings/appearance/theme/picker.go"
+	p := Params{Text: text, Style: Style{Size: 14}, Width: 160, MaxLines: 1, TruncateStart: true}
+	endsWithEllipsis := func(l *Layout) bool {
+		gs := l.Lines[0].Glyphs
+		return l.Truncated && gs[len(gs)-1].Runes == 0 && l.Lines[0].End < len(l.Runes)
+	}
+	// Before UseTruncateStart the ellipsis ends the line.
+	if l := s.Layout(p); !endsWithEllipsis(l) {
+		t.Errorf("without UseTruncateStart: %+v", l.Lines[0])
+	}
+	s.UseTruncateStart()
+	// So it does where the paragraph fits and only the next one is cut,
+	// and without a width.
+	for _, q := range []Params{
+		{Text: "src/a.go\nsrc/b.go", Style: p.Style, Width: 160, MaxLines: 1, TruncateStart: true},
+		{Text: text + "\n" + text, Style: p.Style, MaxLines: 1, TruncateStart: true},
+	} {
+		if l := s.Layout(q); !endsWithEllipsis(l) {
+			t.Errorf("%q in %v: %+v", q.Text, q.Width, l.Lines[0])
+		}
+	}
+	// A text that fits is not cut.
+	p.Width = 1000
+	if l := s.Layout(p); l.Truncated {
+		t.Errorf("a text that fits is cut: %+v", l.Lines[0])
+	}
+	// The last of several lines is cut at its start, keeping the end of
+	// its paragraph, and the lines before it are whole.
+	long := "The quick brown fox jumps over the lazy dog and keeps running to the end.txt"
+	whole := s.Layout(Params{Text: long, Style: p.Style, Width: 160})
+	l := s.Layout(Params{Text: long, Style: p.Style, Width: 160, MaxLines: 2, TruncateStart: true})
+	if len(l.Lines) != 2 || !l.Truncated || len(whole.Lines) < 3 {
+		t.Fatalf("%d lines, truncated %v, of %d", len(l.Lines), l.Truncated, len(whole.Lines))
+	}
+	if first := l.Lines[0]; first.Start != 0 || first.End != whole.Lines[0].End {
+		t.Errorf("the first line holds runes %d to %d, not to %d", first.Start, first.End, whole.Lines[0].End)
+	}
+	last := l.Lines[1]
+	head, tail := last.Glyphs[0], last.Glyphs[len(last.Glyphs)-1]
+	if head.Runes != 0 || head.Cluster != last.Start || last.End != len(l.Runes) || tail.Cluster+tail.Runes != len(l.Runes) || last.Width > 160 {
+		t.Errorf("the last line, runes %d to %d, starts with %+v and ends with %+v, %v wide", last.Start, last.End, head, tail, last.Width)
+	}
+}
+
 func TestColorEmoji(t *testing.T) {
 	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
 		t.Skip("emoji fonts vary")
@@ -625,6 +1276,31 @@ func TestColorEmoji(t *testing.T) {
 	g := l.Lines[0].Glyphs[0]
 	if img := s.Glyph(g.Font, g.ID, 1, 0, 0, false); !img.OK || !img.Colored || img.W < 16 {
 		t.Errorf("%+v", img)
+	}
+}
+
+// TestTextPresentation checks that symbols with text presentation, such as
+// ⏺, draw in the text's color though only a color font has them, and that
+// emoji and those with the emoji presentation selector draw in color.
+func TestTextPresentation(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("emoji fonts vary")
+	}
+	for _, tc := range []struct {
+		text  string
+		color bool
+	}{
+		{"\u23fa", false}, {"\u23fa\ufe0f", true}, {"\u2b50", true}, {"\u2b50\ufe0e", false}, {"\U0001f389", true},
+	} {
+		s := newSystem() // each glyph in atlases of its own
+		l := s.Layout(Params{Text: "a" + tc.text + "a", Style: Style{Size: 32}})
+		g := l.Lines[0].Glyphs[1]
+		if g.Font.color != tc.color {
+			t.Errorf("%+q: color %v, want %v", tc.text, g.Font.color, tc.color)
+		}
+		if img := s.Glyph(g.Font, g.ID, 1, 0, 0, false); !img.OK || img.Colored != tc.color || img.W < 8 {
+			t.Errorf("%+q: %+v", tc.text, img)
+		}
 	}
 }
 
@@ -639,6 +1315,34 @@ func TestRegisterFont(t *testing.T) {
 	system := font("")
 	if font("MyGo Test Sans") == system || font("Go") == system {
 		t.Error("text does not use the registered font")
+	}
+}
+
+// An app's fonts (RegisterAppFont) reach Shared and every System New
+// makes, as a Tester's window has: one made before them takes them at its
+// next layout, one made after before its first. Go Mono is monospaced, so
+// "iiiiiiii" is as wide as "mmmmmmmm" only in it.
+func TestRegisterAppFontReachesSystemsNewMakes(t *testing.T) {
+	const family = "MyGo Test App Mono"
+	monospaced := func(s *System) bool {
+		width := func(text string) float32 {
+			return s.Layout(Params{Text: text, Style: Style{Size: 20, Family: family}}).Lines[0].Width
+		}
+		i, m := width("iiiiiiii"), width("mmmmmmmm")
+		return i > m-0.5 && i < m+0.5
+	}
+	before := New()
+	if monospaced(before) {
+		t.Fatal("text uses the app's font before it is registered")
+	}
+	if err := RegisterAppFont(gomono.TTF, family); err != nil {
+		t.Fatal(err)
+	}
+	after := New()
+	for name, s := range map[string]*System{"Shared": Shared(), "made before": before, "made after": after} {
+		if !monospaced(s) {
+			t.Errorf("%s: text does not use the app's font", name)
+		}
 	}
 }
 
@@ -879,7 +1583,7 @@ func TestSpans(t *testing.T) {
 }
 
 func TestEncodeSpans(t *testing.T) {
-	spans := []Span{{End: 3, Family: "A, B", Size: 1.5, Weight: 600, Italic: true, LetterSpacing: -0.5, Features: "tnum", Lang: "ja"}, {End: 5, BaselineShift: -2.5}, {End: 7, SpacingSet: true, PaddingX: 3}, {End: 9}}
+	spans := []Span{{End: 3, Family: "A, B", Size: 1.5, Weight: 600, Italic: true, LetterSpacing: -0.5, Features: "tnum", Lang: "ja"}, {End: 5, BaselineShift: -2.5}, {End: 7, SpacingSet: true, PaddingX: 3}, {End: 8, PaddingStart: 16}, {End: 9}}
 	if got := DecodeSpans(EncodeSpans(spans)); !slices.Equal(got, spans) {
 		t.Errorf("decoded %+v, want %+v", got, spans)
 	}
@@ -916,6 +1620,47 @@ func TestSpanZeroLetterSpacing(t *testing.T) {
 	if w := width(0, Span{End: 6}, Span{End: 8, SpacingSet: true}); w != plain {
 		t.Errorf("no spacing over none is %v wide, not %v", w, plain)
 	}
+}
+
+// TestSpanPaddingStart checks a span's padding at its start alone: in
+// left-to-right text its glyphs move in by it, and the text after it by it
+// too, not twice; in right-to-left text the room is at the span's right,
+// which is where it starts.
+func TestSpanPaddingStart(t *testing.T) {
+	s := newSystem()
+	const pad = 16
+	lay := func(text string, spans ...Span) *Layout {
+		return s.Layout(Params{Text: text, Style: Style{Size: 14}, Spans: EncodeSpans(spans)})
+	}
+	x := func(l *Layout, r int) float32 {
+		for _, g := range l.Lines[0].Glyphs {
+			if g.Cluster == r {
+				return g.X
+			}
+		}
+		t.Fatalf("no glyph of rune %d", r)
+		return 0
+	}
+	check := func(name, text string, spans []Span, moves [][2]int) {
+		t.Helper()
+		plain, padded := lay(text), lay(text, spans...)
+		if d := padded.Width - plain.Width; math.Abs(float64(d-pad)) > 0.01 {
+			t.Errorf("%s: a span padded at its start widens the text by %v, not %v", name, d, pad)
+		}
+		for _, c := range moves {
+			if d := x(padded, c[0]) - x(plain, c[0]); math.Abs(float64(d-float32(c[1]))) > 0.01 {
+				t.Errorf("%s: rune %d moves %v, not %d", name, c[0], d, c[1])
+			}
+		}
+	}
+	// "Ctrl K" padded: the room is at its left, before rune 4
+	check("left to right", "See Ctrl K now", []Span{{End: 4}, {End: 10, PaddingStart: pad}, {End: 14}},
+		[][2]int{{3, 0}, {4, pad}, {9, pad}, {10, pad}, {13, pad}})
+	// "עולם" (runes 5-8) padded, laid out right to left: the room is at its
+	// right, between it and the space and word before it, which are on its
+	// right and move; it and what follows it, on its left, stay
+	check("right to left", "שלום עולם זה", []Span{{End: 5}, {End: 9, PaddingStart: pad}, {End: 12}},
+		[][2]int{{11, 0}, {8, 0}, {5, 0}, {4, pad}, {0, pad}})
 }
 
 // TestSpanPadding checks the horizontal padding of spans: each line's
@@ -1221,8 +1966,9 @@ func TestPlacement(t *testing.T) {
 			t.Errorf("baseline 20.01 drawn at %v", b)
 		}
 	case "linux":
-		if !same(at(10), at(10.9)) {
-			t.Error("not on whole pixels")
+		// Pango rounds glyph positions to the nearest whole pixel, as GTK.
+		if !same(at(10), at(10.49)) || same(at(10), at(10.5)) {
+			t.Error("not two positions a pixel")
 		}
 		if b := s.Baseline(20.9); b != 20 {
 			t.Errorf("baseline 20.9 drawn at %v", b)
@@ -1360,6 +2106,102 @@ func TestLangRuns(t *testing.T) {
 		if got := langRuns([]rune(c.text), c.base, c.spans); !slices.Equal(got, c.want) {
 			t.Errorf("langRuns(%q, %q, %+v) = %+v, want %+v", c.text, c.base, c.spans, got, c.want)
 		}
+	}
+	// The Han characters langRuns leaves in the engine's own language.
+	for _, c := range []struct {
+		text, base string
+		spans      []Span
+		want       []langRun
+	}{
+		{"abc", "", nil, nil},
+		{"直", "zh-Hans", nil, nil},
+		{"ab直骨。c", "", nil, []langRun{{2, 5, ""}}},
+		{"ab直骨。c", "en", nil, []langRun{{2, 5, ""}}},
+		{"直 直", "en", nil, []langRun{{0, 1, ""}, {2, 3, ""}}},
+		{"ab直c直", "en", []Span{{End: 2}, {End: 3, Lang: "ja"}}, []langRun{{4, 5, ""}}},
+		{"直直", "ja", []Span{{End: 1, Lang: "fr"}}, []langRun{{0, 1, ""}}},
+	} {
+		if got := userHanRuns([]rune(c.text), c.base, c.spans); !slices.Equal(got, c.want) {
+			t.Errorf("userHanRuns(%q, %q, %+v) = %+v, want %+v", c.text, c.base, c.spans, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		locale    string
+		preferred []string
+		want      string
+	}{
+		{"en-US", []string{"en-US", "zh-Hans-CN"}, "zh-Hans-CN"},
+		{"en-US", []string{"en-GB", "ja-JP", "zh-Hans-CN"}, "ja-JP"},
+		{"en-US", []string{"en-US"}, ""},
+		{"en-US", nil, ""},
+		{"zh-CN", []string{"en-US", "ja-JP"}, ""},
+		{"en-US", []string{"en-US", "zh-Hant-TW", "zh-Hans-CN"}, "zh-Hant-TW"},
+		{"en-GB", []string{"en-GB", "ko-KR", "ja-JP"}, "ko-KR"},
+		{"de-DE", []string{"fr-FR", "ja", "zh-Hans"}, "ja"},
+		{"ja-JP", []string{"en-US", "zh-Hans-CN"}, ""},
+	} {
+		if got := userHanLanguage(c.locale, c.preferred); got != c.want {
+			t.Errorf("userHanLanguage(%q, %q) = %q, want %q", c.locale, c.preferred, got, c.want)
+		}
+	}
+	for _, s := range [][]uint16{nil, {0}, {0, 0}} {
+		if got := splitMultiString(s); got != nil {
+			t.Errorf("splitMultiString(%v) = %q", s, got)
+		}
+	}
+	for _, c := range []struct {
+		list string
+		want []string
+	}{
+		{"en-US\x00zh-Hans-CN\x00\x00", []string{"en-US", "zh-Hans-CN"}},
+		{"en-US\x00\x00\x00\x00", []string{"en-US"}},
+		{"ja-JP\x00ko", []string{"ja-JP", "ko"}},
+	} {
+		if got := splitMultiString(utf16.Encode([]rune(c.list))); !slices.Equal(got, c.want) {
+			t.Errorf("splitMultiString(%q) = %q, want %q", c.list, got, c.want)
+		}
+	}
+}
+
+// Windows lists the user's display languages apart from the languages of
+// their profile: English Windows with Simplified Chinese second among the
+// languages of Settings, without its language pack, has en-US alone for
+// the first and en-US and zh-Hans-CN for the second (#1479). Han
+// characters take the first list's first language that writes them, else
+// the second's, and a list is read only when needed.
+func TestResolveUserHanLanguage(t *testing.T) {
+	for _, c := range []struct {
+		locale       string
+		ui, profile  []string
+		want         string
+		readsUI      bool
+		readsProfile bool
+	}{
+		// #1479: the display languages have no Chinese, the profile has.
+		{"en-US", []string{"en-US"}, []string{"en-US", "zh-Hans-CN"}, "zh-Hans-CN", true, true},
+		// #1454: the display languages have Chinese already.
+		{"en-US", []string{"en-US", "zh-Hans-CN"}, []string{"en-US", "ja-JP", "zh-Hans-CN"}, "zh-Hans-CN", true, false},
+		{"en-US", nil, []string{"en-GB", "zh-Hant-TW", "zh-Hans-CN"}, "zh-Hant-TW", true, true},
+		{"en-US", []string{"en-US"}, []string{"en-US", "ja-JP", "zh-Hans-CN"}, "ja-JP", true, true},
+		{"en-US", []string{"en-US"}, []string{"en-US", "ko-KR", "ja-JP"}, "ko-KR", true, true},
+		// No list has a language writing Han characters, or none is read.
+		{"en-US", []string{"en-US"}, []string{"en-US", "fr-FR"}, "", true, true},
+		{"en-US", nil, nil, "", true, true},
+		// A locale writing Han characters reads no list.
+		{"zh-CN", []string{"en-US"}, []string{"en-US", "ja-JP"}, "", false, false},
+		{"ja-JP", nil, []string{"en-US", "zh-Hans-CN"}, "", false, false},
+	} {
+		var readUI, readProfile bool
+		got := resolveUserHanLanguage(c.locale,
+			func() []string { readUI = true; return c.ui },
+			func() []string { readProfile = true; return c.profile })
+		if got != c.want || readUI != c.readsUI || readProfile != c.readsProfile {
+			t.Errorf("resolveUserHanLanguage(%q, %q, %q) = %q, reading the display languages %v and the profile's %v; want %q, %v and %v",
+				c.locale, c.ui, c.profile, got, readUI, readProfile, c.want, c.readsUI, c.readsProfile)
+		}
+	}
+	if got := resolveUserHanLanguage("en-US"); got != "" {
+		t.Errorf("resolveUserHanLanguage without lists = %q", got)
 	}
 	for lang, want := range map[string]bool{"zh-Hant": true, "ja_JP": true, "ko": true, "yue": true, "en": false, "vi": false, "": false} {
 		if writesHan(lang) != want {

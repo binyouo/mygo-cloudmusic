@@ -15,6 +15,10 @@ Sponsored by:
   </a>
 </p>
 
+<p align="center">
+  <a href="https://mygo.egoist.dev/sponsors">Become a sponsor</a>
+</p>
+
 ---
 
 Each MyGo window shows one of two kinds of interface, and one app, or one
@@ -30,7 +34,10 @@ window, can mix them:
 Either way, an app is a single Go binary of a few megabytes, focused on low
 memory and CPU use.
 
-- **Pure Go, no cgo**: build for every platform from any machine.
+- **Pure Go, no cgo**: build for every desktop from any machine.
+- **Phones too**: the same app on iOS and Android, pages in their web
+  views and native UI on their GPUs, with live reload on a simulator,
+  an emulator or a device, and builds for the App Store and Google Play.
 - **Typed IPC** for pages: bind Go services, stream values through channels
   and send typed events; the TypeScript client is generated from your Go
   code.
@@ -44,7 +51,7 @@ memory and CPU use.
   Playing and the media keys, the system accent color and accessibility
   settings, watching files, and more.
 - **Ready to ship**: app bundles and disk images, Windows installers, Debian
-  packages, PKGBUILDs for Arch Linux and a Linux install script, code signing, notarization, and signed
+  and RPM packages, PKGBUILDs for Arch Linux and a Linux install script, code signing, notarization, and signed
   auto-updates with delta updates and an update window in the manner of
   Sparkle.
 

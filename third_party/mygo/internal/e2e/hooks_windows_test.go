@@ -186,6 +186,13 @@ func openMenus(w *mygo.Window, letter byte) (supported bool) {
 	return true
 }
 
+// inMenuLoop reports whether the window runs a menu loop, which reads the
+// keys typed from then on.
+func inMenuLoop(w *mygo.Window) (in bool) {
+	mygo.RunOnMain(func() { in = win.TestInMenuLoop(w.NativeHandle()) })
+	return in
+}
+
 // closeMenus leaves the menus, as Escape does.
 func closeMenus() { mygo.RunOnMain(win.TestEndMenu) }
 
@@ -356,11 +363,19 @@ func popupItemEnabled(label string) (enabled, ok bool) {
 // composition the test makes up does not show.
 func pressKey(*mygo.Window, uint16, string) bool { return false }
 
+func pressKeyComposing(*mygo.Window, uint16, string, string, string) bool { return false }
+
 // dragFiles drags files from another application to (x, y) of a window of
 // native UI and drops them, as OLE does, waiting for the target to answer.
 func dragFiles(w *mygo.Window, x, y float64, paths []string) (dropped, ok bool) {
 	mygo.RunOnMain(func() { dropped = win.TestDragFiles(w.NativeHandle(), x, y, paths) })
 	return dropped, true
+}
+
+// OLE routes a drag to a window's drop target as a whole, whose answer does
+// not follow the pointer within it.
+func dropFilesFrom(*mygo.Window, float64, float64, float64, float64, []string) (bool, bool, bool) {
+	return false, false, false
 }
 
 // pressTab presses Tab, with Shift when back, on the keyboard, in the

@@ -1,5 +1,6 @@
 import type {
   BridgeConfig,
+  CallOptions,
   Channel,
   Direction,
   Incoming,
@@ -14,6 +15,8 @@ type Pending = {
   resolve: (v: any) => void;
   reject: (e: unknown) => void;
   channels?: ChannelState[];
+  /** Told when the call is over, to let go of what it holds. */
+  done?: () => void;
 };
 type Listener = (payload: any) => void;
 
@@ -33,6 +36,12 @@ const report = (err: unknown) =>
   setTimeout(() => {
     throw err;
   });
+
+/** The reason an aborted signal gives: its own, or a plain error. */
+function abortReason(signal: AbortSignal): unknown {
+  if (signal.reason !== undefined) return signal.reason;
+  return new Error("mygo: the call was aborted");
+}
 
 /** Internal API called by the Go side through `window.__mygo`. */
 export interface Internal {
@@ -58,7 +67,7 @@ export class CallError extends Error {
 export function createRuntime(
   config: BridgeConfig,
   post: (message: string) => void,
-): { runtime: Runtime; internal: Internal } {
+): { runtime: Runtime; internal: Internal; restored: () => void } {
   // A per-page token keeps replies addressed to a previous page (before a
   // navigation) from resolving promises of the current one.
   const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -88,7 +97,19 @@ export function createRuntime(
 
   const send = (message: Outgoing) => post(JSON.stringify(message));
 
-  const call = <T>(method: string, ...args: unknown[]): Promise<T> => {
+  const call = <T>(method: string, ...args: unknown[]): Promise<T> => sendCall<T>(method, args);
+
+  // callWith calls a bound Go method, which the page may cancel with the
+  // signal of the options: Go is told to cancel the call, and the promise
+  // rejects with the signal's reason.
+  const callWith = <T>(method: string, args: unknown[], options?: CallOptions): Promise<T> => {
+    const signal = options?.signal;
+    if (!signal) return sendCall<T>(method, args);
+    if (signal.aborted) return Promise.reject(abortReason(signal));
+    return sendCall<T>(method, args, signal);
+  };
+
+  const sendCall = <T>(method: string, args: unknown[], signal?: AbortSignal): Promise<T> => {
     const id = ++seq;
     return new Promise<T>((resolve, reject) => {
       // Channels among the arguments stream values back.
@@ -108,11 +129,33 @@ export function createRuntime(
         channels.set(ch.id, ch);
         (chans ??= []).push(ch);
       }
-      pending.set(id, { method, resolve, reject, channels: chans });
+      // A signal that aborts tells Go to cancel the call, and rejects the
+      // promise here: the reply of a canceled call is of no use.
+      let onAbort: (() => void) | undefined;
+      let done: (() => void) | undefined;
+      if (signal) {
+        onAbort = () => {
+          pending.delete(id);
+          chans?.forEach((c) => {
+            channels.delete(c.id);
+            c.id = 0;
+          });
+          try {
+            send({ t: "cancel", id, k: token });
+          } catch {
+            // The page is being torn down.
+          }
+          reject(abortReason(signal));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        done = () => signal.removeEventListener("abort", onAbort!);
+      }
+      pending.set(id, { method, resolve, reject, channels: chans, done });
       try {
-        send({ t: "call", id, k: token, m: method, a: args });
+        send({ t: "call", id, k: token, m: method, a: args, cancel: signal ? true : undefined });
       } catch (err) {
         pending.delete(id);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
         chans?.forEach((c) => {
           channels.delete(c.id);
           c.id = 0;
@@ -297,6 +340,7 @@ export function createRuntime(
           const p = pending.get(msg.id);
           if (!p) continue;
           pending.delete(msg.id);
+          p.done?.();
           // Go closed the call's channels before replying, unless the call
           // failed before they were made.
           p.channels?.forEach((c) => c.end());
@@ -307,9 +351,23 @@ export function createRuntime(
     },
   };
 
+  // The page shows again from the web view's cache of pages, as going
+  // back to it does: Go canceled the calls it had not answered as the page
+  // left, and their replies went to the page that took its place.
+  const restored = () => {
+    const left = [...pending.values()];
+    pending.clear();
+    for (const p of left) {
+      p.done?.();
+      p.channels?.forEach((c) => c.end());
+      p.reject(new CallError(p.method, "the page was left before the call returned"));
+    }
+  };
+
   const win = (op: string) => () => call<any>(`mygo:window.${op}`);
   const runtime: Runtime = Object.freeze({
     call,
+    callWith,
     channel,
     on,
     once,
@@ -340,5 +398,5 @@ export function createRuntime(
     }),
   });
 
-  return { runtime, internal };
+  return { runtime, internal, restored };
 }

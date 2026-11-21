@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && !ios
 
 package darwin
 
@@ -91,6 +91,10 @@ type window struct {
 	hiddenWithParent bool
 	hiddenRank       int
 	orderPending     bool
+	// hidMiniaturized tells that Hide ordered the window out while it
+	// was miniaturized, which it then no longer shows as (IsVisible),
+	// until it shows or deminiaturizes again.
+	hidMiniaturized bool
 	// onTop is what AlwaysOnTop asked for, which the window's level
 	// follows, or its parent's when higher (applyLevel). attached tells
 	// that a child window is an AppKit child window of its parent, which
@@ -107,9 +111,19 @@ type window struct {
 	// popover shows a flyout with the look of AppKit's popovers
 	// (Flyout.Popover), in its window, win while it shows; popoverClosing
 	// tells that the backend closes it, not the user; popoverHeld that
-	// a window was modal to it as it showed (holdPopover).
+	// a window was modal to it as it showed (holdPopover); popoverShown
+	// whether its surface was last told that some of it shows
+	// (tellPopoverOcclusion).
 	popover, popoverController  id
 	popoverClosing, popoverHeld bool
+	popoverShown                bool
+	// ignoreMouse is SetIgnoreMouseEvents', and inputRegion
+	// SetInputRegion's (input_region.go), nil for none, whose tracking
+	// area is regionTracking; ignoring is whether the window lets the
+	// mouse through, as either set it last.
+	ignoreMouse, ignoring bool
+	inputRegion           []platform.Rect
+	regionTracking        id
 
 	lastMouseDown id
 	dropped       []string         // DroppedFiles
@@ -131,9 +145,12 @@ type window struct {
 	// layer cutting pane to corners of different radii.
 	webViews []*window
 	host     *window
-	clip     id
-	pane     id
-	mask     id
+	// foreign is set for a view of a native module that the surface shows
+	// as it shows a web view (EmbedView): web is that view, not WebKit's.
+	foreign bool
+	clip    id
+	pane    id
+	mask    id
 	// pointerIn tells that the page of a web view has the pointer, where
 	// nothing the content painted covers it.
 	pointerIn bool
@@ -370,6 +387,9 @@ func (w *window) fillSystemBacking() {
 // anew, once the appearance or the system's colors changed.
 func (b *Backend) refreshSystemBackings() {
 	for _, w := range b.byNSWindow {
+		if w.popover != 0 {
+			send(w.popover, "setAppearance:", uintptr(send(b.app, "effectiveAppearance")))
+		}
 		if w.systemBacking && !w.glassClear {
 			w.fillSystemBacking()
 		}
@@ -695,6 +715,10 @@ func (w *window) cleanup() {
 	if w.closed {
 		return
 	}
+	popover := w.popover != 0
+	if !popover {
+		w.orderOutClosing()
+	}
 	w.closeWebViews()
 	w.closed = true
 	if contextWindow == w {
@@ -714,19 +738,15 @@ func (w *window) cleanup() {
 	send(w.web, "stopLoading")
 	send(w.web, "setNavigationDelegate:", 0)
 	send(w.web, "setUIDelegate:", 0)
-	if w.popover != 0 {
+	if popover {
 		w.cleanupPopover()
-	} else {
-		send(w.win, "setDelegate:", 0)
-		if w.modalToFlyout() {
-			w.leaveFlyout()
-		} else if w.parent != nil && !w.parent.closed {
-			send(w.parent.win, "removeChildWindow:", uintptr(w.win))
-		}
 	}
 	delete(b.byDelegate, w.delegate)
 	delete(b.byWebView, w.web)
 	delete(b.byNSWindow, w.win)
+	if inputRegionClosed != nil {
+		inputRegionClosed(w)
+	}
 	w.forgetDrag()
 	release(w.ucc)
 	for _, j := range printJobs {
@@ -745,8 +765,30 @@ func (w *window) cleanup() {
 	release(w.view)
 	// AppKit is still closing the window; let the pool release it.
 	autorelease(w.delegate)
-	if w.popover == 0 {
+	if !popover {
 		autorelease(w.win)
+	}
+}
+
+// orderOutClosing orders out a window that closes, before cleanup takes
+// its content down: AppKit sends windowWillClose: before it orders the
+// window out, with the animation that fades it, which then faded a
+// window with nothing in it, and a light one flashed white (#1931).
+// Ordered out here, whether Close or the user closes it, the window
+// fades with its last frame, and AppKit's own ordering out finds nothing
+// left to do. The delegate goes first, so the window tells nothing of
+// losing the keyboard as it goes, as before; a window modal to a flyout
+// gives the keyboard back to it first, as Hide does. A window that does
+// not show, hidden or minimized, is left to AppKit.
+func (w *window) orderOutClosing() {
+	send(w.win, "setDelegate:", 0)
+	if w.modalToFlyout() {
+		w.leaveFlyout()
+	} else if w.parent != nil && !w.parent.closed {
+		send(w.parent.win, "removeChildWindow:", uintptr(w.win))
+	}
+	if sendBool(w.win, "isVisible") {
+		send(w.win, "orderOut:", 0)
 	}
 }
 
@@ -1171,17 +1213,22 @@ func (w *window) Hide() {
 		return
 	}
 	w.hiddenWithParent = false
+	w.hidMiniaturized = w.IsMinimized()
 	// Attached, AppKit would show it again with its parent.
 	w.detach()
 	send(w.win, "orderOut:", 0)
 	w.hideChildren()
 }
 
+// IsVisible reports whether Show (or the options) showed the window and
+// Hide did not hide it since. AppKit's isVisible is false for a window
+// in the Dock, which counts as shown here, as IsWindowVisible on Windows
+// and gtk_widget_get_visible on Linux count a minimized window (#1542).
 func (w *window) IsVisible() bool {
 	if w.popover != 0 {
 		return sendBool(w.popover, "isShown")
 	}
-	return sendBool(w.win, "isVisible")
+	return sendBool(w.win, "isVisible") || !w.hidMiniaturized && w.IsMinimized()
 }
 
 func (w *window) Focus() {
@@ -1195,7 +1242,7 @@ func (w *window) Focus() {
 		w.Show() // the key window only when it takes the keyboard
 		return
 	}
-	w.hiddenWithParent = false
+	w.hiddenWithParent, w.hidMiniaturized = false, false
 	send(w.win, "makeKeyAndOrderFront:", 0)
 	if !w.opts.Panel {
 		send(w.b.app, "activateIgnoringOtherApps:", 1)
@@ -1206,6 +1253,24 @@ func (w *window) Blur() { send(w.win, "orderBack:", 0) }
 func (w *window) IsFocused() bool {
 	return sendBool(w.win, "isKeyWindow")
 }
+
+// CornerRadius is the radius of the window's corners: a rounded frameless
+// window's (roundContent), or the one the system draws a titled window
+// with. AppKit tells that one only through NSWindow's _cornerRadius, read
+// when the window answers it; it is 26 on macOS 26 with a toolbar, 16
+// without one, smaller before. A window in full screen has none.
+func (w *window) CornerRadius() float64 {
+	switch {
+	case w.host != nil || w.IsFullScreen():
+		return 0
+	case w.radius > 0:
+		return float64(w.radius)
+	case !w.hasStyle(styleTitled) || !respondsTo(w.win, "_cornerRadius"):
+		return 0
+	}
+	return max(msgFloat(w.win, sel("_cornerRadius")), 0)
+}
+
 func (w *window) Minimize()         { send(w.win, "miniaturize:", 0) }
 func (w *window) IsMinimized() bool { return sendBool(w.win, "isMiniaturized") }
 
@@ -1304,11 +1369,10 @@ func (w *window) SetVisibleOnAllWorkspaces(v bool) {
 }
 
 // SetIcon does nothing: macOS windows show no icon of their own.
-func (w *window) SetIcon([]byte) error        { return nil }
-func (w *window) Opacity() float64            { return msgFloat(w.win, sel("alphaValue")) }
-func (w *window) SetHasShadow(v bool)         { send(w.win, "setHasShadow:", boolArg(v)) }
-func (w *window) HasShadow() bool             { return sendBool(w.win, "hasShadow") }
-func (w *window) SetIgnoreMouseEvents(v bool) { send(w.win, "setIgnoresMouseEvents:", boolArg(v)) }
+func (w *window) SetIcon([]byte) error { return nil }
+func (w *window) Opacity() float64     { return msgFloat(w.win, sel("alphaValue")) }
+func (w *window) SetHasShadow(v bool)  { send(w.win, "setHasShadow:", boolArg(v)) }
+func (w *window) HasShadow() bool      { return sendBool(w.win, "hasShadow") }
 
 func (w *window) SetContentProtection(v bool) {
 	sharing := uintptr(1) // NSWindowSharingReadOnly
@@ -1505,9 +1569,10 @@ func (w *window) hiddenTitleBar() bool {
 }
 
 // TitleBar returns the room the traffic lights take, from the left edge to
-// the right edge of the zoom button, in the title bar, which is as tall as
-// the window's own or, with TrafficLightPosition, leaves as much room below
-// them as above. They hide in full screen, and with HideWindowButtons.
+// the right edge of the zoom button and from the top edge to their bottom
+// edge, in the title bar, which is as tall as the window's own or, with
+// TrafficLightPosition, leaves as much room below them as above. They hide
+// in full screen, and with HideWindowButtons.
 func (w *window) TitleBar() platform.TitleBar {
 	if !w.hiddenTitleBar() || w.closed || w.IsFullScreen() || w.opts.HideWindowButtons {
 		return platform.TitleBar{}
@@ -1521,12 +1586,23 @@ func (w *window) TitleBar() platform.TitleBar {
 	if p := w.trafficLights; p != nil {
 		// Where layoutTrafficLights puts them, which may not have run yet.
 		right := float64(p.X) + z.Origin.X - c.Origin.X + z.Size.Width
-		return platform.TitleBar{Height: int(math.Round(c.Size.Height + 2*float64(p.Y))), Left: int(math.Ceil(right))}
+		return platform.TitleBar{
+			Height: int(math.Round(c.Size.Height + 2*float64(p.Y))),
+			Left:   int(math.Ceil(right)),
+			Bottom: int(math.Ceil(float64(p.Y) + c.Size.Height)),
+		}
 	}
 	frame := msgRect(w.win, sel("frame"))
 	content := msgRect(w.win, sel("contentLayoutRect"))
 	height := frame.Size.Height - content.Origin.Y - content.Size.Height
-	return platform.TitleBar{Height: int(math.Round(height)), Left: int(math.Ceil(z.Origin.X + z.Size.Width))}
+	// The close button in the window's coordinates, whose origin is the
+	// bottom-left corner of its frame.
+	lights := msgConvertRectView(closeBtn, sel("convertRect:toView:"), NSRect{Size: c.Size}, 0)
+	return platform.TitleBar{
+		Height: int(math.Round(height)),
+		Left:   int(math.Ceil(z.Origin.X + z.Size.Width)),
+		Bottom: int(math.Ceil(frame.Size.Height - lights.Origin.Y)),
+	}
 }
 
 func (w *window) TitleBarDoubleClicked() {
@@ -1749,6 +1825,16 @@ func (w *window) ProcessID() int {
 		return 0
 	}
 	return int(int32(send(w.web, "_webProcessIdentifier")))
+}
+
+// GPUProcessID returns WebKit's GPU process from its private
+// -[WKWebView _gpuProcessIdentifier] (a pid_t), 0 when WebKit doesn't
+// answer it or hasn't started the process yet.
+func (w *window) GPUProcessID() int {
+	if !respondsTo(w.web, "_gpuProcessIdentifier") {
+		return 0
+	}
+	return int(int32(send(w.web, "_gpuProcessIdentifier")))
 }
 
 // IsAudible reports WebKit's private -[WKWebView _isPlayingAudio]
@@ -2374,6 +2460,9 @@ func registerWindowClasses() {
 						w.h.Unmaximized()
 					}
 				}
+				if inputRegionMoved != nil {
+					inputRegionMoved(w) // the region moved under the pointer
+				}
 				w.h.Resized()
 			}),
 			method("windowWillMove:", func(self id, _ objc.SEL, n id) {
@@ -2385,11 +2474,20 @@ func registerWindowClasses() {
 			}),
 			method("windowDidMove:", func(self id, _ objc.SEL, n id) {
 				if w := b().windowFor(self); w != nil {
+					if inputRegionMoved != nil {
+						inputRegionMoved(w)
+					}
 					w.h.Moved()
 				}
 			}),
 			method("windowDidChangeOcclusionState:", func(self id, _ objc.SEL, n id) {
 				if w := b().windowFor(self); w != nil && w.surface != nil {
+					if w.popover != 0 {
+						// Its popover's window, from the notification
+						// center (adoptPopoverWindow).
+						w.tellPopoverOcclusion()
+						return
+					}
 					kind := platform.SurfaceShown
 					if !w.surface.visible() {
 						kind = platform.SurfaceHidden
@@ -2405,6 +2503,7 @@ func registerWindowClasses() {
 			}),
 			method("windowDidDeminiaturize:", func(self id, _ objc.SEL, n id) {
 				if w := b().windowFor(self); w != nil {
+					w.hidMiniaturized = false
 					w.orderChildrenLater()
 					w.h.Restored()
 				}

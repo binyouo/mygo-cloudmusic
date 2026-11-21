@@ -28,6 +28,7 @@ func View(c *ui.Context, st *State) ui.Element {
 
 // build builds the element of an editor for a frame.
 func (ed *editor) build(c *ui.Context, buf *Buffer, o options) ui.Element {
+	ed.view.sys = c.TextSystem()
 	ed.texts = l10n.In(c.Locale())
 	ed.init(buf, o, c.Theme())
 	ed.services = c.Services()
@@ -68,6 +69,13 @@ func (ed *editor) build(c *ui.Context, buf *Buffer, o options) ui.Element {
 		label = ed.texts.CodeEditor()
 	}
 	e.Role(ui.RoleTextField).Label(label).Access(ed.accessibility)
+	if _, diff := o.decor.(*diffSide); diff {
+		// Its lines in view, each read as what it is.
+		if ed.accessLinesFn == nil {
+			ed.accessLinesFn = ed.accessLines
+		}
+		e.AccessChildren(ed.accessLinesFn)
+	}
 	if !o.readOnly {
 		e.HandleTextInput(ed).InputMethod(!o.noInputMethod)
 		if o.noInputMethod && ed.markedActive {
@@ -76,8 +84,13 @@ func (ed *editor) build(c *ui.Context, buf *Buffer, o options) ui.Element {
 		}
 	}
 	e.HandleInput(ed.input)
-	switch ed.region {
-	case regionText:
+	// Cmd held or let go with the pointer still draws a frame, which
+	// shows the link or takes it away.
+	ed.link = ed.linkAt(c.Modifiers())
+	switch {
+	case ed.link[1] > ed.link[0]:
+		e.Cursor(ui.CursorPointer)
+	case ed.region == regionText:
 		e.Cursor(ui.CursorText)
 	default:
 		e.Cursor(ui.CursorDefault)
@@ -137,20 +150,18 @@ func (ed *editor) build(c *ui.Context, buf *Buffer, o options) ui.Element {
 		}
 		var caretAnchor, hoverAnchor ui.Element
 		var hasCaret, hasHover bool
-		if ed.complete.open() {
+		if ed.completing() {
 			caretAnchor, hasCaret = anchor("code caret", ed.complete.at)
 		}
 		if h.shown {
 			hoverAnchor, hasHover = anchor("code hover anchor", h.start)
 		}
+		ed.buildReplacements(c)
 		if ds, ok := ed.o.decor.(*diffSide); ok {
 			ds.buildBlocks(c, ed)
-		}
-		if ed.find.open {
-			ed.buildFindBar(c)
-		}
-		if ed.goTo.open {
-			ed.buildGoToLine(c)
+		} else {
+			// A diff's viewer builds a side's bars over its separators.
+			ed.buildBars(c)
 		}
 		if hasCaret {
 			ed.buildCompletions(c, caretAnchor)
@@ -182,6 +193,15 @@ func (ed *editor) build(c *ui.Context, buf *Buffer, o options) ui.Element {
 	return e
 }
 
+func (ed *editor) buildBars(c *ui.Context) {
+	if ed.find.open {
+		ed.buildFindBar(c)
+	}
+	if ed.goTo.open {
+		ed.buildGoToLine(c)
+	}
+}
+
 // accessibility describes the editor to assistive technology, while it
 // reads the window: a text area with its text, and the newest selection
 // in runes.
@@ -193,10 +213,13 @@ func (ed *editor) accessibility(n *platform.AccessNode) {
 	r := &ed.view.text
 	if r.Len() > 4<<20 {
 		// Assistive technology gets the lines in view of a very large text.
-		n.Value = ed.slice(r.LineStart(ed.anchorLine), r.LineEnd(min(r.LineCount()-1, ed.anchorLine+200)))
+		last := min(r.LineCount()-1, ed.anchorLine+200)
+		n.Value = ed.slice(r.LineStart(ed.anchorLine), r.LineEnd(last))
+		n.LineBoxes = ed.lineBoxes(ed.anchorLine, last)
 		return
 	}
 	n.Value = r.String()
+	n.LineBoxes = ed.lineBoxes(0, r.LineCount()-1)
 	p := ed.primary()
 	n.SelStart = utf8.RuneCountInString(n.Value[:min(p.start(), len(n.Value))])
 	n.SelEnd = n.SelStart + utf8.RuneCountInString(n.Value[min(p.start(), len(n.Value)):min(p.end(), len(n.Value))])

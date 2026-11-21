@@ -96,7 +96,7 @@ cursor; its size, appearance and other input behavior are yours.
 |---|---|
 | `TextForRange(range)` | Return requested text and the actual clamped/adjusted range. Full-document queries are supported; no fixed surrounding-window restriction applies. |
 | `Selection()` | Report the primary native selection and its direction. Additional cursors or discontiguous ranges stay in application state. |
-| `MarkedRange()` | Report preedit in the current document, or false when none exists. |
+| `MarkedRange()` | Report preedit in the current document, or false when none exists. While there is some, the system's input method takes the keys it composes with, as a `Tester` takes those without Ctrl or Command: they reach neither `HandleInput` nor shortcuts. |
 | `ReplaceText(range, text)` | Commit text in an explicit range; a nil range means preedit if present, otherwise the selection. Clear preedit according to your editing policy. |
 | `SetMarkedText(range, text, selected)` | Replace preedit, retaining its marked range. `selected` is relative to the newly marked text. |
 | `UnmarkText()` | Clear marked status while retaining document text. Also called when focus is lost, the client changes, or the element is disposed. |

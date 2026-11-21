@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/egoist/mygo/internal/scene"
 )
 
 // boxes lays out view in a window w×h and returns the boxes of the
@@ -602,6 +604,81 @@ func TestTextDecorations(t *testing.T) {
 	}
 }
 
+// TestDottedUnderline checks that a dotted underline is drawn as dots:
+// along the row of a solid underline under the same text, some of its
+// pixels are lit and some are not, set on the text or above it.
+func TestDottedUnderline(t *testing.T) {
+	red := RGB(255, 0, 0)
+	// lit returns the red pixels of the reddest row under the text, and
+	// how wide that row's run from its first to its last red pixel is.
+	lit := func(view func(c *context)) (n, span int) {
+		t.Helper()
+		tt := coreNewTester(view, 300, 60)
+		r, ok := tt.Find("t")
+		if !ok {
+			t.Fatal("no text")
+		}
+		img := tt.Image()
+		for y := int(r.Y); y < int(r.Y+r.H+4); y++ {
+			count, first, last := 0, -1, -1
+			for x := int(r.X); x < int(r.X+r.W); x++ {
+				if c := img.RGBAAt(x, y); c.R > 200 && c.G < 60 && c.B < 60 {
+					count++
+					if first < 0 {
+						first = x
+					}
+					last = x
+				}
+			}
+			if count > n {
+				n, span = count, last-first+1
+			}
+		}
+		return n, span
+	}
+	solid, _ := lit(func(c *context) { coreText(c, "Hello world").Underline().DecorationColor(red).Label("t") })
+	for _, v := range []struct {
+		name string
+		view func(c *context)
+	}{
+		{"text", func(c *context) {
+			coreText(c, "Hello world").DottedUnderline().DecorationColor(red).Label("t")
+		}},
+		{"inherited", func(c *context) {
+			coreBox(c).DottedUnderline().DecorationColor(red).Children(func() { coreText(c, "Hello world").Label("t") })
+		}},
+	} {
+		n, span := lit(v.view)
+		if n == 0 || span < solid*3/4 || n > span*2/3 {
+			t.Errorf("%s: %d dotted pixels over %d, a solid underline %d", v.name, n, span, solid)
+		}
+	}
+}
+
+// TestMorphDottedUnderline: text morphing keeps its underline dotted, a
+// fill a dot rather than one a line.
+func TestMorphDottedUnderline(t *testing.T) {
+	red := RGB(255, 0, 0)
+	s := "Hello"
+	a := Animation{Duration: 100 * time.Millisecond, Ease: Linear}
+	tt, now := clockTester(func(c *context) {
+		keep("text", coreText(c, s)).DottedUnderline().DecorationColor(red).ContentTransition(ContentTransition{Morph: true, Animation: &a})
+	}, 200, 60)
+	s = "Hello world"
+	tt.Frame()
+	*now = now.Add(50 * time.Millisecond)
+	tt.Frame()
+	fills := 0
+	for _, op := range tt.h.last.Ops {
+		if op.Kind == scene.OpFill && op.Color == red.scene() {
+			fills++
+		}
+	}
+	if fills < 10 {
+		t.Errorf("halfway, the underline paints %d fills, want a dot each", fills)
+	}
+}
+
 // TestUnderlineOffset checks text-underline-offset: the top of the
 // underline that many DIPs below the baseline, set on the text or above
 // it, of an inline element and of a span, as thick as without it.
@@ -804,7 +881,7 @@ func TestScrollBoth(t *testing.T) {
 	// Drag the horizontal thumb to the end.
 	tt.Move(50, 50)
 	st := sc.st
-	g := scrollBars(Rect{st.x, st.y, st.w, st.h}, st.barInset, float32(st.contentW), float32(st.contentH), float32(st.scrollX), float32(st.scrollY), st.flags, 6, false)
+	g := scrollBars(Rect{st.x, st.y, st.w, st.h}, st.barInset, float32(st.contentW), float32(st.contentH), float32(st.scrollX), float32(st.scrollY), st.flags, testScrollbarStyle(), false)
 	if !g.horizontal || !g.vertical {
 		t.Fatalf("scroll bars %+v", g)
 	}
@@ -827,7 +904,7 @@ func TestScrollbarInsets(t *testing.T) {
 	}, 200, 200)
 	tt.Move(50, 100)
 	st := sc.st
-	g := scrollBars(Rect{st.x, st.y, st.w, st.h}, st.barInset, float32(st.contentW), float32(st.contentH), float32(st.scrollX), float32(st.scrollY), st.flags, 6, false)
+	g := scrollBars(Rect{st.x, st.y, st.w, st.h}, st.barInset, float32(st.contentW), float32(st.contentH), float32(st.scrollX), float32(st.scrollY), st.flags, testScrollbarStyle(), false)
 	// The track runs from 50 below the top to 10 above the bottom, 4 in
 	// from the right; the thumb shows a quarter of it, the content's
 	// share in view.
@@ -869,7 +946,7 @@ func TestScrollbarCursor(t *testing.T) {
 		t.Fatalf("the pointer is %v over the text", tt.Cursor())
 	}
 	st := sc.st
-	g := scrollBars(Rect{st.x, st.y, st.w, st.h}, st.barInset, float32(st.contentW), float32(st.contentH), float32(st.scrollX), float32(st.scrollY), st.flags, 6, false)
+	g := scrollBars(Rect{st.x, st.y, st.w, st.h}, st.barInset, float32(st.contentW), float32(st.contentH), float32(st.scrollX), float32(st.scrollY), st.flags, testScrollbarStyle(), false)
 	// Over the track, under the thumb and over it, the bar's arrow, not
 	// the text's I-beam.
 	if tt.Move(g.vTrack.X+1, g.vTrack.Y+g.vTrack.H-5); tt.Cursor() != CursorDefault {

@@ -1,14 +1,16 @@
 import { CheckIcon, CopyIcon } from "lucide-react"
 import * as React from "react"
 
+import { useT } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 export function InstallCommand({ command = "bunx mygo-cli init my-app", className }: { command?: string; className?: string }) {
+  const t = useT()
   const [copied, setCopied] = React.useState(false)
   return (
     <button
       type="button"
-      aria-label={`Copy "${command}"`}
+      aria-label={`${t("Copy")} "${command}"`}
       onClick={() =>
         void navigator.clipboard.writeText(command).then(() => {
           setCopied(true)

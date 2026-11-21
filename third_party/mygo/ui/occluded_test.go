@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/egoist/mygo/internal/platform"
@@ -76,6 +77,86 @@ func TestCaptureBuildsHeldFrame(t *testing.T) {
 	o.event(platform.SurfaceEvent{Kind: platform.SurfaceShown})
 	if o.s.requested == asked {
 		t.Fatal("shown again, it asked for no frame")
+	}
+}
+
+// TestCaptureBuildsFrameAskedOutOfSight checks that capturing a window out
+// of sight whose surface draws no frame, as macOS's of a hidden window or
+// behind the locked screen, shows what changed since its last frame, which
+// never came; and that a capture after it, with nothing changed, builds
+// nothing more.
+func TestCaptureBuildsFrameAskedOutOfSight(t *testing.T) {
+	o := newOccludedHost(t, false)
+	o.frame()
+	o.s.occluded = true
+	o.count = 1
+	o.rt.changed()
+	if w, _, _ := o.capture(); w == 0 || o.builds != 2 || o.shows() != "1" {
+		t.Fatalf("captured after %d builds, showing %q: the change not built", o.builds, o.shows())
+	}
+	o.capture()
+	if o.builds != 2 {
+		t.Errorf("a capture of what was captured built %d more", o.builds-2)
+	}
+	o.count = 2
+	o.rt.changed()
+	if o.capture(); o.builds != 3 || o.shows() != "2" {
+		t.Errorf("a change after the capture: %d builds, showing %q", o.builds, o.shows())
+	}
+}
+
+// newDrawingHost is a window host in sight on an occludedSurface, whose
+// view draws with draw, counting the views built.
+func newDrawingHost(t *testing.T, draw func(p *Painter, r Rect)) *occludedHost {
+	t.Setenv("MYGO_GPU", "0")
+	o := &occludedHost{s: &occludedSurface{}}
+	o.windowHost = &windowHost{conn: &surface.Conn{Surface: o.s, Post: func(f func()) { f() }}}
+	o.rt = newRuntime(func(c *context) {
+		o.builds++
+		coreBox(c).Size(200, 100).Background(RGB(255, 255, 255)).Draw(draw)
+	}, o.windowHost)
+	return o
+}
+
+// TestCaptureAfterAtlasMoved checks that capturing a window after another
+// window made room in the glyph atlases they share (System.MakeRoom) shows
+// its text: the window's last frame drew its glyphs from where they were
+// before, which then held the other window's (#1920). A capture after
+// that, with nothing changed, builds nothing more.
+func TestCaptureAfterAtlasMoved(t *testing.T) {
+	b := newDrawingHost(t, func(p *Painter, r Rect) {
+		p.Text(r.X+4, r.Y+30, "Hello, world", 20, RGB(0, 0, 0))
+	})
+	b.frame()
+	_, _, want := b.capture()
+	builds := b.builds
+	// Another window drawing more glyphs than the atlas has room for, at
+	// new sizes each frame, as one zooming in and out. ASCII, which every
+	// font the tests may get has (a CI runner may have no CJK font).
+	size := float32(40)
+	a := newDrawingHost(t, func(p *Painter, r Rect) {
+		for s := size; s < size+40; s += 4 {
+			for c := '!'; c <= '~'; c++ {
+				p.Text(r.X, r.Y+40, string(c), s, RGB(0, 0, 0))
+			}
+		}
+	})
+	for range 20 {
+		a.frame()
+		if atlasGenerations(b.last) != b.rt.atlases {
+			break
+		}
+		size += 40
+	}
+	if atlasGenerations(b.last) == b.rt.atlases {
+		t.Fatal("the other window never made room in the atlases")
+	}
+	if _, _, got := b.capture(); !bytes.Equal(got, want) || b.builds != builds+1 {
+		t.Errorf("captured after %d builds, equal to before: %v", b.builds-builds, bytes.Equal(got, want))
+	}
+	builds = b.builds
+	if b.capture(); b.builds != builds {
+		t.Errorf("a capture of what was captured built %d more", b.builds-builds)
 	}
 }
 

@@ -145,7 +145,7 @@ function Measures() {
             The data
           </a>
           <Link
-            to="/docs/$"
+            to="/{-$lang}/docs/$"
             params={{ _splat: "architecture" }}
             hash="benchmarks"
             className="font-medium underline decoration-gopher/45 underline-offset-[5px] hover:decoration-gopher"

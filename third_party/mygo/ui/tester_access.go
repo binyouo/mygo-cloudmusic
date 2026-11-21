@@ -19,7 +19,9 @@ type AccessInfo struct {
 	// (aria-roledescription), as a "carousel" group; "" for the
 	// platform's name of Role.
 	RoleDescription string
-	// Bounds is the element's visible box, in the window's DIPs as Find's.
+	// Bounds is the element's visible box, clipped by the scroll containers
+	// and clips around it, in the window's DIPs as Find's; W or H is 0 when
+	// none of it shows (Offscreen).
 	Bounds Rect
 	// Checked is set on a check box, switch, radio button or menu item
 	// that is on, and on a toggle button pressed (aria-checked,
@@ -126,9 +128,43 @@ func (t *Tester) AccessByRole(r Role, name string) (AccessInfo, bool) {
 	})
 }
 
+// AccessAll returns what assistive technology sees of every element of
+// the last frame, in the order screen readers read them, as Access gives
+// each: to check what a whole view tells screen readers, as that every
+// control has a name.
+//
+//	for _, a := range tt.AccessAll() {
+//		if a.Role == ui.RoleButton && a.Name == "" {
+//			t.Errorf("a button at %v has no name", a.Bounds)
+//		}
+//	}
+func (t *Tester) AccessAll() []AccessInfo {
+	var all []AccessInfo
+	t.accessEach(func(_ Role, _ *platform.AccessNode, info func() AccessInfo) bool {
+		all = append(all, info())
+		return true
+	})
+	return all
+}
+
 // access describes the last frame as it would for assistive technology,
 // and returns the first node that match takes, given its role.
 func (t *Tester) access(match func(r Role, n *platform.AccessNode) bool) (AccessInfo, bool) {
+	var found AccessInfo
+	ok := false
+	t.accessEach(func(r Role, n *platform.AccessNode, info func() AccessInfo) bool {
+		if match(r, n) {
+			found, ok = info(), true
+		}
+		return !ok
+	})
+	return found, ok
+}
+
+// accessEach describes the last frame as it would for assistive
+// technology, and calls fn with each node in reading order, its role and
+// what info returns of it, until fn returns false.
+func (t *Tester) accessEach(fn func(r Role, n *platform.AccessNode, info func() AccessInfo) bool) {
 	// Reading the window's focus would have its next change rebuild the
 	// frame.
 	defer func(read bool) { t.rt.focusRead = read }(t.rt.focusRead)
@@ -159,11 +195,16 @@ func (t *Tester) access(match func(r Role, n *platform.AccessNode) bool) (Access
 		if !ok {
 			// One the role of what it does: a text, a button, a group…,
 			// which follow RoleGroup in the order of the node's roles
-			// (accessRole).
-			r = Role(n.Role) + RoleGroup
+			// (accessRole), or a node an element added (AccessChildren).
+			r = roleOfNode(n.Role)
 		}
-		if match(r, n) {
+		info := func() AccessInfo {
 			a := accessInfoOf(r, n, tree.Focus)
+			if s := t.rt.states[n.ID]; s != nil {
+				a.Bounds = t.rt.windowRect(Rect{s.vx, s.vy, s.vw, s.vh})
+			} else {
+				a.Bounds = t.rt.clippedAccessBounds(tree, n, a.Bounds)
+			}
 			names := func(ids []uint64) []string {
 				var out []string
 				for _, id := range ids {
@@ -177,10 +218,57 @@ func (t *Tester) access(match func(r Role, n *platform.AccessNode) bool) (Access
 				return out
 			}
 			a.Controls, a.DescribedBy, a.ErrorMessage = names(n.Controls), names(n.DescribedBy), names(n.ErrorMessage)
-			return a, true
+			return a
+		}
+		if !fn(r, n, info) {
+			return
 		}
 	}
-	return AccessInfo{}, false
+}
+
+// clippedAccessBounds clips a synthetic node's bounds (one without element
+// state of its own, such as AccessChildren or a web view's page node) to
+// the visible clip around it in the window's DIPs.
+func (rt *engine) clippedAccessBounds(tree *platform.AccessTree, n *platform.AccessNode, bounds Rect) Rect {
+	if n.WebView != nil {
+		if s := rt.states[n.ID^pageNodeID]; s != nil {
+			return intersect(bounds, rt.windowRect(rt.accessClip(s)))
+		}
+	}
+	for p := n.Parent; p >= 0 && p < len(tree.Nodes); p = tree.Nodes[p].Parent {
+		if s := rt.states[tree.Nodes[p].ID]; s != nil {
+			return intersect(bounds, rt.windowRect(rt.accessClip(s)))
+		}
+	}
+	w, h, _ := rt.size()
+	return intersect(bounds, rt.windowRect(Rect{0, 0, w, h}))
+}
+
+// accessClip returns the visible clip rectangle for s and its children in
+// content DIPs.
+func (rt *engine) accessClip(s *state) Rect {
+	if s.invisible {
+		return Rect{s.vx, s.vy, 0, 0}
+	}
+	w, h, _ := rt.size()
+	clip := Rect{0, 0, w, h}
+	if s.clips {
+		clip = intersect(clip, transformRect(s.world, s.clipRect))
+	}
+	if s.selfClips {
+		clip = intersect(clip, transformRect(s.world, s.selfClip))
+	}
+	return rt.clipAncestors(s, clip, [4]float32{})
+}
+
+// roleOfNode returns the Role of a node's role: those up to RoleTreeGrid
+// follow RoleGroup in the same order, and those after it RoleOption, as
+// the node's roles have no list box nor option of their own.
+func roleOfNode(r platform.AccessRole) Role {
+	if r >= platform.RoleDeletion {
+		return Role(r-platform.RoleDeletion) + RoleDeletion
+	}
+	return Role(r) + RoleGroup
 }
 
 // accessInfoOf returns what n tells of an element of role r, in the tree

@@ -115,6 +115,54 @@ func TestGPUComesBack(t *testing.T) {
 	}
 }
 
+// timingOutGPU is a GPU renderer whose frames the GPU does not finish in
+// time: the device is not gone, it is wedged.
+type timingOutGPU struct{ testGPU }
+
+func (g *timingOutGPU) TimedOut() bool { return g.fail }
+
+func TestFrameTimeoutDrawsInMemory(t *testing.T) {
+	var made []*timingOutGPU
+	h, s, frame := gpuHost(t, func() (gpuRenderer, error) {
+		g := &timingOutGPU{}
+		made = append(made, g)
+		return g, nil
+	})
+	frame()
+	if len(made) != 1 || made[0].frames != 1 || s.pixels != 0 {
+		t.Fatalf("first frame: %d renderers, %d frames in memory", len(made), s.pixels)
+	}
+
+	// The GPU does not finish the frame in time. It draws in memory, and
+	// no other renderer is made in the same frame: a frame submitted to a
+	// wedged driver waits the timeout through again.
+	made[0].fail = true
+	frame()
+	if made[0].released != 1 || len(made) != 1 {
+		t.Fatalf("after a timeout: released %d, %d renderers", made[0].released, len(made))
+	}
+	if s.pixels != 1 {
+		t.Fatalf("after a timeout: %d frames in memory, want 1", s.pixels)
+	}
+	if h.backoff != time.Second || h.retryAt.IsZero() {
+		t.Fatalf("after a timeout: wait %v, retry at %v", h.backoff, h.retryAt)
+	}
+
+	// Frames before the wait is over draw in memory, and the GPU is left
+	// alone.
+	frame()
+	if len(made) != 1 || s.pixels != 2 {
+		t.Fatalf("during the wait: %d renderers, %d frames in memory", len(made), s.pixels)
+	}
+
+	// Once the wait is over, a frame tries the GPU again.
+	h.retryAt = time.Now()
+	frame()
+	if len(made) != 2 || made[1].frames != 1 || s.pixels != 2 {
+		t.Fatalf("once the wait is over: %d renderers, %d frames in memory", len(made), s.pixels)
+	}
+}
+
 func TestSoftwareUntilTheGPUIsBack(t *testing.T) {
 	onGPU := true
 	var gpus []*testGPU
@@ -175,6 +223,65 @@ func TestNoGPUFromTheStart(t *testing.T) {
 	frame()
 	if tries != 1 || s.pixels != 0 || h.degraded || !h.retryAt.IsZero() {
 		t.Errorf("software from the start: %d tries, degraded %v, retry at %v", tries, h.degraded, h.retryAt)
+	}
+}
+
+// occludableSurface is a test surface that tells whether nothing of its
+// window shows, as macOS's does.
+type occludableSurface struct {
+	testSurface
+	occluded bool
+}
+
+func (s *occludableSurface) Occluded() bool { return s.occluded }
+
+// occludedGPU is a GPU renderer that hears whether nothing of the window
+// shows, as Metal's does.
+type occludedGPU struct {
+	testGPU
+	told []bool
+}
+
+func (g *occludedGPU) SetOccluded(on bool) { g.told = append(g.told, on) }
+
+// TestGPUToldOccluded checks that the GPU renderer hears when nothing of
+// the window shows any more and when some of it shows again, and one made
+// while none shows hears it as it is made, so that Metal's gives back its
+// drawables, each as large as the window, for windows out of sight
+// (#2040).
+func TestGPUToldOccluded(t *testing.T) {
+	t.Setenv("MYGO_GPU", "")
+	var made []*occludedGPU
+	newGPU = func(platform.SurfaceNative) (gpuRenderer, error) {
+		g := &occludedGPU{}
+		made = append(made, g)
+		return g, nil
+	}
+	t.Cleanup(func() { newGPU = newGPURenderer })
+	s := &occludableSurface{}
+	h := &windowHost{conn: &surface.Conn{Surface: s}}
+	h.rt = newRuntime(func(c *context) { coreText(c, "Hello") }, h)
+	h.event(platform.SurfaceEvent{Kind: platform.SurfaceFrame})
+	if len(made) != 1 || !slices.Equal(made[0].told, []bool{false}) {
+		t.Fatalf("first frame: %d renderers, the first told %v", len(made), made[0].told)
+	}
+	g := made[0]
+	s.occluded = true
+	h.event(platform.SurfaceEvent{Kind: platform.SurfaceHidden})
+	s.occluded = false
+	h.event(platform.SurfaceEvent{Kind: platform.SurfaceShown})
+	if want := []bool{false, true, false}; !slices.Equal(g.told, want) {
+		t.Errorf("hidden then shown: told %v, want %v", g.told, want)
+	}
+
+	// The renderer made again while the window is out of sight, as after
+	// the GPU went away, hears it at once.
+	s.occluded = true
+	h.event(platform.SurfaceEvent{Kind: platform.SurfaceHidden})
+	h.event(platform.SurfaceEvent{Kind: platform.SurfaceRenew})
+	h.makeGPU()
+	if len(made) != 2 || !slices.Equal(made[1].told, []bool{true}) {
+		t.Errorf("made out of sight: %d renderers, the last told %v", len(made), made[len(made)-1].told)
 	}
 }
 

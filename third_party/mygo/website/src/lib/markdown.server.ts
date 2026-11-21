@@ -44,7 +44,7 @@ let highlighter: Promise<Highlighter> | undefined
 function getHighlighter() {
   highlighter ??= createHighlighter({
     themes: Object.values(themes),
-    langs: ["go", "ts", "tsx", "js", "json", "sh", "css", "html", "xml", "yaml"],
+    langs: ["go", "ts", "tsx", "js", "json", "sh", "css", "html", "xml", "yaml", "swift", "rust", "zig"],
   })
   return highlighter
 }
@@ -196,7 +196,26 @@ function rewriteLink(node: Element, href: string, file: string, links: LinkOptio
   if (/^https?:/.test(rewritten)) node.properties.rel = ["noreferrer"]
 }
 
-/** A highlighted code block with a copy button, from remark-rehype's `<pre><code>`. */
+/** The names code blocks show for the languages of their fences. */
+const languageNames: Record<string, string> = {
+  css: "CSS",
+  go: "Go",
+  html: "HTML",
+  js: "JavaScript",
+  json: "JSON",
+  nsis: "NSIS",
+  powershell: "PowerShell",
+  rust: "Rust",
+  sh: "Shell",
+  swift: "Swift",
+  ts: "TypeScript",
+  tsx: "TSX",
+  xml: "XML",
+  yaml: "YAML",
+  zig: "Zig",
+}
+
+/** A highlighted code block with its language and a copy button, from remark-rehype's `<pre><code>`. */
 function codeBlock(pre: Element, shiki: Highlighter): Element {
   const code = pre.children.find((c): c is Element => c.type === "element" && c.tagName === "code")
   const classes = (code?.properties.className as string[] | undefined) ?? []
@@ -207,6 +226,16 @@ function codeBlock(pre: Element, shiki: Highlighter): Element {
     properties: { className: ["code-block"] },
     children: [
       highlight(shiki, toString(code ?? pre).replace(/\n$/, ""), lang),
+      ...(lang === "text"
+        ? []
+        : [
+            {
+              type: "element",
+              tagName: "span",
+              properties: { className: ["code-lang"], ariaHidden: "true" },
+              children: [{ type: "text", value: languageNames[lang] ?? lang }],
+            } satisfies Element,
+          ]),
       {
         type: "element",
         tagName: "button",
@@ -280,13 +309,13 @@ function card(li: Element): Element | undefined {
   if (head?.type === "element" && head.tagName === "a") {
     // A page of the docs, then what it covers.
     href = head.properties.href
-    if (typeof href !== "string" || !href.startsWith("/docs")) return
-    if (rest[0]?.type !== "text" || !rest[0].value.startsWith(":")) return
+    if (typeof href !== "string" || !(href.startsWith("/docs") || href.startsWith("/zh/docs"))) return
+    if (rest[0]?.type !== "text" || !/^[:：]/.test(rest[0].value)) return
     title = head.children
     description = rest
-  } else if (head?.type === "text" && head.value.includes(": ")) {
+  } else if (head?.type === "text" && /[:：]\s/.test(head.value)) {
     // "The Go API: `go doc -all <package>`, …" links to the package on pkg.go.dev.
-    const [name = "", after = ""] = head.value.split(": ", 2)
+    const [name = "", after = ""] = head.value.split(/[:：]\s*/, 2)
     const pkg = /^go doc (?:-all )?(\S+)$/.exec(rest[0]?.type === "element" ? toString(rest[0]) : "")?.[1]
     if (!pkg) return
     href = `https://pkg.go.dev/${pkg}`
@@ -306,10 +335,10 @@ function card(li: Element): Element | undefined {
   }
 }
 
-/** Drops the ": " between a card's link and its description, and capitalizes the description. */
+/** Drops the ": " or "： " between a card's link and its description, and capitalizes the description. */
 function capitalize(nodes: ElementContent[]): ElementContent[] {
   const [first, ...rest] = nodes
   if (first?.type !== "text") return nodes
-  const value = first.value.replace(/^[\s:]+/, "")
+  const value = first.value.replace(/^[\s:：]+/, "")
   return [{ ...first, value: value.charAt(0).toUpperCase() + value.slice(1) }, ...rest]
 }

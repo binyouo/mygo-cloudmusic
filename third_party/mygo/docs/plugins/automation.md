@@ -47,6 +47,30 @@ A socket left at the path by an app that ended without closing it is
 replaced; one that another app listens on is not, nor a file that is no
 socket. The app removes its socket when it quits.
 
+
+## On phones
+
+The same protocol drives an app in a simulator or on a device, so that a test
+written once runs on all of them. Release builds leave the plugin out, so the
+import needs no tag.
+
+The iOS simulator shares the Mac's files, and takes the variable through `simctl`:
+
+```sh
+SIMCTL_CHILD_MYGO_AUTOMATION=/tmp/app.sock xcrun simctl launch booted com.example.app
+```
+
+An app's files on Android are out of adb's reach: name a socket in the abstract
+namespace, with `@`, and forward a port to it. The debug build takes the
+environment with its launch:
+
+```sh
+adb shell "am start -n com.example.app/dev.mygo.MyGoActivity --es mygo.env 'MYGO_AUTOMATION=@app'"
+adb forward tcp:9000 localabstract:app
+```
+
+A device on a cable takes a port, `MYGO_AUTOMATION=tcp::9000` through `devicectl device process launch --environment-variables`, at the address of its tunnel (`devicectl device info details`). Anyone on the phone's networks can reach that port, so use it where you trust them. Input events take `"touch": true` to act as a finger's.
+
 ## The protocol
 
 A client connects to the socket and writes requests, one JSON object per
@@ -168,7 +192,8 @@ a column that lays others out has no node, keyed or not. Roles are
 `alertDialog`, `menu`, `menuBar`, `menuItem`, `menuItemCheckBox`,
 `menuItemRadio`, `heading`, `region`, `log`, `timer`, `alert`,
 `separator`, `rowHeader`, `search`, `article`, `navigation`, `grid`,
-`treeGrid`, `deletion` and `insertion`. States are `focusable`, `disabled`,
+`treeGrid`, `deletion`, `insertion`, `tabPanel`, `main`, `banner`, `contentInfo` and
+`complementary`. States are `focusable`, `disabled`,
 `checked`, `mixed`, `selected`, `expanded`, `multiline`, `password`,
 `readOnly`, `selectable`, `offscreen`, `multiselectable`, `segment`,
 `search`, `invalid`, `sortAscending`, `sortDescending`, `expandable`,
@@ -280,6 +305,17 @@ never settles, as an indicator that keeps moving, never answers: give
 ```json
 {"id": 8, "method": "idle", "params": {"window": 1, "timeout": 5000}}
 ```
+
+### Windows out of sight
+
+A window none of which shows, as a hidden or minimized one, one that
+other windows cover, or any while the screen is locked, holds its frames
+until it shows, and its surface may draw none before then: macOS draws
+none for a hidden window, nor for any window while the screen is locked.
+There, requests build the frame the window waits for themselves: `act`
+and `input` take effect at once, as a press does in the frame that
+builds, and `tree`, `capture` and `idle` tell what the window shows now,
+with `idle` waiting for nothing the window would draw once it shows.
 
 ## A client
 

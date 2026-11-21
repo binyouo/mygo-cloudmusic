@@ -3,6 +3,8 @@ package ui
 import (
 	"slices"
 
+	"github.com/egoist/mygo/internal/platform"
+
 	transfer "github.com/egoist/mygo/transfer"
 )
 
@@ -33,8 +35,9 @@ func textInputBase(c *context, value *string, multiline bool) *node {
 		e.flags |= flagScrollY
 	}
 	st := e.st
+	st.traits = platform.TextTraits{}
 	if st.editor == nil || st.editor.document != nil {
-		st.editor = newEditor(c.rt.now)
+		st.editor = newEditor(c.rt.now, c.rt.text)
 		st.editor.setText(*value)
 		st.editor.caret, st.editor.anchor = st.editor.buf.n, st.editor.buf.n
 	}
@@ -102,12 +105,36 @@ func (e *node) CaretWidth(width float32) *node {
 // change it: the text can still be selected and copied, from the keyboard
 // too, as it takes the focus, without a caret; assistive technology reads
 // it as read-only.
+//
+// On an element of your own that MyGo does not edit or operate, a widget
+// that draws its value and handles its keys itself, it only tells
+// assistive technology that the element is read-only, as ARIA's
+// aria-readonly, and takes set-value, increment and decrement from it:
+// for a text box
+// (RoleTextField), combo box, check box, switch, slider, stepper, radio
+// group, list box, grid or tree grid, and for the cells and headers
+// (RoleCell, RoleColumnHeader, RoleRowHeader) of a grid or a tree grid,
+// not of a table. Other roles, and MyGo's own controls but for the text
+// inputs and text areas it is meant for, ignore it.
 func (e *node) ReadOnly(on bool) *node {
 	if ed := e.st.editor; ed != nil && e.flags&flagEditable != 0 {
 		ed.readOnly = on
 		if on {
 			ed.compose = ""
 		}
+	} else {
+		e.readOnly = on
+	}
+	return e
+}
+
+// Multiline tells assistive technology that an element of the text box
+// role (Role(RoleTextField)) that MyGo does not edit takes several lines,
+// as ARIA's aria-multiline. Text inputs and text areas know it
+// themselves, from the control they are, and other roles ignore it.
+func (e *node) Multiline(on bool) *node {
+	if ed := e.st.editor; ed == nil || e.flags&flagEditable == 0 {
+		e.multiline = on
 	}
 	return e
 }
@@ -128,11 +155,33 @@ func (e *node) MaxLength(n int) *node {
 // OnPaste has fn see a paste into a text input, by Cmd+V, Ctrl+V or a
 // Paste menu item, before it is inserted, on the main thread as the paste
 // comes: text is the clipboard's text, empty when it holds none, as with
-// an image, which the app reads from the clipboard itself. fn reports
+// an image, which fn reads with Services.ReadClipboardData. fn reports
 // whether it took the paste; a paste taken changes nothing, its selection
 // and undo history included, as when a web page prevents a paste's
 // default and attaches a large block instead of inserting it. Like
 // ReadOnly, it holds for the input that comes until the next frame.
+//
+// fn runs between frames, where an Element kept from the view is no
+// longer valid, and the input writes what it holds over its bound value,
+// so setting the value from fn is lost. To put text of its own in place
+// of the paste, as a link to an image it attaches, fn keeps the text and
+// the view inserts it with ReplaceText as it is built again, which a
+// paste seen by fn does at once:
+//
+//	svc := c.Services()
+//	in := ui.TextArea(c, &app.draft).OnPaste(func(string) bool {
+//		img := svc.ReadClipboardData(transfer.PNG)
+//		if len(img.Items()) == 0 {
+//			return false // text pastes as usual
+//		}
+//		app.insert = app.attach(img) // "![image](https://…)"
+//		return true
+//	})
+//	if app.insert != "" {
+//		start, end := in.TextSelection()
+//		in.ReplaceText(start, end, app.insert) // a step of undo
+//		app.insert = ""
+//	}
 func (e *node) OnPaste(fn func(text string) bool) *node {
 	if ed := e.st.editor; ed != nil && e.flags&flagEditable != 0 {
 		ed.onPaste = fn
@@ -278,6 +327,60 @@ func (e *node) SetTextSelection(start, end int) *node {
 	return e
 }
 
+// ReplaceText replaces the runes of a text input from start to end with s,
+// as an edit, a step of undo of its own: Undo brings back the text the
+// user had, and Redo s again. A command that writes a message replaces all
+// of it, from 0 to math.MaxInt; a completion, the word before the caret.
+// The offsets are kept within the text, as SetTextSelection's, and what was
+// typed in this frame is applied first. Setting the bound value instead
+// takes the new text into the last step, which suits a reformat of what
+// the user typed, not a text that replaces it (see TextInput). As a paste
+// does, it puts the caret after s, and a single-line input takes line
+// breaks as spaces; MaxLength does not cut it, as it does not cut a value
+// the app sets. Changed reports it. It does nothing when the runes are s
+// already.
+func (e *node) ReplaceText(start, end int, s string) *node {
+	if !e.hasState() || e.st.editor == nil || e.flags&flagEditable == 0 {
+		return e
+	}
+	// What was typed this frame comes first.
+	e.c.rt.applyInputs()
+	ed := e.st.editor
+	ed.syncBuffer()
+	n := ed.buf.n
+	start, end = min(max(start, 0), n), min(max(end, 0), n)
+	start, end = min(start, end), max(start, end)
+	// As the input takes it, a text it holds already is no edit.
+	s = ed.edited(s)
+	if ed.buf.slice(start, end) == s {
+		return e
+	}
+	ed.compose, ed.compositionActive = "", false
+	ed.record(false)
+	maxLength := ed.maxLength
+	ed.maxLength = 0
+	ed.replace(start, end, s)
+	ed.maxLength = maxLength
+	if ed.document != nil {
+		snapshot, ok := ed.document.compareRestore(ed.published, ed.buf.root)
+		if !ok {
+			// The app changed the buffer meanwhile, from another goroutine:
+			// its text wins, as it does over the user's edits.
+			ed.loadBuffer(snapshot)
+			return e
+		}
+		ed.published = snapshot
+	} else if ed.value != nil {
+		*ed.value = ed.buf.s
+	}
+	if ed.area != nil {
+		ed.area.reveal = true
+	}
+	e.st.markChanged()
+	e.c.rt.requestFrame()
+	return e
+}
+
 // Composing reports whether an input method composes text in a text
 // input, as Pinyin before a candidate is chosen: its value holds the text
 // once composed. Keys typed meanwhile are the input method's, as Enter
@@ -294,6 +397,115 @@ func (e *node) Composing() bool {
 func (e *node) Password() *node {
 	if ed := e.st.editor; ed != nil && !ed.multiline {
 		ed.password = true
+	}
+	return e
+}
+
+// KeyboardType is the layout of the on-screen keyboard for a text input.
+type KeyboardType = platform.KeyboardKind
+
+// The keyboards of phones and tablets. Hardware keyboards and desktops type as
+// they do.
+const (
+	KeyboardDefault = platform.KeyboardDefault
+	KeyboardEmail   = platform.KeyboardEmail
+	KeyboardNumber  = platform.KeyboardNumber
+	KeyboardDecimal = platform.KeyboardDecimal
+	KeyboardPhone   = platform.KeyboardPhone
+	KeyboardURL     = platform.KeyboardURL
+	KeyboardSearch  = platform.KeyboardSearch
+)
+
+// ReturnKeyType is what the return key of an on-screen keyboard says.
+type ReturnKeyType = platform.ReturnKeyKind
+
+// The return keys of phones and tablets. ReturnNext moves the focus to the
+// next element after it submits.
+const (
+	ReturnDefault = platform.ReturnDefault
+	ReturnDone    = platform.ReturnDone
+	ReturnGo      = platform.ReturnGo
+	ReturnNext    = platform.ReturnNext
+	ReturnSearch  = platform.ReturnSearch
+	ReturnSend    = platform.ReturnSend
+)
+
+// Capitalization is what an on-screen keyboard capitalizes as one types.
+type Capitalization = platform.CapitalizeKind
+
+// The capitalizations of on-screen keyboards.
+const (
+	CapitalizeDefault    = platform.CapitalizeDefault
+	CapitalizeNone       = platform.CapitalizeNone
+	CapitalizeWords      = platform.CapitalizeWords
+	CapitalizeSentences  = platform.CapitalizeSentences
+	CapitalizeCharacters = platform.CapitalizeCharacters
+)
+
+// AutofillKind names what a text input holds, for the system to offer it from
+// its passwords and contacts.
+type AutofillKind = platform.AutofillKind
+
+// The kinds of text the system fills in.
+const (
+	AutofillNone        = platform.AutofillNone
+	AutofillUsername    = platform.AutofillUsername
+	AutofillPassword    = platform.AutofillPassword
+	AutofillNewPassword = platform.AutofillNewPassword
+	AutofillOneTimeCode = platform.AutofillOneTimeCode
+	AutofillEmail       = platform.AutofillEmail
+	AutofillName        = platform.AutofillName
+	AutofillPhone       = platform.AutofillPhone
+	AutofillAddress     = platform.AutofillAddress
+	AutofillPostalCode  = platform.AutofillPostalCode
+	AutofillCreditCard  = platform.AutofillCreditCard
+)
+
+// Keyboard chooses the on-screen keyboard's layout for a text input, on
+// phones and tablets.
+func (e *node) Keyboard(k KeyboardType) *node {
+	if e.hasState() {
+		e.st.traits.Keyboard = k
+	}
+	return e
+}
+
+// ReturnKey sets what the return key of an on-screen keyboard says, for a
+// single-line input. It submits the input as Enter does; ReturnNext moves
+// the focus on as well.
+func (e *node) ReturnKey(k ReturnKeyType) *node {
+	if e.hasState() {
+		e.st.traits.ReturnKey = k
+	}
+	return e
+}
+
+// Capitalize sets what an on-screen keyboard capitalizes as one types.
+func (e *node) Capitalize(c Capitalization) *node {
+	if e.hasState() {
+		e.st.traits.Capitalize = c
+	}
+	return e
+}
+
+// Autocorrect turns an on-screen keyboard's corrections and suggestions on
+// or off for a text input, on by default where the keyboard has them.
+func (e *node) Autocorrect(on bool) *node {
+	if e.hasState() {
+		e.st.traits.Autocorrect = platform.AutocorrectOff
+		if on {
+			e.st.traits.Autocorrect = platform.AutocorrectOn
+		}
+	}
+	return e
+}
+
+// Autofill tells the system what a text input holds, for it to offer it
+// from its passwords and contacts, as with iOS's Passwords above the
+// keyboard.
+func (e *node) Autofill(k AutofillKind) *node {
+	if e.hasState() {
+		e.st.traits.Autofill = k
 	}
 	return e
 }
@@ -317,8 +529,8 @@ func (e *node) Search() *node {
 }
 
 // Selectable lets the user select and copy text by dragging, double-clicking
-// a word, triple-clicking a line, or using Shift with the arrows. Its context
-// menu has Copy and Select All; Cmd+C copies the selection.
+// a word, triple-clicking a paragraph, or using Shift with the arrows. Its
+// context menu has Copy and Select All; Cmd+C copies the selection.
 //
 // On a container, its Text and RichText descendants share one selection.
 // Copy joins their selected text with newlines, in the order they were built.

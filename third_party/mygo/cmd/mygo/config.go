@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -43,9 +45,10 @@ type Config struct {
 	// years, as "Example Inc." of "Copyright © 2026 Example Inc.").
 	Publisher string `json:"publisher"`
 	// License is the SPDX license expression of the app, such as "MIT" or
-	// "Apache-2.0 WITH LLVM-exception", which the PKGBUILD of Arch Linux
-	// records. It defaults to the license of package.json, for apps whose
-	// frontend declares one (default: package.json's license).
+	// "Apache-2.0 WITH LLVM-exception", which the RPM package and the
+	// PKGBUILD of Arch Linux record. It defaults to the license of
+	// package.json, for apps whose frontend declares one (default:
+	// package.json's license).
 	License string `json:"license"`
 	// Icon is a square PNG, ideally 1024x1024 (default:
 	// resources/icon.png when it exists). Beside it, the same name with
@@ -113,9 +116,18 @@ type Config struct {
 	MacOS   MacOS    `json:"macos"`
 	Windows Windows  `json:"windows"`
 	Linux   Linux    `json:"linux"`
+	IOS     IOS      `json:"ios"`
+	Android Android  `json:"android"`
 
 	root string
 	file string // the configuration file, "" without one
+	// native is what the app's native modules add to its bundle, once
+	// prepareNative built them.
+	native *nativeApp
+	// deps caches the directories of the packages the app is built from,
+	// by target, for one build: listing them once serves both the native
+	// libraries (natives) and the native modules (appNativeModules).
+	deps map[string][]string
 	// langs are the languages the app ships, which languages reads once.
 	langs     []appLanguage
 	langsErr  error
@@ -220,9 +232,126 @@ type MacOS struct {
 	InfoPlist map[string]any `json:"infoPlist"`
 	// DMGTitle is the volume name of the disk image (default: name).
 	DMGTitle string `json:"dmgTitle"`
-	// Notarize submits production disk images to Apple's notary service and
-	// staples the ticket. It needs a Developer ID signing identity.
+	// Notarize submits the app, then the disk image holding it, to Apple's
+	// notary service and staples the tickets to both. It needs a Developer
+	// ID signing identity.
 	Notarize *Notarize `json:"notarize"`
+}
+
+// IOS configures the iOS app (mygo build -platform ios, ios/simulator).
+type IOS struct {
+	// MinimumSystemVersion is the oldest iOS version supported (default
+	// "17.0").
+	MinimumSystemVersion string `json:"minimumSystemVersion"`
+	// Team is the ID of the Apple developer team that signs the app for
+	// devices, as Xcode's Signing & Capabilities shows it.
+	Team string `json:"team"`
+	// ProvisioningProfile is the profile to sign with: its name, UUID or
+	// the path of a .mobileprovision (default: the installed profile that
+	// best fits the identifier and the distribution).
+	ProvisioningProfile string `json:"provisioningProfile"`
+	// Distribution is what the build is for: "app-store" (default, and
+	// TestFlight), "ad-hoc", "development" or "enterprise".
+	Distribution string `json:"distribution"`
+	// MultipleWindows lets WindowOptions.OwnScene open windows of the system's
+	// own on iPad, beside each other (default: the app has one).
+	MultipleWindows bool `json:"multipleWindows"`
+	// BuildNumber is CFBundleVersion, which must grow with every upload of
+	// a version (default: the version).
+	BuildNumber string `json:"buildNumber"`
+	// Orientations are those the app turns to on iPhones: "portrait" and
+	// "landscape" (default both). iPads take every one.
+	Orientations []string `json:"orientations"`
+	// InfoPlist holds extra keys for the app's Info.plist, which replace
+	// MyGo's own, e.g. the usage descriptions of what the app asks for:
+	//   "NSCameraUsageDescription": "Scan documents with the camera."
+	InfoPlist map[string]any `json:"infoPlist"`
+	// AssociatedDomains are the hosts of the app's universal links, which
+	// reach mygo.App.OnOpenURL: "example.com" signs the app with the
+	// entitlement applinks:example.com, and a value with its own service, as
+	// "webcredentials:example.com", stays as it is. The provisioning profile
+	// needs the capability Associated Domains, and each host an
+	// apple-app-site-association file.
+	AssociatedDomains []string `json:"associatedDomains"`
+	// LaunchScreen is what the system shows while the app starts (default:
+	// the system background).
+	LaunchScreen *IOSLaunchScreen `json:"launchScreen"`
+	// BackgroundModes are the app's UIBackgroundModes, as "audio", "fetch"
+	// or "remote-notification", with those its plugins ask for.
+	BackgroundModes []string `json:"backgroundModes"`
+	// Extensions are app extensions built apart, as a Network Extension's
+	// packet tunnel built with Xcode, which the app carries in PlugIns/,
+	// each signed with its own provisioning profile before the app.
+	Extensions []IOSExtension `json:"extensions"`
+}
+
+// IOSExtension is a prebuilt app extension of the iOS app.
+type IOSExtension struct {
+	// Path is the .appex, whose identifier starts with the app's and a
+	// dot, as com.example.app.tunnel.
+	Path string `json:"path"`
+	// ProvisioningProfile is the profile to sign it with for
+	// ios.distribution: its name, UUID or the path of a .mobileprovision
+	// (default: the installed profile that best fits its identifier and the
+	// distribution, with the app's certificate).
+	ProvisioningProfile string `json:"provisioningProfile"`
+}
+
+// IOSLaunchScreen is the app's launch screen, which has no storyboard: a
+// UILaunchScreen in Info.plist that names a color and an image of the app's
+// asset catalog.
+type IOSLaunchScreen struct {
+	// Background is its color, as "#102030".
+	Background string `json:"background"`
+	// Image is a PNG shown centered, at the size of a 3x screen: a logo of
+	// 600x600 pixels takes 200x200 points.
+	Image string `json:"image"`
+}
+
+// Android configures the Android app (mygo build -platform android).
+type Android struct {
+	// MinSdk is the oldest Android API level supported (default 26,
+	// Android 8.0).
+	MinSdk int `json:"minSdk"`
+	// VersionCode is the integer version Google Play orders uploads by
+	// (default: from the version, major×10000 + minor×100 + patch).
+	VersionCode int `json:"versionCode"`
+	// Permissions are those the manifest declares, in addition to INTERNET,
+	// as "android.permission.CAMERA" or just "CAMERA".
+	Permissions []string `json:"permissions"`
+	// Keystore is the keystore of the upload key that signs release
+	// builds, KeyAlias the key's alias in it; their passwords come from
+	// MYGO_ANDROID_KEYSTORE_PASSWORD and MYGO_ANDROID_KEY_PASSWORD
+	// (default: the latter the former). Without a keystore, builds are
+	// signed with the debug key.
+	Keystore string `json:"keystore"`
+	KeyAlias string `json:"keyAlias"`
+	// AppLinks are the hosts of the app's https deep links, verified by
+	// Android (android:autoVerify), which reach mygo.App.OnOpenURL: each
+	// serves /.well-known/assetlinks.json naming the app. "*.example.com"
+	// takes its subdomains.
+	AppLinks []string `json:"appLinks"`
+	// AdaptiveIcon is the launcher icon of Android 8.0 and later, which the
+	// launcher masks and moves. Without it, launchers show icon as it is.
+	AdaptiveIcon *AndroidAdaptiveIcon `json:"adaptiveIcon"`
+	// Splash is the color of the screen the system shows while the app
+	// starts, as "#102030" (default: the theme's).
+	Splash string `json:"splash"`
+	// ExtractNativeLibs has the installer extract the app's native
+	// libraries to nativeLibraryDir, the one place an app may exec its own
+	// files from: for an executable that ships as lib<name>.so in a native
+	// module's jniLibs. By default they stay in the APK, uncompressed, and
+	// are loaded from it.
+	ExtractNativeLibs bool `json:"extractNativeLibs"`
+}
+
+// AndroidAdaptiveIcon is an icon of two layers.
+type AndroidAdaptiveIcon struct {
+	// Foreground is a square PNG, ideally 432x432 or more, with transparency
+	// around what it shows: launchers crop to the middle 72/108 of it.
+	Foreground string `json:"foreground"`
+	// Background is the color under it, as "#102030".
+	Background string `json:"background"`
 }
 
 // Notarize holds notarytool credentials stored in the keychain with
@@ -291,6 +420,13 @@ func (c *Config) validate() error {
 				return fmt.Errorf("fileAssociations[%d]: %q is not a file name extension (without the dot)", i, ext)
 			}
 		}
+		if fa.MimeType != "" {
+			mediaType, params, err := mime.ParseMediaType(fa.MimeType)
+			if err != nil || !strings.Contains(mediaType, "/") || len(params) != 0 || strings.ContainsAny(fa.MimeType, ";\r\n") {
+				return fmt.Errorf("fileAssociations[%d].mimeType %q is not a MIME type (type/subtype, as text/markdown, without parameters)", i, fa.MimeType)
+			}
+			c.FileAssociations[i].MimeType = mediaType
+		}
 		if fa.Role != "" && fa.Role != "Editor" && fa.Role != "Viewer" {
 			return fmt.Errorf("fileAssociations[%d].role is Editor or Viewer", i)
 		}
@@ -325,6 +461,11 @@ func (c *Config) validate() error {
 			return fmt.Errorf("linux.command names %q twice", cmd)
 		}
 	}
+	for _, f := range c.Linux.Formats {
+		if !slices.Contains(linuxFormats, f) {
+			return fmt.Errorf("linux.formats %q is not a Linux package format, which are %s", f, strings.Join(linuxFormats, ", "))
+		}
+	}
 	if c.Updates != nil {
 		if err := c.Updates.validate(); err != nil {
 			return err
@@ -353,6 +494,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("i18n.dir %q is not a directory of the project: the catalogs are a Go package of their own, as locales", c.I18n.Dir)
 		}
 	}
+	if err := c.validateMobile(); err != nil {
+		return err
+	}
 	if c.DevURL != "" {
 		if u, err := url.Parse(c.DevURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("devUrl %q is not an http(s) URL", c.DevURL)
@@ -361,7 +505,89 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// validateMobile checks the sections of phones, which say what the stores
+// and the systems would refuse only much later.
+func (c *Config) validateMobile() error {
+	for _, d := range c.IOS.AssociatedDomains {
+		// A value with a service keeps it; its host may name a mode, as
+		// applinks:example.com?mode=developer.
+		host := d
+		if _, after, ok := strings.Cut(d, ":"); ok {
+			host, _, _ = strings.Cut(after, "?")
+		}
+		if !hostRe.MatchString(host) {
+			return fmt.Errorf("ios.associatedDomains: %q is not a host, as example.com or applinks:example.com", d)
+		}
+	}
+	if l := c.IOS.LaunchScreen; l != nil {
+		if l.Background == "" && l.Image == "" {
+			return errors.New("ios.launchScreen needs a background or an image")
+		}
+		if l.Background != "" {
+			if _, err := parseHexColor(l.Background); err != nil {
+				return fmt.Errorf("ios.launchScreen.background: %w", err)
+			}
+		}
+	}
+	for _, m := range c.IOS.BackgroundModes {
+		if m == "" || strings.ContainsFunc(m, unicode.IsSpace) {
+			return fmt.Errorf("ios.backgroundModes: %q is not a mode, as audio or fetch", m)
+		}
+	}
+	names := map[string]bool{}
+	for i, e := range c.IOS.Extensions {
+		if !strings.HasSuffix(strings.TrimRight(e.Path, `/\`), ".appex") {
+			return fmt.Errorf("ios.extensions[%d].path: %q is not an app extension, as build/PacketTunnel.appex", i, e.Path)
+		}
+		name := filepath.Base(e.Path)
+		if names[name] {
+			return fmt.Errorf("ios.extensions[%d].path: another extension is %s, which PlugIns/ holds one of", i, name)
+		}
+		names[name] = true
+	}
+	for _, h := range c.Android.AppLinks {
+		if !hostRe.MatchString(h) {
+			return fmt.Errorf("android.appLinks: %q is not a host, as example.com or *.example.com, without https://", h)
+		}
+	}
+	if a := c.Android.AdaptiveIcon; a != nil {
+		if a.Foreground == "" {
+			return errors.New("android.adaptiveIcon needs a foreground")
+		}
+		if _, err := parseHexColor(a.Background); err != nil {
+			return fmt.Errorf("android.adaptiveIcon.background: %w", err)
+		}
+	}
+	if c.Android.Splash != "" {
+		if _, err := parseHexColor(c.Android.Splash); err != nil {
+			return fmt.Errorf("android.splash: %w", err)
+		}
+	}
+	return nil
+}
+
+// parseHexColor reads a color as "#rgb" or "#rrggbb".
+func parseHexColor(s string) ([3]uint8, error) {
+	hex, ok := strings.CutPrefix(s, "#")
+	if ok && len(hex) == 3 {
+		hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]})
+	}
+	var out [3]uint8
+	if !ok || len(hex) != 6 {
+		return out, fmt.Errorf("%q is not a color, as #102030", s)
+	}
+	for i := range out {
+		v, err := strconv.ParseUint(hex[i*2:i*2+2], 16, 8)
+		if err != nil {
+			return out, fmt.Errorf("%q is not a color, as #102030", s)
+		}
+		out[i] = uint8(v)
+	}
+	return out, nil
+}
+
 var (
+	hostRe   = regexp.MustCompile(`^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$`)
 	nonIdent = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 	slugRe   = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 	schemeRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*$`)
@@ -396,6 +622,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MacOS.SigningIdentity == "" {
 		c.MacOS.SigningIdentity = "-"
+	}
+	if c.IOS.MinimumSystemVersion == "" {
+		c.IOS.MinimumSystemVersion = "17.0"
+	}
+	if c.IOS.Distribution == "" {
+		c.IOS.Distribution = "app-store"
+	}
+	if c.Android.MinSdk == 0 {
+		c.Android.MinSdk = 26
 	}
 	if c.MacOS.DMGTitle == "" {
 		c.MacOS.DMGTitle = c.Name

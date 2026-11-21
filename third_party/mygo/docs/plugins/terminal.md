@@ -62,7 +62,9 @@ The terminal does what terminal apps do:
   screen of full-screen programs;
 - the keyboard as programs ask: legacy sequences, xterm's modifyOtherKeys
   or the Kitty keyboard protocol, and input methods, which compose at the
-  cursor;
+  cursor. In legacy sequences Ctrl+I, Ctrl+M and Ctrl+[ send Tab, Enter
+  and Esc, as in xterm, where Ghostty sends fixterms' CSI u, which
+  shells don't read;
 - mouse reports, focus reports, bracketed paste, synchronized output,
   hyperlinks (OSC 8), the title (OSC 0 and 2), the working directory
   (OSC 7), copying to and reading the clipboard (OSC 52, OSC 5522) as the
@@ -301,7 +303,10 @@ term, err := terminal.New(terminal.Options{
   before `win`, and `close(ready)` once `NewWindow` set `win`). `Done` is
   closed once the program exited, and `ExitCode` returns its code (-1 for
   a program that could not start); the terminal then shows "[Process
-  exited]".
+  exited]" ("[Disconnected]" with `Conn`).
+- `NoExitMessage` leaves that line out, for an app that tells of the end
+  in its own way, or closes the view: `OnExit`, `Done` and `ExitCode` are
+  the same either way.
 - `OpenLink` takes the links Command+click opens, on the main thread,
   and with it file paths printed as text too (`/abs/path`, `~/notes.md`,
   `./a.go`, `src/app.go:12:3`, `main.go:250`, `app.ts(12,3)`,

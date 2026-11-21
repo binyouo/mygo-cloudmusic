@@ -55,6 +55,22 @@ closes it, and Alt-click opens or closes everything inside.
   element under the pointer: the click goes to the inspector, not to the
   element. Escape stops picking.
 - `Cmd+F` (`Ctrl+F`) finds elements by their tag, text, label or key.
+- Right-click a row to copy what the inspector shows of its element, to
+  paste into an issue, a chat or an editor: **Copy element** copies it and
+  everything inside it as markup, every element open and texts whole;
+  **Copy styles**, **Copy computed** and **Copy properties** copy its tabs
+  below the tree as text, the styles and computed values as CSS rules.
+  `Cmd+C` (`Ctrl+C`) in the tree copies the element chosen, as Copy
+  element does:
+
+  ```html
+  <Row key="header">
+    <Button>
+      <Text>Toggle sidebar</Text>
+    </Button>
+    <Text>Inbox</Text>
+  </Row>
+  ```
 
 Below the tree, the element chosen has three tabs:
 

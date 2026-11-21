@@ -4,48 +4,56 @@ import * as React from "react"
 import { NotFound } from "@/components/not-found"
 import { SiteFooter } from "@/components/site-footer"
 import { SiteHeader } from "@/components/site-header"
+import { translate, useLanguage } from "@/lib/i18n"
+import { langOfMatches, localeScript, tagOf } from "@/lib/locale"
 import { site } from "@/lib/site"
 import { themeScript } from "@/lib/theme"
 import appCss from "@/styles.css?url"
 
 export const Route = createRootRoute({
-  head: () => ({
-    meta: [
-      { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: site.title },
-      { name: "description", content: site.description },
-      { property: "og:type", content: "website" },
-      { property: "og:site_name", content: site.name },
-      { property: "og:title", content: site.title },
-      { property: "og:description", content: site.description },
-      { name: "twitter:card", content: "summary" },
-    ],
-    links: [
-      { rel: "stylesheet", href: appCss },
-      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
-    ],
-    scripts: [
-      { children: themeScript },
-      ...(import.meta.env.PROD
-        ? [
-            {
-              src: "https://u.egoist.dev/script.js",
-              defer: true,
-              "data-website-id": "60fbda78-1368-4d06-9a33-83d14133acd6",
-            },
-          ]
-        : []),
-    ],
-  }),
+  head: ({ matches }) => {
+    const lang = langOfMatches(matches)
+    const t = (text: string) => translate(lang, text)
+    return {
+      meta: [
+        { charSet: "utf-8" },
+        { name: "viewport", content: "width=device-width, initial-scale=1" },
+        { title: t(site.title) },
+        { name: "description", content: t(site.description) },
+        { property: "og:type", content: "website" },
+        { property: "og:site_name", content: site.name },
+        { property: "og:title", content: t(site.title) },
+        { property: "og:description", content: t(site.description) },
+        { name: "twitter:card", content: "summary" },
+      ],
+      links: [
+        { rel: "stylesheet", href: appCss },
+        { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+      ],
+      scripts: [
+        { children: themeScript },
+        { children: localeScript },
+        ...(import.meta.env.PROD
+          ? [
+              {
+                src: "https://tt.egoist.dev/js/script.js",
+                defer: true,
+                "data-domain": "mygo.run",
+              },
+            ]
+          : []),
+      ],
+    }
+  },
   shellComponent: RootDocument,
   component: RootLayout,
-  notFoundComponent: NotFound,
+  notFoundComponent: RootNotFound,
 })
 
 function RootDocument({ children }: { children: React.ReactNode }) {
+  const lang = useLanguage()
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang={tagOf(lang)} suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
@@ -55,6 +63,11 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       </body>
     </html>
   )
+}
+
+/** A path without a page in neither language: its language is the path's own. */
+function RootNotFound() {
+  return <NotFound />
 }
 
 function RootLayout() {

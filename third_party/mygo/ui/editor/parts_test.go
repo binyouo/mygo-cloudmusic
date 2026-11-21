@@ -94,6 +94,87 @@ func TestCodeEditorParts(t *testing.T) {
 	}
 }
 
+// The default find bar stays within an editor beside a sidebar as the
+// window narrows, while replacing, leaving out the count of matches, then
+// all but the fields and the ⇄ and close buttons, as the editor passes
+// widths; replacing still turns off in the narrowest.
+func TestCodeEditorFindBarFitsNarrowEditor(t *testing.T) {
+	st := &State{Buffer: NewBuffer("cat dog cat\ncat\n")}
+	var b ui.Rect
+	st.RenderFindBar = func(c *ui.Context, bar ui.Element, f *FindBar) {
+		// A frame's bounds are the last frame's.
+		b = bar.Bounds()
+		DefaultFindBar(c, bar, f)
+	}
+	tt := ui.NewTester(func(c *ui.Context) {
+		ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
+			ui.Box(c).Width(200)
+			View(c, st).Grow(1)
+		})
+	}, 900, 400)
+	tt.Frame()
+	st.Find("cat")
+	st.ed.find.replacing = true
+	tt.Frame()
+	for _, tc := range []struct {
+		w                 int
+		count, toggles, x bool
+	}{
+		{900, true, true, true},
+		{680, false, true, true},
+		{500, false, false, true},
+		{330, false, false, true},
+	} {
+		// With only the frames the resize asks for.
+		tt.SetSize(tc.w, 400)
+		if got := [3]bool{tt.HasText("1 of 3"), tt.HasText("Match case") && tt.HasText("Next match") && tt.HasText("Replace All"), tt.HasText("⇄") && tt.HasText("Close")}; got != [3]bool{tc.count, tc.toggles, tc.x} {
+			t.Errorf("width %d: count, toggles and buttons, replace and close shown %v, want %v: %q", tc.w, got, [3]bool{tc.count, tc.toggles, tc.x}, tt.Texts())
+		}
+		tt.Frame()
+		if b.W <= 0 || b.X < 200 || b.X+b.W > float32(tc.w) {
+			t.Errorf("width %d: the find bar spans %v to %v, outside the editor's 200 to %d", tc.w, b.X, b.X+b.W, tc.w)
+		}
+	}
+	if err := tt.Click("⇄"); err != nil {
+		t.Fatal(err)
+	}
+	if st.ed.find.replacing {
+		t.Error("replacing stayed on after ⇄ in the narrowest bar")
+	}
+}
+
+// A diff's find bar takes clicks over the separator under it, which still
+// takes them beside the bar, in both layouts.
+func TestDiffFindBarOverSeparators(t *testing.T) {
+	lines := make([]string, 60)
+	for i := range lines {
+		lines[i] = "name " + strconv.Itoa(i)
+	}
+	old := strings.Join(lines, "\n")
+	lines[30] = "changed"
+	nw := strings.Join(lines, "\n")
+	for _, layout := range []DiffLayout{DiffUnified, DiffSplit} {
+		d := &DiffState{Old: NewBuffer(old), New: NewBuffer(nw), Layout: layout}
+		tt := ui.NewTester(func(c *ui.Context) { DiffView(c, d).Fill() }, 900, 300)
+		tt.Frame()
+		tt.Frame()
+		d.Find("name")
+		tt.Frame()
+		if err := tt.Click("Match case"); err != nil {
+			t.Fatal(err)
+		}
+		if !d.eds[1].find.caseSens {
+			t.Errorf("layout %v: a click on Match case did not reach the find bar", layout)
+		}
+		if err := tt.Click("Expand 27 unmodified lines"); err != nil {
+			t.Fatal(err)
+		}
+		if tt.HasText("Expand 27 unmodified lines") {
+			t.Errorf("layout %v: the separator under the bars' box did not expand", layout)
+		}
+	}
+}
+
 // TestCodeDiffParts builds the separators, the actions on changes and
 // the gutter's button with the app's render functions, and checks the
 // default separators expand from their buttons.
@@ -378,6 +459,7 @@ func TestDiffFitContentBuildsSeparatorsInView(t *testing.T) {
 		tt := ui.NewTester(func(c *ui.Context) {
 			ui.Scroll(c).Fill().Children(func() { DiffView(c, d).FillWidth() })
 		}, 800, 600)
+		waitCompared(t, tt, d)
 		tt.Frame()
 		tt.Frame()
 		built = 0
@@ -415,6 +497,7 @@ func TestDiffFitContentBuildsSeparatorsScrolledTo(t *testing.T) {
 		tt := ui.NewTester(func(c *ui.Context) {
 			ui.Scroll(c).Fill().Children(func() { DiffView(c, d).FillWidth() })
 		}, 800, 600)
+		waitCompared(t, tt, d)
 		tt.Frame()
 		tt.Frame()
 		// No frame but those the scroll asks for, as in a window.
@@ -443,11 +526,17 @@ func TestDiffFitContentMeasuresLinesShown(t *testing.T) {
 	lines[10000] = "changed"
 	nw := strings.Join(lines, "\n")
 	d := &DiffState{Old: NewBuffer(old), New: NewBuffer(nw), Wrap: true, FitContent: true}
+	// Compared before a window shows them, so that the first frame folds:
+	// while a comparison off the main thread runs, every line shows.
+	d.Hunks()
 	tt := ui.NewTester(func(c *ui.Context) {
 		ui.Scroll(c).Fill().Children(func() { DiffView(c, d).FillWidth() })
 	}, 800, 600)
 	tt.Frame()
 	tt.Frame()
+	if d.Comparing() {
+		t.Fatal("compared again off the main thread")
+	}
 	v := &d.eds[1].view
 	if known := v.heights.wraps.known; known == 0 || known > 1000 {
 		t.Errorf("%d of the %d lines' wraps measured, those shown being a few", known, v.text.LineCount())
@@ -501,5 +590,81 @@ func TestCodeEditorNoPointerHover(t *testing.T) {
 	tt.Frame()
 	if asked != 1 {
 		t.Fatalf("ShowHover asked %d times", asked)
+	}
+}
+
+// TestCodeEditorDefinitionLink checks that, with Cmd held over a word of
+// an editor that goes to definitions, the word shows as a link under a
+// pointing hand, and that letting go of Cmd takes it away.
+func TestCodeEditorDefinitionLink(t *testing.T) {
+	st := &State{Buffer: NewBuffer("first line\nsecond line\n")}
+	tt := ui.NewTester(func(c *ui.Context) { View(c, st).Fill() }, 600, 300)
+	tt.Frame()
+	tt.Move(st.ed.textX+st.ed.view.charWidth*2, 5)
+	tt.HoldModifiers(ui.Cmd)
+	tt.Frame()
+	if st.ed.link != ([2]int{}) || tt.Cursor() == ui.CursorPointer {
+		t.Fatalf("a link %v with no OnDefinition", st.ed.link)
+	}
+	st.OnDefinition = func(int) {}
+	tt.Frame()
+	if st.ed.link != [2]int{0, 5} || tt.Cursor() != ui.CursorPointer {
+		t.Fatalf("link %v, cursor %v over \"first\" with Cmd held", st.ed.link, tt.Cursor())
+	}
+	// The tester's moves bring no modifiers, as a move with Cmd let go.
+	tt.Move(st.ed.textX+st.ed.view.charWidth*8, 5)
+	tt.HoldModifiers(ui.Cmd)
+	if st.ed.link != [2]int{6, 10} {
+		t.Fatalf("link %v over \"line\"", st.ed.link)
+	}
+	tt.HoldModifiers(0)
+	tt.Frame()
+	if st.ed.link != ([2]int{}) || tt.Cursor() != ui.CursorText {
+		t.Fatalf("link %v, cursor %v after Cmd was let go", st.ed.link, tt.Cursor())
+	}
+}
+
+// TestCodeEditorNoDefinitionClick checks that NoDefinitionClick leaves
+// Cmd+click to the other clicks, with no link, while F12 still goes to
+// the definition, and that NoDefinitionLink keeps the click but not the
+// link.
+func TestCodeEditorNoDefinitionClick(t *testing.T) {
+	var asked []int
+	st := &State{Buffer: NewBuffer("first line\nsecond line\n"), NoDefinitionClick: true,
+		OnDefinition: func(off int) { asked = append(asked, off) }}
+	tt := ui.NewTester(func(c *ui.Context) { View(c, st).Fill() }, 600, 300)
+	tt.Frame()
+	x := st.ed.textX + st.ed.view.charWidth*2
+	tt.Move(x, 5)
+	tt.HoldModifiers(ui.Cmd)
+	tt.Frame()
+	if st.ed.link != ([2]int{}) || tt.Cursor() == ui.CursorPointer {
+		t.Fatalf("link %v, cursor %v with NoDefinitionClick", st.ed.link, tt.Cursor())
+	}
+	tt.ClickAtWith(ui.Cmd, x, 5)
+	tt.Frame()
+	if len(asked) != 0 {
+		t.Fatalf("Cmd+click went to the definitions at %v", asked)
+	}
+	tt.Key(0, ui.KeyF12)
+	tt.Frame()
+	if len(asked) != 1 || asked[0] != 2 {
+		t.Fatalf("F12 went to the definitions at %v, not at 2", asked)
+	}
+
+	asked = nil
+	st.NoDefinitionClick, st.NoDefinitionLink = false, true
+	// Long enough after the first click not to be its double click.
+	tt.Advance(time.Second)
+	tt.Move(x, 5)
+	tt.HoldModifiers(ui.Cmd)
+	tt.Frame()
+	if st.ed.link != ([2]int{}) || tt.Cursor() == ui.CursorPointer {
+		t.Fatalf("link %v, cursor %v with NoDefinitionLink", st.ed.link, tt.Cursor())
+	}
+	tt.ClickAtWith(ui.Cmd, x, 5)
+	tt.Frame()
+	if len(asked) != 1 || asked[0] != 2 {
+		t.Fatalf("Cmd+click went to the definitions at %v, not at 2", asked)
 	}
 }

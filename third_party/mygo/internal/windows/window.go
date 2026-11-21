@@ -4,6 +4,7 @@ package windows
 
 import (
 	"errors"
+	"log"
 	"time"
 	"unsafe"
 
@@ -33,6 +34,9 @@ type window struct {
 	pending      []pendingCall
 	webViewErr   error
 	webViewFails int // creations that failed
+	// creating is true from the time WebView2 was asked for the controller
+	// until it answered.
+	creating bool
 	// scriptIDs are the ids of the scripts added to every document, which
 	// SetUserScripts removes; scriptGen counts the replacements, so an id
 	// that arrives after one is removed at once.
@@ -40,6 +44,9 @@ type window struct {
 	scriptGen  int
 	closed     bool
 	destroying bool
+	// schemes are the custom scheme responses whose handlers run, which
+	// end when the page's webview closes (webview.go).
+	schemes map[*schemeResponse]struct{}
 
 	// contentFilter applies the content rules of SetContentRules to a
 	// request (content_rules.go), and reports whether it answered it; nil
@@ -98,10 +105,13 @@ type window struct {
 	pageAt           [2]float32
 	pageScale        [2]float32
 	corners          uintptr
-	shown, focused   bool
-	hidden           bool
-	cursor           uintptr
-	saved            struct {
+	// effect fades the page itself, where the placement says it does not
+	// show whole, which the clip visual's sub-tree is composed by.
+	effect         uintptr
+	shown, focused bool
+	hidden         bool
+	cursor         uintptr
+	saved          struct {
 		style, exStyle uintptr
 		placement      windowPlacement
 	}
@@ -113,6 +123,11 @@ type window struct {
 	glass       margins // the frame's extension under the material
 	shadow      bool
 	ignoreMouse bool
+	// inputRegion is SetInputRegion's (input_region.go), nil for none;
+	// through tells that the window lets the mouse through
+	// (WS_EX_TRANSPARENT), as it or SetIgnoreMouseEvents set it last.
+	inputRegion []platform.Rect
+	through     bool
 
 	menu    *platform.Menu // menu bar
 	hmenu   uintptr
@@ -123,6 +138,7 @@ type window struct {
 	// the keyboard is in the menu bar.
 	autoHideMenu, revealed bool
 	inMenu                 bool    // in a menu loop, of the bar or a popup
+	menusHaveKeyboard      bool    // the bar's menu loop took the keyboard from the page (takeKeyboardForMenus)
 	menuKey                menuKey // the letter that opened popupMenuBar
 
 	programmatic bool
@@ -165,13 +181,7 @@ func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler)
 	// keeps its bitmap: what it shows shows, and the material does not. The
 	// style is the window's for life: Windows neither adds it nor removes it
 	// later.
-	w.noRedirect = o.Vibrancy != "" && systemBackdrops() && (!w.hiddenTitleBar && !o.Surface || b.composition() != nil)
-	if o.Flyout != nil || o.Transparent && o.Surface {
-		// What the content leaves transparent shows what is behind: native
-		// UI's frames show their alpha through DirectComposition, which an
-		// opaque redirection bitmap would cover.
-		w.noRedirect = b.composition() != nil
-	}
+	w.noRedirect = w.needsNoRedirect(b.composition)
 	var owner uintptr
 	if p, ok := o.Parent.(*window); ok && p != nil && !p.closed {
 		w.parent, owner = p, p.hwnd
@@ -246,6 +256,7 @@ func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler)
 	if o.Vibrancy != "" {
 		w.SetVibrancy(o.Vibrancy)
 	}
+	w.applyTransparentFramePolicy()
 	if b.icon != 0 {
 		w.setIcon(b.icon)
 	}
@@ -262,7 +273,7 @@ func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler)
 	}
 	w.skipTaskbar = o.SkipTaskbar // applied once the taskbar button exists
 	w.layoutControls()
-	if !o.Surface {
+	if webViewBuilt && !o.Surface {
 		b.whenEnvironment(w.createWebView)
 	}
 	return w, nil
@@ -286,6 +297,17 @@ func initialWindowBounds(o *platform.WindowOptions, s dipSpace) rect {
 		r = &p
 	}
 	return rect{int32(r.X), int32(r.Y), int32(r.X + r.Width), int32(r.Y + r.Height)}
+}
+
+// needsNoRedirect keeps transparent web pages clear without initializing MyGo's
+// compositor. Native UI, flyouts and hidden caption controls need that compositor
+// to show without a redirection bitmap; make it only when they need it.
+func (w *window) needsNoRedirect(compose func() *composition) bool {
+	o := w.opts
+	if o.Flyout != nil || o.Transparent && o.Surface {
+		return compose() != nil
+	}
+	return !o.Surface && o.Transparent || o.Vibrancy != "" && systemBackdrops() && (!w.hiddenTitleBar && !o.Surface || compose() != nil)
 }
 
 func (w *window) styles() (style, ex uint32) {
@@ -496,6 +518,14 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
 		return r, true
 	}
 	switch m {
+	case wmNCPaint:
+		if w.plainTransparentFrame() {
+			return 0, true
+		}
+	case wmNCActivate:
+		if w.plainTransparentFrame() {
+			return 1, true
+		}
 	case wmClose:
 		if w.h.ShouldClose() {
 			w.destroy()
@@ -506,11 +536,17 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
 		w.h.Closed()
 		return 0, true
 	case wmTimer:
+		if wp == timerInputRegion && checkInputRegion != nil {
+			checkInputRegion(w)
+			return 0, true
+		}
 		if wp != timerWebView {
 			return 0, false
 		}
 		procKillTimer.Call(w.hwnd, timerWebView)
-		w.createWebView()
+		if webViewBuilt {
+			w.createWebView()
+		}
 		return 0, true
 	case wmSize:
 		if !w.reframing { // SetFullScreen lays the window out once it is done
@@ -521,6 +557,9 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
 		w.hidden = wp == 0
 		for _, v := range w.webViews {
 			v.placeEmbedded()
+		}
+		if inputRegionShown != nil {
+			inputRegionShown(w, wp != 0)
 		}
 		return 0, false
 	case wmMove:
@@ -548,6 +587,9 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
 		}
 		return 0, false
 	case wmSetFocus:
+		if w.menusHaveKeyboard {
+			return 0, true // the page gets it back once the menus close
+		}
 		if w.surface != nil {
 			procSetFocus.Call(w.surface.hwnd)
 		} else {
@@ -612,8 +654,12 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
 		if w.surface != nil {
 			w.surface.liftKeys()
 		}
+		if wp == 0 { // the bar's, or the window menu's, not TrackPopupMenu's
+			w.takeKeyboardForMenus()
+		}
 	case wmExitMenuLoop:
 		w.inMenu = false
+		w.giveKeyboardBack()
 	case wmMenuChar:
 		if r, ok := w.menuChar(wp, lp); ok {
 			return r, true
@@ -1087,6 +1133,10 @@ func (w *window) SetAlwaysOnTop(v bool) {
 func (w *window) IsAlwaysOnTop() bool { return windowLong(w.hwnd, gwlExStyle)&wsExTopmost != 0 }
 
 func (w *window) Show() {
+	if w.surface != nil && w.surface.cloaked && w.surface.drawn && !w.IsVisible() {
+		w.surface.uncloak()
+		defer w.surface.fillUnder()
+	}
 	if f := w.opts.Flyout; f != nil && !f.Focusable {
 		procShowWindow.Call(w.hwnd, swShowNoActivate)
 		return
@@ -1101,13 +1151,41 @@ func (w *window) Show() {
 }
 
 func (w *window) ShowInactive() {
+	if w.surface != nil && w.surface.cloaked && w.surface.drawn && !w.IsVisible() {
+		w.surface.uncloak()
+		defer w.surface.fillUnder()
+	}
 	if w.showMaximized {
 		// Maximizing activates the window; there is no inactive variant.
 		w.showMaximized = false
 		procShowWindow.Call(w.hwnd, swShowMaximized)
 		return
 	}
+	if !theBackend.background {
+		procShowWindow.Call(w.hwnd, swShowNoActivate)
+		return
+	}
+	// Ordered in before it shows, so that it never shows over that
+	// window, and again after, in case showing it raised it.
+	w.behindForeground()
 	procShowWindow.Call(w.hwnd, swShowNoActivate)
+	w.behindForeground()
+}
+
+// behindForeground puts the window right behind the foreground window,
+// over the others, when another app's window is in the foreground, as the
+// editor of a user who saves while mygo dev -background runs the app: a
+// window shown without activating would show over it. Not behind a
+// topmost window, which would make it topmost too.
+func (w *window) behindForeground() {
+	fg, _, _ := procGetForegroundWindow.Call()
+	if fg == 0 || fg == w.hwnd || windowLong(fg, gwlExStyle)&wsExTopmost != 0 {
+		return
+	}
+	if t, _, _ := procGetWindowThreadProcessId.Call(fg, 0); uint32(t) == currentThreadID() {
+		return // the app's own window
+	}
+	procSetWindowPos.Call(w.hwnd, fg, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
 }
 func (w *window) Hide() { procShowWindow.Call(w.hwnd, swHide) }
 
@@ -1146,6 +1224,20 @@ func (w *window) IsFocused() bool {
 	}
 	fg, _, _ := procGetForegroundWindow.Call()
 	return fg == w.hwnd
+}
+
+// CornerRadius is the 8 DIPs Windows 11 rounds a window's corners with: a
+// window with a frame, a panel, or a frameless one given a CornerRadius
+// (which takes the system's whatever its radius). A maximized or full-screen
+// window, a child host, and every window before Windows 11 are square.
+func (w *window) CornerRadius() float64 {
+	if w.host != nil || !windows11() || w.fullScreen || w.IsMaximized() {
+		return 0
+	}
+	if w.frameless && !w.opts.Panel && w.opts.CornerRadius <= 0 {
+		return 0
+	}
+	return 8
 }
 
 func (w *window) Minimize() { procShowWindow.Call(w.hwnd, swMinimize) }
@@ -1296,9 +1388,9 @@ func (w *window) SetOpacity(v float64) {
 func (w *window) Opacity() float64 { return w.opacity }
 
 // updateLayered makes the window layered while it is translucent or lets
-// the mouse through.
+// the mouse through, all of it or but its input region.
 func (w *window) updateLayered() {
-	layered := w.opacity < 1 || w.ignoreMouse
+	layered := w.opacity < 1 || w.ignoreMouse || w.inputRegion != nil
 	w.setExStyle(wsExLayered, layered)
 	if layered {
 		procSetLayeredWindowAttributes.Call(w.hwnd, 0, uintptr(byte(w.opacity*255+0.5)), lwaAlpha)
@@ -1314,6 +1406,7 @@ func (w *window) updateLayered() {
 // along the top of the client area.
 func (w *window) SetHasShadow(v bool) {
 	w.shadow = v
+	w.applyTransparentFramePolicy()
 	if !w.captionless() || w.vibrancy != "" {
 		return
 	}
@@ -1324,13 +1417,28 @@ func (w *window) SetHasShadow(v bool) {
 	procDwmExtendFrameIntoClientArea.Call(w.hwnd, uintptr(unsafe.Pointer(&m)))
 }
 
-func (w *window) HasShadow() bool { return w.shadow }
-
-func (w *window) SetIgnoreMouseEvents(v bool) {
-	w.ignoreMouse = v
-	w.setExStyle(wsExTransparent, v)
-	w.updateLayered()
+// Transparent web overlays keep native sizing borders for hit testing, but a
+// shadowless frameless window must not draw DWM or GDI decorations over them.
+func (w *window) plainTransparentFrame() bool {
+	return w.frameless && w.opts.Transparent && !w.opts.Surface && w.vibrancy == "" && !w.shadow
 }
+
+func (w *window) applyTransparentFramePolicy() {
+	if !w.frameless || !w.opts.Transparent || w.opts.Surface {
+		return
+	}
+	policy := int32(0) // DWMNCRP_USEWINDOWSTYLE
+	if w.plainTransparentFrame() {
+		policy = 1 // DWMNCRP_DISABLED
+	}
+	const dwmwaNCRenderingPolicy = 2
+	hr, _, _ := procDwmSetWindowAttribute.Call(w.hwnd, dwmwaNCRenderingPolicy, uintptr(unsafe.Pointer(&policy)), 4)
+	if failed(hr) {
+		log.Print(hresultError("setting the transparent window frame policy", hr))
+	}
+}
+
+func (w *window) HasShadow() bool { return w.shadow }
 
 func (w *window) SetContentProtection(v bool) {
 	if !has(procSetWindowDisplayAffinity) {
@@ -1401,6 +1509,7 @@ func (w *window) buttonsDark() bool {
 
 func (w *window) SetVibrancy(material string) {
 	w.vibrancy = material
+	w.applyTransparentFramePolicy()
 	backdrop := backdropFor(material)
 	w.extendGlass(true)
 	procDwmSetWindowAttribute.Call(w.hwnd, dwmwaSystemBackdropType, uintptr(unsafe.Pointer(&backdrop)), 4)

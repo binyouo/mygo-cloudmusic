@@ -1,0 +1,223 @@
+import { ShikiMagicMovePrecompiled } from "@shikijs/magic-move/react"
+import "@shikijs/magic-move/style.css"
+import { Link, createFileRoute } from "@tanstack/react-router"
+import { ArrowRightIcon } from "lucide-react"
+import * as React from "react"
+
+import { GopherRocket } from "@/components/gopher-rocket"
+import { InstallCommand } from "@/components/install-command"
+import { SponsorBanner } from "@/components/sponsor-banner"
+import { buttonVariants } from "@/components/ui/button"
+import { getHome } from "@/lib/home"
+import { useLangParams, useLanguage, useT } from "@/lib/i18n"
+import { site } from "@/lib/site"
+import { cn } from "@/lib/utils"
+import { sponsors } from "@/sponsors"
+
+export const Route = createFileRoute("/{-$lang}/")({
+  loader: () => getHome(),
+  component: Home,
+})
+
+// From the architecture guide, on macOS: a hello-world app, its memory with
+// the processes WKWebView runs for it, and a small window of native UI.
+const stats = [
+  { value: "~7", unit: "MB", label: "Binary" },
+  { value: "~44", unit: "MB", label: "Memory, native UI" },
+  { value: "~62", unit: "MB", label: "Memory, webview included" },
+  { value: "0", unit: "%", label: "CPU at idle" },
+]
+
+// README.md's lists, in short.
+const features = [
+  {
+    title: "Web frontends",
+    text: "Any web stack, in the webview the OS already has: WKWebView, WebKitGTK, WebView2. No browser bundled.",
+    slug: "frontend",
+  },
+  {
+    title: "Native UI",
+    text: "Interfaces written in Go alone and drawn on the GPU: flexbox and grid layout, widgets, text editing, screen reader support. No webview at all.",
+    slug: "ui",
+  },
+  {
+    title: "Typed IPC",
+    text: "Pages call bound Go services, stream values through channels and get typed events. The TypeScript client is generated from your Go code.",
+    slug: "bindings",
+  },
+  {
+    title: "Desktop APIs",
+    text: "Windows, menus, tray, dialogs, notifications, global shortcuts, deep links, file associations and more, for windows of both kinds.",
+    slug: "native",
+  },
+  { title: "Pure Go, no cgo", text: "Build for every platform from any machine.", slug: "distribution" },
+  {
+    title: "Ready to ship",
+    text: "App bundles and disk images, Windows installers, Debian and RPM packages, code signing, notarization and signed auto-updates.",
+    slug: "distribution",
+  },
+]
+
+const kinds = [
+  { id: "native", label: "Native UI" },
+  { id: "web", label: "Web frontend" },
+] as const
+
+type Kind = (typeof kinds)[number]["id"]
+
+// main.go morphs between the two kinds: what both share moves, the rest
+// fades. The colors come from .shiki's variables, not the container.
+const magicMove = { duration: 600, stagger: 0, containerStyle: false, animateContainer: true }
+
+function Home() {
+  const t = useT()
+  const lang = useLanguage()
+  const lp = useLangParams()
+  const { main, ts } = Route.useLoaderData()
+  const [kind, setKind] = React.useState<Kind>("native")
+  // The code appears as it is, and only moves once the reader switches,
+  // unless they asked for less motion.
+  const [animate, setAnimate] = React.useState(false)
+  return (
+    <main>
+      <section className="relative px-4 py-20 sm:px-10 md:py-28">
+        <GopherRocket className="pointer-events-none absolute inset-y-0 right-0 hidden w-[40%] lg:block xl:w-[46%]" />
+        <div className="relative lg:w-3/5 xl:w-[54%]">
+          <a href={`${site.repo}/releases/tag/v${__MYGO_VERSION__}`} className="label inline-flex items-center gap-2 hover:text-foreground">
+            <span className="size-1.5 rounded-full bg-gopher" />v{__MYGO_VERSION__} · macOS, Linux, Windows
+          </a>
+          {/* Chinese characters are as wide as the type is tall: its headline is smaller, and its lines balanced. */}
+          <h1
+            className={cn(
+              "mt-6 font-semibold tracking-[-0.04em]",
+              lang === "zh" ? "text-balance text-4xl leading-tight sm:text-5xl" : "text-4xl leading-[1.05] sm:text-5xl md:text-6xl"
+            )}
+          >
+            {t("Desktop apps in Go.")}
+            <span className="block text-muted-foreground">{t("Tiny, fast, fully typed.")}</span>
+          </h1>
+          <p className="mt-6 max-w-xl text-lg leading-8 text-muted-foreground">
+            {t("One small binary for macOS, Windows and Linux. Native UI or a web frontend in Go, with installers and auto-updates included.")}
+          </p>
+          <div className="mt-10 flex flex-wrap items-center gap-3">
+            <InstallCommand />
+            <Link to="/{-$lang}/docs/$" params={{ ...lp, _splat: "getting-started" }} className={buttonVariants({ size: "lg", className: "h-11 px-5" })}>
+              {t("Get started")} <ArrowRightIcon />
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      <dl className="grid grid-cols-2 gap-px border-t bg-border md:grid-cols-4">
+        {stats.map((stat) => (
+          <div key={stat.label} className="flex flex-col-reverse justify-end gap-2 bg-background px-4 py-6 sm:px-10 sm:py-8">
+            <dt className="label">{t(stat.label)}</dt>
+            <dd className="text-3xl font-semibold tracking-tight tabular-nums sm:text-4xl">
+              {stat.value}
+              <span className="ml-1 text-base font-normal text-muted-foreground">{stat.unit}</span>
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      <section className="border-t px-4 py-12 sm:px-10">
+        <h2 className="label">{t("Sponsors")}</h2>
+        <ul className="mt-6 grid gap-6">
+          {sponsors.map((sponsor) => (
+            <li key={sponsor.url}>
+              <SponsorBanner sponsor={sponsor} />
+            </li>
+          ))}
+        </ul>
+        <p className="mt-6 text-sm">
+          <Link to="/{-$lang}/sponsors" params={lp} className="font-medium underline decoration-gopher/45 underline-offset-[5px] hover:decoration-gopher">
+            {t("Become a sponsor")}
+          </Link>
+        </p>
+      </section>
+
+      <div className="border-t bg-code">
+        <div role="tablist" aria-label={t("Kind of window")} className="flex border-b">
+          {kinds.map((k) => (
+            <button
+              key={k.id}
+              type="button"
+              role="tab"
+              id={`tab-${k.id}`}
+              aria-selected={kind === k.id}
+              aria-controls="code-panel"
+              onClick={() => {
+                setKind(k.id)
+                setAnimate(!window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+              }}
+              className={cn(
+                "label -mb-px border-r border-b border-b-transparent px-4 py-3 transition-colors hover:text-foreground sm:px-6",
+                kind === k.id && "border-b-gopher bg-background text-foreground"
+              )}
+            >
+              {t(k.label)}
+            </button>
+          ))}
+        </div>
+        <div role="tabpanel" id="code-panel" aria-labelledby={`tab-${kind}`} className="grid lg:grid-cols-[1.3fr_1fr] lg:divide-x">
+          <figure className="min-w-0">
+            <figcaption className="label border-b px-4 py-3 sm:px-6">main.go</figcaption>
+            <div className="shiki overflow-x-auto px-4 py-5 sm:px-6">
+              <ShikiMagicMovePrecompiled
+                steps={main}
+                step={kind === "web" ? 0 : 1}
+                animate={animate}
+                options={magicMove}
+              />
+            </div>
+          </figure>
+          {kind === "web" ? (
+            <figure className="flex min-w-0 flex-col border-t lg:border-t-0">
+              <figcaption className="label border-b px-4 py-3 sm:px-6">src/main.ts</figcaption>
+              <div className="overflow-x-auto px-4 py-5 sm:px-6" dangerouslySetInnerHTML={{ __html: ts }} />
+              <p className="mt-auto border-t px-4 py-4 text-sm leading-6 text-muted-foreground sm:px-6">
+                <code className="font-mono text-foreground">./mygo</code>{" "}
+                {t("is generated from main.go, with the types of your structs and the docs of your methods.")}
+              </p>
+            </figure>
+          ) : (
+            <div className="flex min-w-0 flex-col border-t lg:border-t-0">
+              <p className="label border-b px-4 py-3 sm:px-6">{t("No webview")}</p>
+              <div className="space-y-4 px-4 py-5 text-sm leading-6 text-muted-foreground sm:px-6">
+                <p>
+                  {t(
+                    "The view is a Go function of your app's state. MyGo calls it to build each frame and draws it on the GPU, with Metal, Direct3D or OpenGL: no HTML, no JavaScript, no bindings."
+                  )}
+                </p>
+                <p>{t("Its windows open at once, and an app of native UI alone needs only Go to build and no webview to run.")}</p>
+              </div>
+              <figure className="mt-auto border-t">
+                <figcaption className="label border-b px-4 py-3 sm:px-6">{t("Start a project")}</figcaption>
+                <pre className="overflow-x-auto px-4 py-4 font-mono text-[13px] leading-[1.7] sm:px-6">
+                  <span className="text-gopher-ink select-none">$ </span>
+                  {"go run github.com/egoist/mygo/cmd/mygo@latest \\\n    init -template native my-app\n"}
+                  <span className="text-gopher-ink select-none">$ </span>
+                  {"cd my-app && go tool mygo dev"}
+                </pre>
+              </figure>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <ul className="grid gap-px border-t bg-border sm:grid-cols-2">
+        {features.map((feature) => (
+          <li key={feature.title} className="bg-background">
+            <Link to="/{-$lang}/docs/$" params={{ ...lp, _splat: feature.slug }} className="group flex h-full flex-col px-4 py-8 transition-colors hover:bg-code sm:px-10">
+              <h2 className="flex items-center justify-between font-semibold tracking-tight">
+                {t(feature.title)}
+                <ArrowRightIcon className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+              </h2>
+              <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">{t(feature.text)}</p>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </main>
+  )
+}

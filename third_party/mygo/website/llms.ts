@@ -13,10 +13,45 @@ import type { Plugin } from "vite"
 import { omitRepositoryOnly, rewriteHref, slugOf, type LinkOptions } from "./src/lib/markdown-source.ts"
 import { site } from "./src/lib/site.ts"
 
+/** A tree of the docs: the English pages and their Chinese, at ../docs-zh. */
+const trees = (repoDir: string) => [
+  { dir: path.join(repoDir, "docs"), basePath: "/docs", index: true },
+  { dir: path.join(repoDir, "docs-zh"), basePath: "/zh/docs", index: false },
+]
+
 /** All downloads, keyed by their site path, for the build and dev server. */
 export async function docsAssets(repoDir: string): Promise<Map<string, string>> {
-  const docsDir = path.join(repoDir, "docs")
-  const links: LinkOptions = { docsDir, repoDir, repoUrl: site.repo }
+  const assets = new Map<string, string>()
+  const books = { docs: [] as string[], ui: [] as string[] }
+  const full: string[] = [`# ${site.name} documentation`, site.description]
+  for (const tree of trees(repoDir)) {
+    // A tree not translated yet, as in a checkout of the English docs alone.
+    if (!(await fs.stat(tree.dir).catch(() => null))) continue
+    await markdownAssets(repoDir, tree.dir, tree.basePath, tree.index, assets, books, full)
+  }
+  assets.set("/llms.txt", [
+    `# ${site.name}`,
+    `> ${site.description}`,
+    `Individual Markdown pages are listed below. All documentation is also available at ${site.url}/llms-full.txt.`,
+    "## Documentation\n\n" + books.docs.join("\n"),
+    "## Native UI\n\n" + books.ui.join("\n"),
+  ].join("\n\n") + "\n")
+  assets.set("/llms-full.txt", full.join("\n\n") + "\n")
+  return assets
+}
+
+/** The Markdown of every page of a tree; the English one's pages also make llms.txt and llms-full.txt. */
+async function markdownAssets(
+  repoDir: string,
+  docsDir: string,
+  basePath: string,
+  listed: boolean,
+  assets: Map<string, string>,
+  books: { docs: string[]; ui: string[] },
+  full: string[]
+) {
+  const processor = unified().use(remarkParse).use(remarkGfm).use(remarkStringify, { fences: true })
+  const links: LinkOptions = { docsDir, repoDir, repoUrl: site.repo, basePath }
   const files = (await fs.readdir(docsDir, { recursive: true }))
     .filter((file) => file.endsWith(".md"))
     .sort((a, b) => {
@@ -24,11 +59,6 @@ export async function docsAssets(repoDir: string): Promise<Map<string, string>> 
       const key = (file: string) => file.replace(/(^|[\\/])README\.md$/, "$1")
       return key(a).localeCompare(key(b), "en")
     })
-  const assets = new Map<string, string>()
-  const books = { docs: [] as string[], ui: [] as string[] }
-  const full: string[] = [`# ${site.name} documentation`, site.description]
-  const processor = unified().use(remarkParse).use(remarkGfm).use(remarkStringify, { fences: true })
-
   for (const file of files) {
     const abs = path.join(docsDir, file)
     const tree = processor.parse(await fs.readFile(abs, "utf8")) as Root
@@ -40,7 +70,7 @@ export async function docsAssets(repoDir: string): Promise<Map<string, string>> 
       node.url = href.startsWith("/") && !href.startsWith("//") ? new URL(href, site.url).href : href
     })
     const slug = slugOf(file)
-    const pathname = (slug ? `/docs/${slug}` : "/docs") + ".md"
+    const pathname = basePath + (slug ? `/${slug}` : "") + ".md"
     if (assets.has(pathname)) throw new Error(`Duplicate Markdown page: ${pathname}`)
     const url = site.url + pathname
     const title = tree.children.find((node) => node.type === "heading" && node.depth === 1)
@@ -49,21 +79,12 @@ export async function docsAssets(repoDir: string): Promise<Map<string, string>> 
     const description = lead ? toString(lead).replace(/\s+/g, " ") : ""
     const source = processor.stringify(tree)
     assets.set(pathname, source)
+    if (!listed) continue
     const book = slug === "ui" || slug.startsWith("ui/") ? "ui" : "docs"
     const label = name.replace(/[\[\]\\]/g, "\\$&")
     books[book].push(`- [${label}](${url})${description ? `: ${description}` : ""}`)
     full.push(`---\n\nSource: ${url}\n\n${source.trimEnd()}`)
   }
-
-  assets.set("/llms.txt", [
-    `# ${site.name}`,
-    `> ${site.description}`,
-    `Individual Markdown pages are listed below. All documentation is also available at ${site.url}/llms-full.txt.`,
-    "## Documentation\n\n" + books.docs.join("\n"),
-    "## Native UI\n\n" + books.ui.join("\n"),
-  ].join("\n\n") + "\n")
-  assets.set("/llms-full.txt", full.join("\n\n") + "\n")
-  return assets
 }
 
 export function llmsDocs(repoDir: string): Plugin {
@@ -78,7 +99,7 @@ export function llmsDocs(repoDir: string): Plugin {
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         const pathname = req.url?.split("?", 1)[0] ?? ""
-        if (pathname !== "/llms.txt" && pathname !== "/llms-full.txt" && !/^\/docs(?:\/.*)?\.md$/.test(pathname)) return next()
+        if (pathname !== "/llms.txt" && pathname !== "/llms-full.txt" && !/^(?:\/zh)?\/docs(?:\/.*)?\.md$/.test(pathname)) return next()
         try {
           const source = (await docsAssets(repoDir)).get(pathname)
           if (source === undefined) return next()

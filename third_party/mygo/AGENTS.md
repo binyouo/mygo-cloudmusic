@@ -11,15 +11,21 @@ wire protocol, TypeScript generation, and the checklist for adding features.
 
 ## Hard rules
 
-- **No cgo.** Everything must build with `CGO_ENABLED=0`. Call native code
-  through purego (`internal/darwin`, `internal/linux`) or `syscall`
-  (`internal/windows`), never `import "C"`.
+- **No cgo**, but to link for phones. Everything must build with
+  `CGO_ENABLED=0` for desktops and browsers. Call native code through
+  purego (`internal/darwin`, `internal/linux`) or `syscall`
+  (`internal/windows`), never `import "C"`. iOS and Android link with
+  their own toolchains (`CGO_ENABLED=1`, Xcode's and the NDK's clang), as
+  Go needs for them: `import "C"` is only in `internal/mobile`'s glue, and
+  on iOS purego reaches Metal and Core Text alone, the hosts (Swift,
+  Kotlin) everything else (see "Phones" in the architecture guide).
 - **Bun is dev tooling only.** The repository is a Bun workspace
   (`packages/bridge`, `packages/runtime`, `packages/cli` with its platform
   packages, the plugins' packages in `plugins/`, and examples with a frontend, which keep it at their root like
   the project template, and `website`); Bun also installs and runs the template's scripts
   (Vite, the mygo-cli package). Nothing in an app may need Bun at run time.
-- **Scope:** system webview on macOS, Linux and Windows (WebView2), and
+- **Scope:** system webview on macOS, Linux and Windows (WebView2), on
+  iOS and Android (`internal/mobile`, with Swift and Kotlin hosts), and
   native UI that MyGo draws itself (`WindowOptions.Content`, package `ui`;
   see "Native UI" in the architecture guide), which also runs in browsers
   (`GOOS=js GOARCH=wasm`, `internal/web`, drawn with WebGL 2 by the GL
@@ -55,6 +61,8 @@ go build ./... && GOOS=linux go build ./... && GOOS=windows go build ./...  # al
 go vet ./... && GOOS=linux go vet ./... && GOOS=windows go vet ./...
 go vet -tags mygo_noinspector ./...        # production builds, without the inspector of native UI
 GOOS=js GOARCH=wasm go vet $(GOOS=js GOARCH=wasm go list ./... | grep -v /cmd/mygo)  # browsers, all but the CLI
+GOOS=ios GOARCH=arm64 CGO_ENABLED=1 CC="$(xcrun --sdk iphoneos --find clang) -isysroot $(xcrun --sdk iphoneos --show-sdk-path) -arch arm64" go vet ./...  # iPhones (Xcode)
+GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android26-clang go vet ./...  # Android (the NDK)
 go test ./...                              # core (fake backend), tsgen, CLI, accelerator
 go build -trimpath -tags mygo_noinspector -ldflags "-s -w -X github.com/egoist/mygo.production=1" -o /tmp/counter-native ./examples/counter-native  # an app's release size, as the benchmarks build it
 MYGO_E2E=1 go test ./internal/e2e          # real GUI tests (macOS desktop session)
@@ -65,7 +73,15 @@ go run ./cmd/mygo generate examples/todo   # regenerate an example's TypeScript 
 go run ./cmd/mygo dev examples/todo        # live reload (dev bundle in examples/todo/.mygo)
 go run ./cmd/mygo dev -web examples/counter-native   # native UI in the browser, with live reload
 go run ./cmd/mygo build examples/todo      # .app + .dmg in examples/todo/build
+go run ./cmd/mygo generate examples/native-module   # regenerate a native module, build its Swift package (macOS)
+go run ./cmd/mygo native check examples/native-module/modules/language   # a native module's problems, as file:line
 go run ./cmd/mygo build -platform web examples/counter-native   # a static site in examples/counter-native/dist/web
+go run ./cmd/mygo dev -platform ios examples/todo        # on the booted iOS simulator (Xcode)
+go run ./cmd/mygo dev -platform android examples/todo    # on the device or emulator adb reaches (SDK + NDK)
+go run ./cmd/mygo build -platform ios/simulator examples/counter-native   # an .app for the simulator (ios: a signed .ipa)
+go run ./cmd/mygo build -platform android examples/counter-native         # an .apk and an .aab
+go generate ./internal/mobile/wire          # the messages of phones' backend and hosts: Go, Swift, Kotlin
+go run ./cmd/mygo dev -platform ios examples/mobile      # phones' gestures, widgets, plugins (ui/mobile)
 go run ./examples/gallery                  # the native UI toolkit's tour
 go run ./examples/code-editor              # the code editor and the diff viewer (ui/editor)
 go run ./examples/markdown-chat            # Markdown replies streaming in (ui/markdown)
@@ -73,8 +89,11 @@ go run ./examples/notes                    # the rich text editor (ui/richtext),
 go run ./examples/terminal                 # a terminal (downloads libghostty-vt once)
 go run ./examples/loading                  # loading.dev's 29 indicators (plugins/loading)
 go run ./examples/permissionflow           # the system's permissions, asked for and guided to (plugins/permissionflow)
+go run ./examples/render                   # a video of native UI, drawn on the GPU (plugins/render); -preview plays it in a window
 go run ./plugins/automation/cmd/mygo-automation skills   # the automation CLI's guide, for agents driving an app
 go run ./examples/sf-symbols               # the system's SF Symbols on macOS (plugins/sfsymbols)
+go run ./cmd/mygo native build -target host examples/rust-native  # build a package's Rust/Zig library for go run and go test (cargo)
+go run ./cmd/mygo native build ./pkg       # its libraries for every platform, into mygo-plugin.json, ready to publish
 go generate ./plugins/terminal             # build libghostty-vt for every platform (with Zig), write Ghostty's themes
 go generate ./internal/gpu/d3d11           # recompile the Direct3D shader (on Windows)
 go generate ./internal/gpu/metal           # recompile the Metal shader (on macOS, with Xcode)
@@ -100,16 +119,41 @@ Windows GUI tests need Windows with the WebView2 Runtime (a GitHub Actions
   benchmarks branch's commits say it.
 - New behavior goes into `package mygo` first; backends only translate
   `internal/platform` calls to native ones. Implement every platform method in
-  `darwin`, `linux`, `windows`, `web`, `fake` and `unsupported`.
+  `darwin`, `linux`, `windows`, `web`, `mobile`, `fake` and `unsupported`.
+  A call of `mobile`'s host is a message of `internal/mobile/wire/gen/spec.go`,
+  implemented in the Swift host (`internal/mobile/ios`) and the Kotlin one
+  (`internal/mobile/android`).
 - Objective-C: `alloc`/`init` objects are owned and must be released; wrap
   temporary objects in `withPool`; copy blocks you call later.
+- Native modules (`native`, `internal/nativegen`, docs/native-modules.md):
+  keep the generated example (`examples/native-module`) up to date, which
+  `TestExampleUpToDate` checks, and change the Swift glue in
+  `internal/nativegen/support.go` with `TestScaffoldBuilds` passing
+  without warnings. The Rust and Zig glue (`rustsupport.go`,
+  `zigsupport.go`) is checked by the roundtrip module built in each
+  language: `go run ./cmd/mygo native build -target host -lang <swift|rust|zig>
+  native/internal/roundtrip && go test ./native/internal/roundtrip`. On
+  phones the same checks (`native/internal/roundtrip/check`) run in the app
+  `native/internal/roundtrip/app`, with its Swift on the iOS simulator and
+  its Kotlin (the runtime in `internal/mobile/android/.../Native.kt`) on
+  Android's emulator, which CI's phone jobs launch and read the log of;
+  `TestKotlinUpToDate` checks the committed Kotlin.
 - Official plugins live in `plugins/<name>`: the Go package and its npm
   package (`@mygo-plugins/<name>`) side by side, released with
   mygo-runtime's version. The updater plugin is Go only; its `native`
   package draws the update window in native UI. The terminal plugin is Go
-  only too, for native UI, with libghostty-vt loaded through purego: its
-  `mygo-plugin.json` pins the builds the CLI puts into apps, published as
-  release assets (`libghostty-vt-<commit>`); change it with `go generate`. The glass
+  only too, for native UI, with libghostty-vt loaded through purego. Its
+  `native/` (a Zig package pinning Ghostty's commit) is a native library
+  like any: `mygo-plugin.json` names its published builds (release assets
+  `libghostty-vt-<commit>`), each with the hash of its sources, and
+  `go generate` publishes new ones (`mygo native build`, with Zig 0.16.0).
+  The SQLite plugin's SQLite is a native module,
+  `plugins/sqlite/internal/sqlitecore`: Zig on desktops, which `mygo
+  native build -target host` builds for its tests and `-upload`
+  publishes, Swift on iOS (linking `CSQLite.xcframework`, which
+  `swift/build-xcframework.sh` builds on a Mac and the release
+  `native-sqlitecore` holds) and Kotlin with C (CMake) on Android, all
+  the same SQLite version and options. The glass
   plugin is Go only too, an effect of the renderers (`scene.Effect`): its
   shader in Metal, HLSL and GLSL with a CPU twin that must draw the same
   pixels, compiled ahead of time by `go generate` on macOS and Windows.
@@ -127,10 +171,23 @@ Windows GUI tests need Windows with the WebView2 Runtime (a GitHub Actions
   `mygo-automation` (`plugins/automation/cmd/mygo-automation`, the code
   in `internal/automationcli`), uses the socket alone and Go's standard
   library; keep its embedded `SKILL.md` true to its commands.
+  The location, imagepicker, camera, videoplayer, biometrics, sensors and
+  push plugins are for phones, with Swift and Kotlin beside the Go, which
+  their `mygo-plugin.json`'s `mobile` names: they reach it with
+  `mygo.Native`, and an app has none of it unless it imports them. Package
+  `ui/mobile` is phones' widgets on ui's public API.
   The permissionflow plugin is Go only too, after PermissionFlow: TCC's
   permissions through purego on macOS, with a panel of AppKit under
   System Settings to drag the app from, the consent store on Windows,
   and errors.ErrUnsupported elsewhere.
+  The render plugin is Go only too: videos of native UI, built frame by
+  frame by `ui.Recorder` at the video's times, drawn by the GPU
+  renderers' frame targets (`metal.Frames`, `d3d11.Frames`,
+  `gl.Offscreen`) or `internal/raster`, and encoded with AVFoundation,
+  Media Foundation or GStreamer through purego and syscall, or ffmpeg
+  when asked. Its tests check frames against the CPU renderer's and the
+  files' tracks; Media Foundation and GStreamer run on temp-runner and in
+  Docker.
 - The `dist/` of npm packages is not committed: run `bun run build` after
   `bun install` (CI and releases do). Commit `internal/bridge/bridge.js`
   whenever its sources change, and keep the generated clients of examples
@@ -143,6 +200,12 @@ Windows GUI tests need Windows with the WebView2 Runtime (a GitHub Actions
   template depends on both. Pushing a `v<version>` tag releases everything
   (`.github/workflows/release.yml`, see "Releasing" in the architecture
   guide); never commit the CLI's binaries.
+- Native libraries of apps and plugins (Rust crates, Zig packages, C) are
+  named in the binding package's `mygo-plugin.json` (`internal/nativelib`)
+  and loaded and bound with package `ffi`, never with a loader of their
+  own: the CLI builds those with `build` from their sources in `mygo dev`
+  and `mygo build`, and `mygo native build` publishes them for the apps of
+  others.
 - The configuration types of `packages/cli/index.d.ts` (for `mygo.config.ts`)
   mirror `Config` in `cmd/mygo/config.go`; `TestConfigTypes` checks them.
 - Tests: unit tests through `internal/fake`; GUI behavior in `internal/e2e`.

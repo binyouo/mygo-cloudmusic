@@ -1,4 +1,4 @@
-//go:build linux && (amd64 || arm64)
+//go:build linux && !android && (amd64 || arm64)
 
 package linux
 
@@ -44,6 +44,10 @@ func portalSignal(conn, sender, path, iface, signal, params, data ptr) {
 		gVariantUnref(results)
 	case "Activated":
 		theBackend.shortcutActivated(params)
+	case "ShortcutsChanged":
+		if changed := theBackend.portal.changed; changed != nil {
+			changed(params)
+		}
 	case "SettingChanged":
 		// A preference, or the color scheme, changed.
 		ns := gVariantGetChildValue(params, 0)
@@ -54,6 +58,10 @@ func portalSignal(conn, sender, path, iface, signal, params, data ptr) {
 		gVariantUnref(k)
 		if name != appearanceSettings && name != gnomeInterfaceSettings {
 			return
+		}
+		if name == appearanceSettings && key == "color-scheme" && traysAppearanceChanged != nil {
+			// The panels follow the desktop's scheme, whatever the app's.
+			traysAppearanceChanged()
 		}
 		// GTK tells ThemeChanged itself when its setting changes.
 		if name == appearanceSettings && key == "color-scheme" && followsSystem() && followSystemScheme(gtkSettingsGetDefault()) {
@@ -86,6 +94,7 @@ func portalSettings(namespaces ...string) (ptr, bool) {
 	}
 	typ := gVariantTypeNew(cs("s"))
 	arr := gVariantNewArray(typ, unsafe.Pointer(&names[0]), uintptr(len(names)))
+	gVariantTypeFree(typ) // the array has its own
 	res, err := portalCall(portalPath, "org.freedesktop.portal.Settings", "ReadAll", tuple(arr), "(a{sa{sv}})")
 	if err != nil {
 		return 0, false
@@ -98,7 +107,9 @@ func portalSettings(namespaces ...string) (ptr, bool) {
 // portalSetting returns the value of key in namespace of the settings
 // portalSettings read, if it is of type typ, which the caller unrefs.
 func portalSetting(all ptr, namespace, key, typ string) ptr {
-	ns := gVariantLookupValue(all, cs(namespace), gVariantTypeNew(cs("a{sv}")))
+	dict := gVariantTypeNew(cs("a{sv}"))
+	ns := gVariantLookupValue(all, cs(namespace), dict)
+	gVariantTypeFree(dict)
 	if ns == 0 {
 		return 0
 	}

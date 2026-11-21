@@ -1,0 +1,96 @@
+MyGo 文档的中文翻译：译者须知
+================================
+
+This directory holds the Simplified Chinese of ../docs, page for page.
+(architecture.md is not translated: /zh/docs/architecture renders the English
+page, as any page without a translation here does.) The
+website serves it under /zh/docs; a page without a translation falls back to
+English, so a missing file is not an error. Do not change this file.
+
+Rules
+-----
+
+- Translate into Simplified Chinese (简体中文), technical and concise, in the
+  register of the English docs: direct, plain, no marketing. Address the reader
+  as 你, never 您. Use Chinese punctuation (，。：；！？、“”‘’（）——……), with a
+  space between Chinese text and inline code, Latin words and numbers, as in
+  `ui` 包, Go 1.24.
+- Keep the structure of the page: the same headings, paragraphs, list items,
+  tables, blockquotes, links and code blocks, in the same order. Do not add,
+  merge, split or drop sections, examples or sentences. Do not add summaries,
+  notes or translator remarks.
+- `#` at the top is the page's title: translate it like the rest, and make it
+  the same as the page's title in the README's list of pages.
+- Code blocks (```) and their content are byte for byte the English, comments
+  included: users compare them with the code. Inline code is unchanged too.
+  The number of fences and their info strings must match the source.
+- Links: translate their text, keep their URL. A link to another page of the
+  docs keeps its file name (`bindings.md`, `plugins/fetch.md`). If you wrote
+  the target page in this batch, make its anchor (`#the-anchor`) the GitHub
+  slug of the translated heading: lowercase, spaces to hyphens, punctuation
+  dropped. Otherwise keep the English anchor.
+- Keep raw HTML and comments exactly: `<!-- preview name 140 -->`,
+  `<!-- app name 480 -->`, `<!-- repository-only:start/end -->`, `<img>`,
+  `<picture>`, `<source>`, `<br>`. Translate only their visible text and alt
+  text.
+- Do not translate: identifiers, API names, types, methods, fields, files,
+  directories, commands, flags, environment variables, versions, URLs, and
+  the names of products: MyGo, Go, cgo, IPC, WKWebView, WebKitGTK, WebView2,
+  GPU, Metal, Direct3D, OpenGL, macOS, Linux, Windows, GitHub, Xcode, Swift,
+  Rust, Zig, Bun, npm, Shiki, GTK, AppKit, TCC, CLDR, ICU, JSON, YAML, SQLite.
+  `ui.Button`, `app.Run`, `mygo.json`, `MYGO_AUTOMATION` stay as they are.
+- Keep the English of a term in parentheses the first time where the code uses
+  it and the translation could be mistaken, such as 绑定（binding）; elsewhere
+  translate plainly.
+
+Terms
+-----
+
+app 应用; application 应用; package 包; module 模块; plugin 插件; backend 后端;
+frontend 前端; web frontend Web 前端; web page 网页; webview webview;
+native UI 原生 UI; window 窗口; menu 菜单; menu bar 菜单栏; menu item 菜单项;
+tray 托盘; dialog 对话框; alert 警告框; popover 浮层; tooltip 工具提示;
+sheet 表单; overlay 浮层; widget 控件; view 视图; layout 布局; frame 帧;
+renderer 渲染器; render 渲染; surface 绘制表面; scene 场景; canvas 画布;
+text layout 文本排版; glyph 字形; font 字体; accessibility 辅助功能;
+screen reader 屏幕阅读器; binding 绑定; handler 处理器; callback 回调;
+channel 通道; event 事件; thread 线程; goroutine goroutine; main thread 主线程;
+build 构建; bundle 打包; app bundle 应用包; installer 安装程序;
+disk image 磁盘映像; code signing 代码签名; notarization 公证;
+auto-update 自动更新; release 发布; benchmark 基准测试; test 测试;
+catalog 目录; message catalog 消息目录; plural 复数; locale 区域设置;
+permission 权限; shortcut 快捷键; deep link 深度链接; file association 文件关联;
+clipboard 剪贴板; drag and drop 拖放; document 文稿; tab 标签页;
+sidebar 侧边栏; toolbar 工具栏; list 列表; table 表格; chart 图表;
+row 行; column 列; cell 单元格; button 按钮; checkbox 复选框; radio 单选按钮;
+slider 滑块; switch 开关; toggle 切换按钮; dropdown 下拉菜单;
+text field 文本框; text input 文本输入; editor 编辑器; code editor 代码编辑器;
+rich text 富文本; search 搜索; theme 主题; dark mode 深色模式;
+light mode 浅色模式; animation 动画; transition 过渡; motion 动效;
+shader 着色器; effect 效果; blur 模糊; scroll 滚动; viewport 视口;
+focus 焦点; keyboard 键盘; mouse 鼠标; touch 触摸; gesture 手势;
+gamepad 游戏手柄; terminal 终端; automation 自动化; inspector 检查器;
+memory 内存; binary 二进制文件; startup 启动; idle 空闲; frame rate 帧率;
+DPI DIP; responsive 响应式; distribution 分发; configuration 配置;
+generated 生成; type-safe 类型安全; cross-platform 跨平台.
+
+Style of the prose
+------------------
+
+Write Chinese that reads as if it had been written in Chinese, not a
+word-for-word rendering of the English: split long English sentences, move
+the subject and the time to where Chinese puts them, and drop pronouns the
+sentence does not need. Technical, direct, no marketing.
+
+Prose terms are translated, never left in English without a reason: release
+发布版本, artifact 产物, build 构建, upload 上传, feature 功能, default 默认值,
+call 调用, return 返回. A name the code uses is written as code: "没有 `updates`
+配置时", not "没有 updates 时"; "`-upload` 无处可传". Keep such names in
+backticks so they read as identifiers rather than untranslated words.
+
+Avoid 的的, a second 时 in one clause, and "在没有…时" piled up: "没有发布版本
+时，`-upload` 无处可传" is enough.
+
+A page's title in the navigation comes from the README's lists
+(`- [Title](page.md): what it covers`): translate the title and the
+description, keep the list and the link.

@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && !ios
 
 package metal
 
@@ -30,6 +30,104 @@ func unavailable(t testing.TB, err error) {
 		t.Fatal("no Metal (MYGO_GPU_REQUIRED is set):", err)
 	}
 	t.Skip("no Metal:", err)
+}
+
+// needSpecialized skips a test of the specialized pipelines on a GPU that has
+// none (canSpecialize).
+func needSpecialized(t *testing.T, r *Renderer) {
+	t.Helper()
+	if !r.canSpecialize {
+		t.Skip("the GPU draws with the general pipeline alone")
+	}
+}
+
+// TestOlderGPUsDrawWithTheGeneralPipeline checks that a renderer whose GPU
+// is older than Metal's Mac2 family (#1566) warms no specialized pipeline,
+// draws every class with the general one, compiling none, and keeps its
+// batches together, and that one in the family warms them.
+func TestOlderGPUsDrawWithTheGeneralPipeline(t *testing.T) {
+	older, mac2 := &Renderer{}, &Renderer{canSpecialize: true}
+	for _, format := range []uint{pixelFormatBGRA8Unorm, pixelFormatRGBA16Float} {
+		if keys := older.warmSet(format); len(keys) != 0 {
+			t.Errorf("format %d: an older GPU warms %d pipelines", format, len(keys))
+		}
+		if len(mac2.warmSet(format)) == 0 {
+			t.Errorf("format %d: a GPU of the Mac2 family warms no pipeline", format)
+		}
+		for cl := range uint32(1 << gpu.NumClasses) {
+			for _, mode := range []blendMode{blendOver, blendNone, blendHole} {
+				if older.specializable(format, cl, mode) {
+					t.Errorf("format %d: an older GPU specializes the classes %b blended as %d", format, cl, mode)
+				}
+			}
+		}
+	}
+	if !mac2.specializable(pixelFormatBGRA8Unorm, 1<<gpu.ClassPlain, blendOver) {
+		t.Error("a GPU of the Mac2 family does not specialize plain fills")
+	}
+
+	r, err := newRenderer()
+	if err != nil {
+		unavailable(t, err)
+	}
+	defer r.Release()
+	r.canSpecialize, r.b.Classes = false, false // as newRenderer leaves an older GPU's
+	renderRaw(t, r, gputest.BoxesScene(640, 400, 120, false), false)
+	for _, b := range r.b.Batches {
+		if b.Class != gpu.ClassGeneral || b.Joined != 0 {
+			t.Fatalf("a batch of class %d (joined %b) on an older GPU", b.Class, b.Joined)
+		}
+	}
+	r.pipes.mu.Lock()
+	queued, fallbacks := len(r.pipes.queued), r.pipes.fallbacks
+	r.pipes.mu.Unlock()
+	if built, failed := r.pipelineCounts(); built != 0 || failed != 0 || queued != 0 || fallbacks != 0 {
+		t.Errorf("an older GPU built %d specialized pipelines (%d failed, %d queued, %d batches awaiting one)", built, failed, queued, fallbacks)
+	}
+}
+
+// TestCoresBlend keeps legacy cores blended, float16 cores blended on every
+// device, and modern BGRA8 cores unblended. Holes and specialized cache keys
+// must retain their own blend modes.
+func TestCoresBlend(t *testing.T) {
+	for _, modern := range []bool{false, true} {
+		for _, format := range []uint{pixelFormatBGRA8Unorm, pixelFormatRGBA16Float} {
+			r := &Renderer{canSpecialize: modern}
+			f := &formatState{format: format, pipeline: 1, opaquePipe: 2, holePipe: 3}
+			wantCore := f.opaquePipe
+			if !modern || format == pixelFormatRGBA16Float {
+				wantCore = f.pipeline
+			}
+			for _, tc := range []struct {
+				mode blendMode
+				want id
+			}{{blendOver, f.pipeline}, {blendNone, wantCore}, {blendHole, f.holePipe}} {
+				if got := r.pipeFor(f, 1<<gpu.ClassGeneral, false, tc.mode); got != tc.want {
+					t.Errorf("modern=%v format=%d mode=%d: pipeline %d, want %d", modern, format, tc.mode, got, tc.want)
+				}
+			}
+			// Seed both keys: selecting the wrong mode must not silently fall
+			// back to the general pipeline and hide a cache-key regression.
+			if modern {
+				cl := uint32(1 << gpu.ClassPlain)
+				r.pipes.ready = map[pipeKey]id{
+					{format, cl, false, blendOver}: 4,
+					{format, cl, false, blendNone}: 5,
+					{format, cl, false, blendHole}: 6,
+				}
+				want := id(5)
+				if format == pixelFormatRGBA16Float {
+					want = 4
+				}
+				if got := r.pipeFor(f, cl, false, blendNone); got != want {
+					t.Errorf("format=%d: specialized core pipeline %d, want %d", format, got, want)
+				}
+				if got := r.pipeFor(f, cl, false, blendHole); got != 6 {
+					t.Errorf("format=%d: specialized hole pipeline %d, want 6", format, got)
+				}
+			}
+		}
+	}
 }
 
 func init() {
@@ -74,6 +172,14 @@ func TestDrawsAsTheCPURenderer(t *testing.T) {
 		}
 		gputest.Compare(t, "metal-perspective", pix, s.Width*4, s)
 	}
+	for range 2 {
+		s = gputest.BehindOriginScene()
+		pix, err := r.renderOffscreen(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gputest.Compare(t, "metal-behind-origin", pix, s.Width*4, s)
+	}
 	for i, s := range gputest.TranslatedScenes() {
 		pix, err := r.renderOffscreen(s)
 		if err != nil {
@@ -88,6 +194,22 @@ func TestDrawsAsTheCPURenderer(t *testing.T) {
 			t.Fatal(err)
 		}
 		gputest.Compare(t, "metal-masked-clips", pix, s.Width*4, s)
+	}
+	for range 2 {
+		s = gputest.CornerClipScene()
+		pix, err := r.renderOffscreen(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gputest.Compare(t, "metal-corner-clips", pix, s.Width*4, s)
+	}
+	for range 2 {
+		s = gputest.ContinuousCornerClipScene()
+		pix, err := r.renderOffscreen(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gputest.Compare(t, "metal-continuous-corner-clips", pix, s.Width*4, s)
 	}
 	s = gputest.ContinuousScene()
 	pix, err := r.renderOffscreen(s)
@@ -164,11 +286,99 @@ func TestTrimDrawables(t *testing.T) {
 		if !r.trimmed {
 			t.Error("idle trim did not shrink the drawables")
 		}
+		// The presenter fetched a drawable of the new size, which has the
+		// layer let go of those of the old one (#2040).
+		if d := r.pre.take(); d == 0 {
+			t.Error("trimming fetched no drawable of the new size")
+		} else {
+			tex := send(d, "texture")
+			if w, h := int(send(tex, "width")), int(send(tex, "height")); w != 1 || h != 1 {
+				t.Errorf("trimming fetched a drawable of %d×%d, want 1×1", w, h)
+			}
+			send(d, "release")
+		}
 		r.fit(800, 600, 1)
 		if r.trimmed {
 			t.Error("next frame did not restore the drawables")
 		}
 	})
+}
+
+// TestOccludedTrim checks that a window nothing of which shows gives back
+// its drawables occludedTrimAfter after its last frame, rather than
+// trimAfter, and has nothing more to give back once it did (#2040).
+func TestOccludedTrim(t *testing.T) {
+	if err := load(); err != nil {
+		t.Skip("no Metal:", err)
+	}
+	var layer id
+	pool(func() { layer = send(class("CALayer"), "new") })
+	if layer == 0 {
+		t.Skip("no Core Animation")
+	}
+	defer pool(func() { release(&layer) })
+	r, err := New(uintptr(layer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Release()
+	pool(func() { r.fit(800, 600, 1) })
+	// armed reports whether the trim fires after from the time between
+	// before and now.
+	armed := func(before time.Time, after time.Duration) bool {
+		return r.trimArmed && !r.trimAt.Before(before.Add(after)) && !r.trimAt.After(time.Now().Add(after))
+	}
+	before := time.Now()
+	r.lastRender = before
+	r.armTrim()
+	if !armed(before, trimAfter) {
+		t.Errorf("a window that shows trims in %v, want %v", r.trimAt.Sub(before), trimAfter)
+	}
+	before = time.Now()
+	r.SetOccluded(true)
+	if !armed(before, occludedTrimAfter) {
+		t.Errorf("out of sight, the trim fires in %v, want %v", r.trimAt.Sub(before), occludedTrimAfter)
+	}
+	r.lastRender = time.Now().Add(-time.Hour)
+	r.trimIfIdle()
+	if !r.trimmed {
+		t.Fatal("a window out of sight kept its drawables")
+	}
+	// Trimmed, it has nothing to give back until it draws again.
+	r.SetOccluded(false)
+	r.SetOccluded(true)
+	if r.trimArmed {
+		t.Error("a window trimmed armed its trim again as it went out of sight")
+	}
+	r.pre.drain()
+	pool(func() { r.fit(800, 600, 1) })
+	if r.trimmed {
+		t.Error("the next frame did not make the drawables again")
+	}
+}
+
+func TestTrimWait(t *testing.T) {
+	for _, c := range []struct {
+		since          time.Duration
+		occluded, busy bool
+		want           time.Duration
+	}{
+		{0, false, false, trimAfter},
+		{time.Second, false, false, trimAfter - time.Second},
+		{trimAfter, false, false, 0},
+		{0, true, false, occludedTrimAfter},
+		{occludedTrimAfter, true, false, 0},
+		{time.Second, true, false, 0},
+		// A frame waiting for its drawable, or a fetch in flight, puts
+		// the trim off.
+		{trimAfter, false, true, occludedTrimAfter},
+		{time.Second, true, true, occludedTrimAfter},
+		{100 * time.Millisecond, true, true, occludedTrimAfter - 100*time.Millisecond},
+	} {
+		if got := trimWait(c.since, c.occluded, c.busy); got != c.want {
+			t.Errorf("trimWait(%v, occluded %v, busy %v) = %v, want %v", c.since, c.occluded, c.busy, got, c.want)
+		}
+	}
 }
 
 // TestChangedSince checks what frames drawn in memory copy into the
@@ -524,6 +734,7 @@ func TestClassesDrawTheSamePixels(t *testing.T) {
 		unavailable(t, err)
 	}
 	defer r.Release()
+	needSpecialized(t, r)
 	var seen [gpu.NumClasses]int
 	joined := map[uint32]int{}
 	for _, wide := range []bool{false, true} {
@@ -566,7 +777,7 @@ func TestClassesDrawTheSamePixels(t *testing.T) {
 		// The test proves nothing if a specialized pipeline did not build and
 		// the frames drew with the general one in its place.
 		cl := gpu.Class(k)
-		if cl != gpu.ClassGeneral && specializable(pixelFormatBGRA8Unorm, 1<<cl, blendOver) &&
+		if cl != gpu.ClassGeneral && r.specializable(pixelFormatBGRA8Unorm, 1<<cl, blendOver) &&
 			!r.usedSpecialized(pipeKey{pixelFormatBGRA8Unorm, 1 << cl, false, blendOver}) && !r.usedSpecialized(pipeKey{pixelFormatBGRA8Unorm, 1 << cl, true, blendOver}) {
 			t.Errorf("class %d drew with no specialized pipeline", k)
 		}
@@ -731,6 +942,7 @@ func TestFramesNeverWaitForACompile(t *testing.T) {
 		unavailable(t, err)
 	}
 	defer r.Release()
+	needSpecialized(t, r)
 	waitStarted, resume := holdPipelineBuilds(t, r)
 	defer resume() // unblock the worker before Release, including on a failed test
 	s := gputest.OpaqueScene(900, 700)
@@ -1081,6 +1293,7 @@ func TestReleaseStopsQueuedPipelineCompiles(t *testing.T) {
 		unavailable(t, err)
 	}
 	defer r.Release()
+	needSpecialized(t, r)
 	waitStarted, resume := holdPipelineBuilds(t, r)
 	defer resume()
 	renderRaw(t, r, gputest.Scene(), false)
@@ -1136,7 +1349,7 @@ func TestPrecompileShader(t *testing.T) {
 		t.Skip(err)
 	}
 	defer r.Release()
-	src := ShaderSource("struct Uniforms { float4 a; };\nfloat4 shaderMain(constant Uniforms& uniforms, texture2d<float> T0, texture2d<float> T1, texture2d<float> T2, texture2d<float> T3, float2 p, float4 rect) { return float4(0.25, 0.5, 0.75, 1); }\n")
+	src := ShaderSource("struct Uniforms { float4 a; };\nfloat4 shaderMain(constant Uniforms& uniforms, texture2d<float> T0, texture2d<float> T1, texture2d<float> T2, texture2d<float> T3, float2 p, float4 rect, thread const Inst& i) { return float4(0.25, 0.5, 0.75, 1); }\n")
 	PrecompileShader(src)
 	lib, pipe, ok := sharedShader(r.device, src, precompiledFormat)
 	if !ok || lib == 0 || pipe == 0 {
@@ -1238,5 +1451,64 @@ func TestBorderedCardDrawsAsTheCPURenderer(t *testing.T) {
 			}
 			gputest.CompareStraightEdges(t, name+w.name+"-float16", pix, s.Width*4, s)
 		}
+	}
+}
+
+// gpuSource gives the texture tex while give is set, else none.
+type gpuSource struct {
+	give bool
+	tex  id
+}
+
+func (g *gpuSource) GPUTexture(api scene.GPUAPI, device uintptr) uintptr {
+	if !g.give || api != scene.Metal {
+		return 0
+	}
+	send(g.tex, "retain") // the renderer owns what it is given
+	return uintptr(g.tex)
+}
+
+// An image whose GPUSource stops giving a texture draws its pixels into a
+// texture of their own, not the one it was given, which holds memory of
+// its own (an IOSurface).
+func TestGPUSourceFallsBackToPixels(t *testing.T) {
+	r, err := newRenderer()
+	if err != nil {
+		unavailable(t, err)
+	}
+	defer r.Release()
+	blue := make([]byte, 4*4*4) // BGRA
+	for i := 0; i < len(blue); i += 4 {
+		blue[i], blue[i+3] = 255, 255
+	}
+	src := &gpuSource{give: true}
+	pool(func() { src.tex = r.newTexture(4, 4, pixelFormatBGRA8Unorm, usageShaderRead, blue, 16) })
+	defer release(&src.tex)
+	red := make([]byte, 4*4*4) // RGBA
+	for i := 0; i < len(red); i += 4 {
+		red[i], red[i+3] = 255, 255
+	}
+	img := scene.NewImageRGBA(4, 4, nil)
+	img.Restore = func() []byte { return append([]byte(nil), red...) }
+	img.GPU = src
+	s := &scene.Scene{Width: 8, Height: 8, Scale: 1, Clear: scene.Color{A: 255}}
+	s.Ops = []scene.Op{{Kind: scene.OpImage, Rect: scene.Rect{W: 8, H: 8}, Image: img, Src: scene.Rect{W: 4, H: 4}, Opacity: 1}}
+	// center returns the red and blue of the middle pixel, which the
+	// target holds as BGRA.
+	center := func() (red, blue byte) {
+		pix, err := r.renderOffscreen(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := 4 * (4*8 + 4)
+		return pix[i+2], pix[i]
+	}
+	if r, b := center(); b < 200 || r > 50 {
+		t.Fatalf("the texture given draws red %d blue %d, not blue", r, b)
+	}
+	src.give = false
+	img.Changed()
+	if r, b := center(); r < 200 || b > 50 {
+		t.Fatalf("the pixels draw red %d blue %d, not red", r, b)
 	}
 }

@@ -32,6 +32,29 @@ diffing again only the lines around it. `New` can be the buffer of an
 editor too, as a file's, so that the diff shows its changes as they are
 typed.
 
+Texts of more than 10,000 lines, or 1 MB, together are compared off the
+main thread once a window shows them, so that opening a large file never
+holds up the window: the viewer shows the texts without changes until the
+comparison is done, and the window draws again with them. Meanwhile
+`Comparing` reports it, and `Hunks` and `Stats` have none. Edits of `New`
+go on as usual, the diff catching up with them once it arrives; an edit of
+`Old` starts the comparison again.
+
+An empty text has no lines, as `git diff` counts them: the side of a file
+added or deleted, or emptied, shows no line numbers, and its gutter selects
+no line and offers no button. A text's lines end at its final newline, as
+git's do: a diff that isn't `Editable` leaves out the empty line an editor
+starts after it, which no separator counts, while an editable one shows it,
+as typing there adds a line.
+
+A diff that isn't `Editable` compares lines with their line feeds, as git
+does, so a last line that gains or loses its newline is a changed line, and
+the last line of a text without a final newline ends with a muted "No
+newline at end of file", git's `\ No newline at end of file`. `SetPatch`,
+whose texts hold only the patch's lines, marks the sides its `\` lines
+name. An editable diff compares lines without them and marks none: adding
+the final newline adds the empty line after it, where typing goes.
+
 ## Layout
 
 - `Layout` shows the old text on the left and the new on the right, their
@@ -74,6 +97,10 @@ typed.
 - `KeepScrollbars` and `NoScrollbars` are those of the code editor: the
   scroll bar stays with the pointer away, so that a diff filling the
   window shows how far down it is, or goes, with its room.
+- `ScrollPastEnd` lets the lines scroll up until the last is at the top,
+  as the code editor's do unless `NoScrollPastEnd`, so that `GoToHunk` can
+  bring a change near the end to the middle of the view; it has no effect
+  with `FitContent`. Off, the view stops at the last line.
 - `Font`, `LineHeight`, `TabSize` and `Theme` are those of the code
   editor. Changes are tinted with the theme's `Added`, `Deleted` and
   `Modified` colors, mixed with the background in a perceptual color
@@ -128,7 +155,11 @@ return the offset and the position of its newest caret, as the code
 editor's do, and `CurrentHunk` the change the caret is in, with `inside`
 true, or else the last before it, -1 before the first, as "2 of 5"
 counts them; `GoToHunk` moves that caret, so Next Change can step from
-it. `Run` runs a command in its editor as its key would, and `Find` opens
+it, and leaves the keyboard where it was: `Focus` gives it to the diff, to
+its active side, as the frame is next built, so that its caret shows and its
+keys work after a button or a menu item moved the caret. A button that
+`KeepFocus`es leaves the keyboard in the diff by itself, when it was there.
+`Run` runs a command in its editor as its key would, and `Find` opens
 its find bar on a query, as an app's menu items do where the menu takes
 the keys first:
 
@@ -264,14 +295,45 @@ for _, f := range files {
 }
 ```
 
+When the app has the files too, as a git client reads them from the
+repository, `SetPatchFiles(f, old, new)` shows the whole files with the
+patch's changes: its runs of `-` and `+` lines, as `git diff` aligned
+them with its options (`--patience`, `--histogram`), not what comparing
+the texts would find. The unchanged lines between them collapse
+into separators that expand, as in any diff. It returns an error, and
+changes nothing, when the patch is binary or doesn't make `new` from
+`old`:
+
+```go
+old := app.fileAt("HEAD", f.OldName) // the app's own git read
+new := app.fileAt("", f.NewName)      // the working tree's
+if err := d.SetPatchFiles(f, old, new); err != nil {
+	d.SetPatch(f) // the files moved on since the patch: show its hunks
+}
+```
+
 ## Accessibility
 
 Assistive technology sees each side as a text field, "Old text" and "New
 text", the old one read only, with its text and selection, and the line
 between the sides of a split view as a splitter named "Divider", whose
-value is the old side's width, which the arrows move. A separator is
-a group named by the lines it collapses, with buttons expanding them up,
-down or all; Revert and Keep are buttons, "Revert change" and "Keep
-change". These names, and what the viewer writes ("4 unmodified lines"),
-are in the window's language
-([MyGo's own strings](../i18n.md#mygos-own-strings)).
+value is the old side's width, which the arrows move. Inside each side,
+every line in view is an element of its own, in the order they show,
+named by its text and described by its number ("Line 12"): a line added
+is an insertion, one deleted a deletion (the old side's changed lines,
+and the deleted lines a unified view shows between the new text's, whose
+numbers are the old text's, "Old line 12"), and an unchanged one a text,
+so that screen readers read each line as what it is. A separator is a group named by how many lines it collapses and
+described by which ("Lines 30 to 41", or the old and the new numbers
+where they differ), with buttons expanding them up, down or all; Revert
+and Keep are buttons, "Revert change" and "Keep change". These names, and
+what the viewer writes ("4 unmodified lines"), are in the window's
+language ([MyGo's own strings](../i18n.md#mygos-own-strings)).
+
+```go
+for _, a := range tt.AccessAll() {
+	if a.Role == ui.RoleInsertion {
+		fmt.Println("added:", a.Description, a.Name) // added: Line 12 return nil
+	}
+}
+```

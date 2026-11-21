@@ -106,7 +106,13 @@ build quits, then the new one starts, so the two never hold the same files,
 locks or web view profile at once. A build that fails to compile keeps the
 running one. Frontend changes are the dev server's to handle. Quitting the app, or
 Ctrl+C, ends mygo dev (press Ctrl+C again not to wait for the app to quit),
-and `App.Relaunch` restarts the app.
+and `App.Relaunch` restarts the app, with the arguments it passes.
+Within a session, each build's windows come back where the previous
+build's were, at their size, maximized or full screen as they were, so
+that a window kept on another display stays there: those without a
+[`StateKey`](windows.md#remember-where-windows-were), which keep their state themselves, by the order
+the app creates them in. A window whose code asks for another position or
+size than the previous build's did gets what it asks for.
 
 On a terminal, each step shows a spinner with what it does, such as the Go
 packages being compiled, then how long it took; what the dev server and the
@@ -121,6 +127,18 @@ stay apart from the installed app's. On macOS it is a real app bundle, in
 `.mygo/dev`; on Windows its executable carries the icon, manifest and
 version information that `mygo build` embeds.
 
+On macOS mygo dev signs the development app with an Apple Development
+identity from the user's keychains, as Xcode signs Debug builds: the one of
+the team of `macos.signingIdentity` when there are several. Xcode makes one
+for any Apple ID, free, under Settings > Accounts > Manage Certificates.
+Its signature stays the same from build to build, so macOS keeps what the
+user allowed the development app, such as Accessibility, Screen Recording
+or the camera, and "Always Allow" for the Keychain items it reads through
+[`mygo.Secrets`](native.md#secrets). Without one, mygo dev signs ad hoc and
+says so: ad hoc signatures change with every build, and macOS takes each
+one for another app. `-sign` uses another identity, which a provisioning
+profile needs, and `-sign -` signs ad hoc.
+
 | Flag | |
 |---|---|
 With `-web`, mygo dev develops an app of [native UI in browsers](ui/browsers.md)
@@ -133,11 +151,12 @@ compiles. `o` opens the page again.
 | Flag | |
 |---|---|
 | `-skip-dev-command` | does not run `devCommand`, e.g. when the dev server already runs |
-| `-sign` | the identity that signs the development app on macOS (default: `-`, ad hoc) |
+| `-sign` | the identity that signs the development app on macOS (default: an Apple Development identity, see below, else `-`, ad hoc) |
 | `-web` | develops the app in browsers |
 | `-port` | with `-web`, the port to serve the app at, or the next free one (default: 5174) |
 | `-open` | with `-web`, opens the app in the browser (default: true) |
 | `-lang` | runs the app in a language, such as `de` or `zh-Hant`, or a pseudo locale, `en-XA` or `ar-XB`, without changing the language it keeps; see [trying a language](i18n.md#trying-a-language) |
+| `-background` | starts the app, and again after each rebuild, without bringing it to the front: its windows show without the focus until you click one, so the editor keeps it as you save (a maximized window on Windows still takes it), and on macOS and Windows behind the app you are in rather than over it |
 
 ## mygo build
 
@@ -195,6 +214,95 @@ errors, such as messages that do not parse or arguments a translation adds,
 and their warnings, such as missing translations, and exits with status 1
 when there are errors.
 
+## mygo native
+
+Experimental, as native modules are: these commands and their flags may
+change in any release. The commands of [native modules](native-modules.md): Go interfaces
+implemented in Swift, Kotlin, Rust or Zig, built into a library per
+platform (on phones, with the app), and
+of the C libraries that packages bind with `ffi`
+([bind a C library yourself](native-modules.md#bind-a-c-library-yourself)).
+`[module dir]` defaults to the current directory.
+
+### mygo native build
+
+```
+mygo native build [flags] [dir]
+```
+
+Builds the [native modules](native-modules.md) in `dir`, each in the
+language of each platform (Swift on macOS where a module has it,
+otherwise Rust, then Zig; phones build theirs with the app), and the libraries that the packages in `dir`
+name in their `mygo-plugin.json`, from their sources, with swift, cargo
+or zig, for every platform, writes the files to publish into
+`.mygo/native/release` of the module, named after their SHA-256, and
+their names, URLs and SHA-256 into `mygo-plugin.json`. Swift builds on a
+Mac, universal, as a `.tar.gz` with the frameworks it brings
+(`darwin-universal`). Platforms that do not build here (Rust's and
+Swift's macOS libraries off a Mac) are listed at the end and left as they
+were. Flags go before the directory. `mygo dev` and `mygo build` build the
+modules and libraries of the app's own packages themselves; this
+publishes those of a package for the apps of others, and for machines
+without the languages' tools.
+
+| Flag | |
+|---|---|
+| `-target` | the platforms, `GOOS-GOARCH` separated by commas, `all` (the default) or `host`, which builds this machine's library for `go run` and `go test` and leaves `mygo-plugin.json` alone |
+| `-lang` | builds modules in this language (`swift`, `rust` or `zig`) where they are implemented in it, rather than in each platform's: with `-target host`, to test each implementation |
+| `-release` | the URL of the directory the files are published in, as `https://github.com/<owner>/<repo>/releases/download/<tag>` (default: the library's `release`, else with `-upload` the library's release `native-<name>` of the repository of the git checkout) |
+| `-out` | the directory of the files to publish |
+| `-upload` | uploads the files to the GitHub release of `-release` with the GitHub CLI, creating it if needed |
+| `-force` | builds the platforms whose published files were built from the sources as they are too, which it otherwise skips |
+
+### mygo native new
+
+```
+mygo native new [-lang <languages>] <module name>
+```
+
+Makes a module in `modules/<module name>`, or at the path given instead of
+a name: the Go package with the interface, its generated Go, an
+`AGENTS.md`, and a directory per language. `-lang` takes the languages,
+separated by commas: `swift` (the default), `kotlin`, `rust`, `zig`, or `none` for
+the Go side alone.
+
+### mygo native add
+
+```
+mygo native add <language> [module dir]
+```
+
+Implements an existing module in another language, `swift`, `kotlin`,
+`rust` or `zig`, with a factory for every entry point and methods that say they are
+unsupported, so the module builds at once.
+
+### mygo native check
+
+```
+mygo native check [-lang <language>] [module dir]
+```
+
+Generates the module, builds its implementation for this machine, or the
+one in `-lang`, and vets the Go package. It lists every problem as
+`file:line: message`, with what to change, and exits with status 1 when
+there are problems.
+
+### mygo native call
+
+```
+mygo native call [-timeout <duration>] [module dir] <Interface>.<Method> [<arguments>]
+```
+
+Makes the implementation of an entry point, calls one method with
+`<arguments>`, a JSON object of its parameters by their Go names, and
+prints the result as JSON, a line per value of a stream. It makes the
+method's context, which `-timeout` limits, and prints the calls of
+callbacks.
+
+`mygo dev` and `mygo build` generate and build every native module of the
+app; see
+[build, run and test](native-modules.md#build-run-and-test).
+
 ## mygo keygen
 
 ```
@@ -229,11 +337,13 @@ Prints the version of the CLI.
 |---|---|
 | `CGO_ENABLED` | `0` by default when unset or empty; set to `1` for app dependencies that need cgo, including in `mygo dev`, `mygo build` and `mygo generate` |
 | `MYGO_LDFLAGS` | more `-ldflags` for the builds of `mygo build`, after its own, such as `-X example.com/app/internal/crash.DSN=…` or `-buildid=`; split at spaces outside quotes, as `go build -ldflags` splits them |
+| `GOFLAGS` | Go's flags; `mygo build` adds the tags of its `-tags=…` to its own, such as `-tags=mygo_nowebview` for a Windows app [without WebView2](ui/windows.md#no-webview) |
 | `MYGO_INSPECTOR` | `1` keeps the [inspector of native UI](ui/inspector.md) in production builds of `mygo build`, which leave it out |
 | `MYGO_UPDATER_PRIVATE_KEY` | the secret key that signs updates, for `mygo build` |
 | `MYGO_WINDOWS_CERTIFICATE_PASSWORD` | the password of `windows.certificate`, for `mygo build` |
 | `MYGO_CLI_BINARY` | a build of the CLI for the `mygo-cli` package to run |
 | `MYGO_ENV` | `production` makes an app behave like a production build, e.g. without the web inspector |
+| `MYGO_NATIVE_<NAME>` | the file of the [native library](native-modules.md#where-libraries-are-found) `<name>` (in upper case, with `_` for other characters than letters and digits) that package `ffi` loads, over the others |
 | `MYGO_LOCALE` | the language the app runs in, over the one it keeps, which `mygo dev -lang` sets |
 
 For an app with dependencies that need cgo:

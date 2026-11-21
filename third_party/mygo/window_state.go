@@ -19,7 +19,8 @@ import (
 // app set its own. It is captured shortly after the window moves, resizes
 // or changes state, when it settled (maximizing and full screen
 // transitions resize the window on the way), and when it closes; it is
-// saved when a window closes and when the app quits.
+// saved when a window closes and when the app quits, until
+// App.ClearWindowStates.
 
 const windowStateFile = "window-state.json"
 
@@ -32,6 +33,9 @@ var windowStates struct {
 	loaded bool
 	byKey  map[string]WindowState
 	dirty  bool
+	// cleared: App.ClearWindowStates dropped the states, and the windows
+	// capture none for the rest of the run.
+	cleared bool
 }
 
 func loadWindowStates() {
@@ -53,6 +57,17 @@ func saveWindowStates() {
 		return
 	}
 	windowStates.dirty = App.windowStateStore().SaveWindowStates(maps.Clone(windowStates.byKey)) != nil
+}
+
+// clearWindowStates drops the states, in the store too, and keeps the
+// windows from capturing theirs again (App.ClearWindowStates). A save
+// that fails is tried again by the next one. Main thread only.
+func clearWindowStates() error {
+	windowStates.loaded, windowStates.cleared = true, true
+	windowStates.byKey = map[string]WindowState{}
+	err := App.windowStateStore().SaveWindowStates(map[string]WindowState{})
+	windowStates.dirty = err != nil
+	return err
 }
 
 // windowStateStore is the store of App.SetWindowStateStore, or the file.
@@ -102,12 +117,12 @@ func (f stateFile) SaveWindowStates(states map[string]WindowState) error {
 	if err != nil {
 		return err
 	}
-	// An error, as Windows still reporting the file in use after rename's
-	// retries, keeps the states for the next save.
+	// An error, as Windows still reporting the file in use after
+	// replaceAppFile's retries, keeps the states for the next save.
 	if err := os.WriteFile(path+".tmp", data, 0o644); err != nil {
 		return err
 	}
-	return rename(path+".tmp", path)
+	return replaceAppFile(path+".tmp", path)
 }
 
 // restoreWindowState applies the state saved under key to p, if the
@@ -178,26 +193,39 @@ func onDisplay(r Rectangle, displays []platform.Display) bool {
 // p. A window that starts maximized or full screen has not shown its normal
 // bounds yet, so they are the requested ones.
 func (w *Window) initState(p *platform.WindowOptions) {
+	if w.stateKey == "" {
+		w.captureDevWindow()
+		return
+	}
+	if windowStates.cleared {
+		return
+	}
 	if _, ok := windowStates.byKey[w.stateKey]; !ok && (p.Maximized || p.FullScreen) {
-		st := WindowState{X: p.X, Y: p.Y, Width: p.Width, Height: p.Height, Maximized: p.Maximized, FullScreen: p.FullScreen}
-		if p.Center {
-			for _, d := range backend().Screen().Displays() {
-				if d.Primary {
-					st.X = d.WorkArea.X + (d.WorkArea.Width-st.Width)/2
-					st.Y = d.WorkArea.Y + (d.WorkArea.Height-st.Height)/2
-				}
-			}
-		}
-		windowStates.byKey[w.stateKey] = st
+		windowStates.byKey[w.stateKey] = requestedState(p)
 		windowStates.dirty = true
 		return
 	}
 	w.captureState()
 }
 
+// requestedState is the state of a window that the options p ask for,
+// centered on the primary display for Center.
+func requestedState(p *platform.WindowOptions) WindowState {
+	st := WindowState{X: p.X, Y: p.Y, Width: p.Width, Height: p.Height, Maximized: p.Maximized, FullScreen: p.FullScreen}
+	if p.Center {
+		for _, d := range backend().Screen().Displays() {
+			if d.Primary {
+				st.X = d.WorkArea.X + (d.WorkArea.Width-st.Width)/2
+				st.Y = d.WorkArea.Y + (d.WorkArea.Height-st.Height)/2
+			}
+		}
+	}
+	return st
+}
+
 // stateChanged captures the window's state once it stopped changing.
 func (w *Window) stateChanged() {
-	if w.stateKey == "" {
+	if w.stateKey == "" && w.devSlot == 0 {
 		return
 	}
 	if w.stateTimer != nil {
@@ -209,8 +237,12 @@ func (w *Window) stateChanged() {
 
 // captureState records the window's current state under its key.
 func (w *Window) captureState() {
+	if w.devSlot > 0 {
+		w.captureDevWindow()
+		return
+	}
 	n := w.native
-	if w.stateKey == "" || n == nil {
+	if w.stateKey == "" || n == nil || windowStates.cleared {
 		return
 	}
 	loadWindowStates()

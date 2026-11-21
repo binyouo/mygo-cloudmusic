@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/egoist/mygo/internal/wait"
 	"github.com/egoist/mygo/plugins/terminal/internal/vt"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
@@ -638,6 +639,11 @@ func TestKeys(t *testing.T) {
 	key(0, ui.KeyA, "a", "a")
 	key(ui.Shift, ui.KeyA, "A", "A")
 	key(ui.Ctrl, ui.KeyC, "", "\x03")
+	// The Control keys fixterms makes CSI u of send their C0 controls,
+	// as in xterm, for shells and editors.
+	key(ui.Ctrl, ui.KeyI, "", "\t")
+	key(ui.Ctrl, ui.KeyM, "", "\r")
+	key(ui.Ctrl, ui.KeyBracketLeft, "", "\x1b")
 	key(0, ui.KeyEnter, "", "\r")
 	key(0, ui.KeyBackspace, "", "\x7f")
 	key(0, ui.KeyUp, "", "\x1b[A")
@@ -655,6 +661,8 @@ func TestKeys(t *testing.T) {
 	term.Feed([]byte("\x1b[>1u"))
 	key(0, ui.KeyEscape, "", "\x1b[27u")
 	key(ui.Ctrl, ui.KeyC, "", "\x1b[99;5u")
+	key(ui.Ctrl, ui.KeyI, "", "\x1b[105;5u")
+	key(ui.Ctrl, ui.KeyBracketLeft, "", "\x1b[91;5u")
 	// Programs in cursor key mode get application keys.
 	term.Feed([]byte("\x1b[<u\x1b[?1h"))
 	key(0, ui.KeyUp, "", "\x1bOA")
@@ -722,6 +730,32 @@ func TestMouse(t *testing.T) {
 	tt.Frame()
 }
 
+// TestKilledJobModes: a job killed with the mouse's reports on leaves them
+// on, which the terminal turns off as the shell takes it back; the
+// program the terminal runs keeps those it sets.
+func TestKilledJobModes(t *testing.T) {
+	loadLib(t)
+	tracking := func(term *Terminal) bool {
+		term.mu.Lock()
+		defer term.mu.Unlock()
+		return term.term.MouseTracking()
+	}
+	term := shell(t, Options{Command: []string{"/bin/sh", "-i"}})
+	tt := ui.NewTester(func(c *ui.Context) { View(c, term).Fill() }, 300, 200)
+	waitFor(t, tt, "the prompt", func() bool { return strings.Contains(term.Text(), "$") })
+	term.Send([]byte("sh -c 'printf \"\\033[?1000h\\033[?1006h\"; read x; kill -9 $$'\r"))
+	waitFor(t, tt, "the mouse's reports", func() bool { return tracking(term) })
+	term.Send([]byte("\r"))
+	waitFor(t, tt, "the mouse's reports to end", func() bool { return !tracking(term) })
+
+	own := shell(t, Options{Command: []string{"/bin/sh", "-c", "printf '\\033[?1000h'; echo done; sleep 30"}})
+	tt = ui.NewTester(func(c *ui.Context) { View(c, own).Fill() }, 300, 200)
+	waitFor(t, tt, "done", func() bool { return strings.Contains(own.Text(), "done") })
+	if !tracking(own) {
+		t.Error("the terminal's program lost the mouse's reports")
+	}
+}
+
 func TestExit(t *testing.T) {
 	loadLib(t)
 	exited := make(chan int, 1)
@@ -748,6 +782,42 @@ func TestExit(t *testing.T) {
 	defer mu.Unlock()
 	if len(titles) != 1 || titles[0] != "the title" || term.Title() != "the title" {
 		t.Errorf("titles = %q", titles)
+	}
+}
+
+// TestNoExitMessage: with NoExitMessage, the screen keeps what the
+// program wrote and no line about its end, which OnExit, Done and
+// ExitCode still tell; nor does a Conn's end write "[Disconnected]".
+func TestNoExitMessage(t *testing.T) {
+	loadLib(t)
+	exited := make(chan int, 1)
+	term := shell(t, Options{
+		Command:       []string{"/bin/sh", "-c", "printf bye; exit 3"},
+		NoExitMessage: true,
+		OnExit:        func(code int) { exited <- code },
+	})
+	if code := wait.For(t, "the exit", exited); code != 3 {
+		t.Errorf("exit code = %d", code)
+	}
+	wait.For(t, "Done", term.Done())
+	if term.ExitCode() != 3 {
+		t.Errorf("ExitCode = %d", term.ExitCode())
+	}
+	if text := strings.TrimRight(term.Text(), "\n"); text != "bye" {
+		t.Errorf("text %q, want only the program's", text)
+	}
+
+	conn := newPipe()
+	remote, err := New(Options{Conn: conn, NoExitMessage: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+	remote.Feed([]byte("remote"))
+	conn.Close()
+	wait.For(t, "Done", remote.Done())
+	if text := strings.TrimRight(remote.Text(), "\n"); text != "remote" {
+		t.Errorf("text %q, want only what Conn sent", text)
 	}
 }
 
@@ -1642,6 +1712,63 @@ func TestCommandClickLinks(t *testing.T) {
 	}
 }
 
+// TestCommandClickWrappedLink: a URL or a hyperlink that soft-wraps onto
+// the next rows is one link, which Command-hover underlines on each row and
+// Command+click opens whole from any of them; a row that ends with a newline
+// ends the link.
+func TestCommandClickWrappedLink(t *testing.T) {
+	loadLib(t)
+	var opened []string
+	term, err := New(Options{Conn: newPipe(), OpenLink: func(link string) bool {
+		opened = append(opened, link)
+		return true
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer term.Close()
+	tt := ui.NewTester(func(c *ui.Context) { View(c, term).Fill().AutoFocus() }, 400, 200)
+	tt.Frame()
+	cols := term.v.cols
+	url := "https://example.com/" + strings.Repeat("a", cols)
+	hyper := "https://example.org/x"
+	// The URL from column 4, over two rows; then one cut by a newline;
+	// then a hyperlink wrapping from the end of a row onto the next.
+	cut := "https://cut.example/" + strings.Repeat("b", cols-len("https://cut.example/")-4)
+	term.Feed([]byte("see " + url + "\r\n" + strings.Repeat(" ", 4) + cut + "\r\nmore\r\n" +
+		strings.Repeat(" ", cols-3) + "\x1b]8;;" + hyper + "\x1b\\abcdef\x1b]8;;\x1b\\"))
+	tt.Frame()
+	end := 4 + len(url) - cols // the URL's end on its second row
+	x, y := cellCenter(term, 1, 1)
+	tt.Move(x, y)
+	tt.HoldModifiers(ui.Cmd)
+	if h := term.v.hover; h != (linkSpan{0, 4, end, 1}) {
+		t.Errorf("hovered %+v on the second row, want the URL over both rows", h)
+	}
+	if link, _, at := term.HoveredLink(); link != url || !at.Contains(cellCenter(term, 0, 0)) || !at.Contains(x, y) {
+		t.Errorf("HoveredLink is %q, %+v, want the URL around both rows", link, at)
+	}
+	tt.HoldModifiers(0)
+	for _, c := range [][2]int{{10, 0}, {1, 1}} {
+		x, y := cellCenter(term, c[0], c[1])
+		tt.ClickAtWith(ui.Cmd, x, y)
+	}
+	// The row after the URL's starts a link of its own: the newline cuts it.
+	x, y = cellCenter(term, 6, 2)
+	tt.ClickAtWith(ui.Cmd, x, y)
+	x, y = cellCenter(term, 1, 5)
+	tt.ClickAtWith(ui.Cmd, x, y)
+	if want := []string{url, url, cut, hyper}; !slices.Equal(opened, want) {
+		t.Errorf("opened %q, want %q", opened, want)
+	}
+	x, y = cellCenter(term, cols-1, 4)
+	tt.Move(x, y)
+	tt.HoldModifiers(ui.Cmd)
+	if h := term.v.hover; h != (linkSpan{4, cols - 3, 3, 5}) {
+		t.Errorf("hovered %+v, want the hyperlink over both rows", h)
+	}
+}
+
 // Command-hover underlines the same cells that Command-click opens,
 // including bare filenames and paths to ignored output directories.
 func TestCommandHoverFilePath(t *testing.T) {
@@ -1660,7 +1787,7 @@ func TestCommandHoverFilePath(t *testing.T) {
 			tt.Move(x, y)
 			plain := slices.Clone(tt.Image().Pix)
 			tt.HoldModifiers(ui.Cmd)
-			if h := term.v.hover; h != (linkSpan{0, 6, 6 + len(path)}) {
+			if h := term.v.hover; h != (linkSpan{0, 6, 6 + len(path), 0}) {
 				t.Fatalf("hovered %+v, want the file path's cells", h)
 			}
 			if tt.Cursor() != ui.CursorPointer {
@@ -1703,7 +1830,7 @@ func TestCommandClickLinkWithoutOpenLink(t *testing.T) {
 		t.Errorf("the cursor is %v over a link with Command", c)
 	}
 	// The link under it shows underlined, all its cells.
-	if h := term.v.hover; h != (linkSpan{0, 0, 4}) {
+	if h := term.v.hover; h != (linkSpan{0, 0, 4, 0}) {
 		t.Errorf("hovered %+v, want the hyperlink's cells 0..4", h)
 	}
 	x0, y0 := cellCenter(term, 0, 0)
@@ -3087,5 +3214,38 @@ func TestDropFiles(t *testing.T) {
 	tt.Frame()
 	if got, want := conn.take(term), "\x1b[200~"+want[1]+"\x1b[201~"; got != want {
 		t.Errorf("dropping in bracketed paste pasted %q, want %q", got, want)
+	}
+}
+
+// OnDrop sees dropped files first, and a drop it takes pastes nothing, as
+// when an app uploads the files to the remote machine a program runs on.
+func TestOnDrop(t *testing.T) {
+	loadLib(t)
+	conn := newPipe()
+	var got []string
+	take := true
+	term, err := New(Options{Conn: conn, OnDrop: func(paths []string) bool {
+		got = append(got, paths...)
+		return take
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer term.Close()
+	tt := ui.NewTester(func(c *ui.Context) { View(c, term).Fill() }, 400, 200)
+	tt.Frame()
+	tt.DropFiles(100, 100, "/tmp/shot.png")
+	tt.Frame()
+	if len(got) != 1 || got[0] != "/tmp/shot.png" {
+		t.Errorf("OnDrop saw %q", got)
+	}
+	if s := conn.take(term); s != "" {
+		t.Errorf("a drop OnDrop took pasted %q", s)
+	}
+	take = false
+	tt.DropFiles(100, 100, "/tmp/b.txt")
+	tt.Frame()
+	if s := conn.take(term); !strings.Contains(s, "b.txt") {
+		t.Errorf("a drop OnDrop left pasted %q", s)
 	}
 }

@@ -6,7 +6,9 @@ import (
 	"slices"
 	"sync"
 	"time"
+	"weak"
 
+	"github.com/egoist/mygo/internal/imagesrc"
 	"github.com/egoist/mygo/internal/scene"
 	"github.com/egoist/mygo/internal/text"
 )
@@ -45,13 +47,25 @@ type Painter struct {
 	// over the rest of its layer (matches.paint), which elsewhere paints
 	// nothing.
 	lifting *node
+	// owner is the state of the element painting, which keeps the scales
+	// its text rasterized at (glyphSpace).
+	owner *state
+	// copying tells that what paints is a copy of an element, as the one a
+	// drag paints under the pointer (paintDrag): the page of a web view
+	// stays where the element is, so the copy's hole tells nothing of how
+	// opaque the page shows.
+	copying bool
 }
 
-// opaqueBox is the box of an element painting an opaque background, and
-// how many holes were painted before it, which it covers.
+// opaqueBox is the box of a background an element painted, and how many
+// holes were painted before it, which it covers. opaque tells that the
+// background was painted whole: what lies under it shows through nothing,
+// where one painted through, as at an element's own opacity, still has
+// something for a web view's hole to blend its page over.
 type opaqueBox struct {
-	r     Rect
-	holes int
+	r      Rect
+	holes  int
+	opaque bool
 }
 
 // continuousCorners curves rounded corners as Apple does, on macOS, where
@@ -60,8 +74,11 @@ type opaqueBox struct {
 const continuousCorners = runtime.GOOS == "darwin"
 
 func (rt *engine) paint(root *node, w, h, scale float32) {
+	rt.painting = true
+	defer func() { rt.painting = false }()
 	rt.paints++
 	rt.drawn = rt.drawn[:0]
+	rt.paths.spill.beginPaint()
 	s := &rt.scene
 	// The root paints the theme's background: frames start transparent, so
 	// that a transparent root shows what is behind the content, such as a
@@ -83,23 +100,30 @@ func (rt *engine) paint(root *node, w, h, scale float32) {
 	under := rt.under[:0]
 	if opaque {
 		// Under all the window paints, as what it drags.
-		under = append(under, opaqueBox{r: Rect{0, 0, w, h}})
+		under = append(under, opaqueBox{r: Rect{0, 0, w, h}, opaque: true})
 	}
 	rt.painter = Painter{rt: rt, s: s, scale: scale, opacity: 1, clip: Rect{0, 0, w, h}, opaque: opaque, under: under, holes: rt.holes[:0]}
 	p := &rt.painter
-	uses := rt.text.TransientUses()
-	rt.partTransient = 0
+	uses, opened := rt.text.TransientUses(), rt.paths.spill.opened
+	rt.partTransient, rt.paths.spill.inParts = 0, 0
 	p.cull = !rt.inkStale && !rt.noCull
 	p.element(root)
 	p.cull = false
+	if touchPaint != nil {
+		touchPaint(rt, p)
+	}
 	if rt.insp.open {
 		rt.insp.paintHighlight(rt, p, h)
 	}
 	rt.paintDrag(p, w, h)
+	rt.finishSpills()
 	rt.under, rt.holes = p.under[:0], p.holes[:0] // kept for the next frame's
 	rt.partsBase = sceneData(s)
 	rt.atlases = atlasGenerations(s)
-	rt.transient = rt.text.TransientUses()-uses > rt.partTransient
+	// Layers of paths drawn on the CPU (pathSpill) outside the parts are
+	// reused as the parts are painted again, as masks of the transient
+	// room are.
+	rt.transient = rt.text.TransientUses()-uses > rt.partTransient || rt.paths.spill.opened-opened > rt.paths.spill.inParts
 }
 
 // atlasGenerations returns the generations of the atlases s draws glyphs
@@ -253,17 +277,37 @@ func (p *Painter) element(e *node) {
 	if e.hidden || e.lift && p.lifting != e {
 		return
 	}
-	savedTransform, savedInline, savedTheme := p.transform, p.inline, p.theme
-	p.transform, p.inline = e.world, nil
+	savedTransform, savedInline, savedTheme, savedOwner := p.transform, p.inline, p.theme, p.owner
+	p.transform, p.inline, p.owner = e.world, nil, e.st
 	if e.themed != nil {
 		p.theme = e.themed
 	}
-	defer func() { p.transform, p.inline, p.theme = savedTransform, savedInline, savedTheme }()
+	// What its styleFn and Transition change as it paints goes back as it
+	// is painted, so that it holds what the view built, and painting it
+	// again starts from that.
+	r := e.st.trec
+	if r != nil && (r.built != p.rt.frame || r.elem != e) {
+		r = nil
+	}
+	styled := e.styleFn != nil || r != nil
+	var built builtStyle
+	if styled {
+		built = builtStyle{e.bg, e.borderC, e.ts.color, e.opacity, e.opacitySet, e.shadows}
+	}
+	defer func() {
+		p.transform, p.inline, p.theme, p.owner = savedTransform, savedInline, savedTheme, savedOwner
+		if styled {
+			e.bg, e.borderC, e.ts.color, e.opacity, e.opacitySet, e.shadows = built.bg, built.border, built.text, built.opacity, built.opacitySet, built.shadows
+		}
+	}()
 
+	// Whether its look follows its hover, as this painting tells
+	// (Hovered): an element not painted keeps what its last did.
+	e.st.hoverLook = false
 	if e.styleFn != nil {
 		e.styleFn(e)
 	}
-	if r := e.st.trec; r != nil && r.built == p.rt.frame && r.elem == e {
+	if r != nil {
 		p.rt.animateColors(e, r)
 		if animateShadows != nil {
 			animateShadows(p.rt, e, r)
@@ -308,7 +352,7 @@ func (p *Painter) element(e *node) {
 		e.dropGroupLayer()
 	}
 	saved := p.opacity
-	if e.flags&flagDisabled != 0 && !e.undimmed {
+	if e.flags&flagDisabled != 0 && !e.undimmed && !p.Theme().DisableAutoDimming {
 		p.opacity *= 0.5
 	}
 	// In its layer (paintEffect, paintGroup), the layer takes its fade.
@@ -321,8 +365,11 @@ func (p *Painter) element(e *node) {
 	}
 	box := Rect{e.x, e.y, e.w, e.h}
 	savedOpaque, under := p.opaque, len(p.under)
-	if e.fill == fillColor && e.bg.A == 255 && p.opacity >= 1 {
-		p.under = append(p.under, opaqueBox{box, len(p.holes)})
+	if e.fill == fillColor && e.bg.A > 0 {
+		// Painted whole, it covers what lies under it; painted through, as
+		// at an element's own opacity, it still has something for a web
+		// view's hole to blend its page over.
+		p.under = append(p.under, opaqueBox{box, len(p.holes), e.bg.A == 255 && p.opacity >= 1})
 	}
 	// What the element paints lands on an opaque background when all of
 	// it that shows does.
@@ -452,6 +499,9 @@ func (p *Painter) element(e *node) {
 	}
 	if e.scrolls() && own {
 		p.scrollbars(e)
+		if refreshPainter != nil {
+			refreshPainter(p, e)
+		}
 	}
 	if own && borderOver {
 		p.border(e, box)
@@ -481,10 +531,27 @@ func translates(m scene.Affine) bool {
 // covered reports whether an opaque background around the element painting
 // holds all of r, when r has an area.
 func (p *Painter) covered(r Rect) bool {
+	return p.holds(r, true)
+}
+
+// blends reports whether anything painted around the element painting holds
+// all of r, when r has an area, opaque or through: the hole a web view
+// punches then blends the page with what is painted there, and the page
+// needs no fade of its own.
+func (p *Painter) blends(r Rect) bool {
+	return p.holds(r, false)
+}
+
+// holds reports whether a background painted around the element painting
+// holds all of r, when r has an area; opaque asks for one painted whole.
+func (p *Painter) holds(r Rect, opaque bool) bool {
 	if r.W <= 0 || r.H <= 0 {
 		return true
 	}
 	for _, u := range slices.Backward(p.under) {
+		if opaque && !u.opaque {
+			continue
+		}
 		if b := u.r; r.X >= b.X && r.Y >= b.Y && r.X+r.W <= b.X+b.W && r.Y+r.H <= b.Y+b.H {
 			// Unless the web view of a hole painted since shows there.
 			for _, h := range p.holes[u.holes:] {
@@ -936,7 +1003,6 @@ func (p *Painter) textForeground(l *text.Layout, x, y float32, color Color, ts t
 		return
 	}
 	sys := p.rt.text
-	s := p.scale
 	deco := decoration{underline: ts.underline, wavy: ts.wavy, dotted: ts.dotted, strike: ts.strike, solid: ts.solid, color: ts.decoColor, thick: ts.decoThick,
 		offset: ts.decoOffset, hasOffset: ts.set&setDecoOffset != 0}
 	shade := text.ShadeOf(color.R, color.G, color.B)
@@ -959,21 +1025,26 @@ func (p *Painter) textForeground(l *text.Layout, x, y float32, color Color, ts t
 		}
 		paintStrokes(p, l, x, y, color, ts, spans, moves, clips)
 	}
+	// Rasterized at the size the transform shows them at, if it scales
+	// them; else at the painter's scale, clips then applying to pen.
+	gs := p.glyphSpace(l, x, y, moves)
+	s := gs.scale
 	start := int32(len(p.s.Glyphs))
 	var run *glyphRun
 	if sys.JoinsGlyphs() && !moves {
 		// The engine's, whose buffers each text reuses.
 		run = &p.rt.glyphRun
 		run.ids, run.pens, run.glyphs = run.ids[:0], run.pens[:0], run.glyphs[:0]
+		run.scale = s
 	}
 	for li := range l.Lines {
 		line := &l.Lines[li]
 		if clips && (y+line.Y > p.clip.Y+p.clip.H || y+line.Y+line.Height < p.clip.Y) {
 			continue
 		}
-		baseline := sys.Baseline((y + line.Baseline) * s)
+		baseline := sys.Baseline((y+line.Baseline)*s + gs.dy)
 		for _, g := range line.Glyphs {
-			pen := (x + g.X) * s
+			pen := (x+g.X)*s + gs.dx
 			if g.Object || clips && (pen > (p.clip.X+p.clip.W)*s || pen+(g.Advance+g.Size)*s < p.clip.X*s) {
 				continue
 			}
@@ -992,20 +1063,21 @@ func (p *Painter) textForeground(l *text.Layout, x, y float32, color Color, ts t
 				continue
 			}
 			glyphColor = glyphColor.Alpha(p.opacity)
+			gb := glyphBaseline(sys, &g, line, y, baseline, gs)
 			sg := scene.Glyph{
-				X: ix + gi.Left, Y: baseline + gi.Top, W: float32(gi.W), H: float32(gi.H),
+				X: ix + gi.Left, Y: gb + gi.Top, W: float32(gi.W), H: float32(gi.H),
 				U: gi.X, V: gi.Y, UW: gi.W, VH: gi.H,
-				Transform: p.inlineTransform(g.Cluster).Pixels(s),
+				Transform: gs.inlineTransform(p, g.Cluster, moves),
 				Color:     glyphColor.scene(), Wide: p.glyphWide(glyphColor), Colored: gi.Colored, Subpixel: gi.Subpixel, Thin: gi.Thin,
 			}
 			if run != nil {
-				run.add(p, g, gi, pen, sg, glyphShade, baseline)
+				run.add(p, g, gi, pen, sg, glyphShade, gb)
 				continue
 			}
 			p.s.Glyphs = append(p.s.Glyphs, sg)
 		}
 		if run != nil {
-			run.flush(p, baseline)
+			run.flush(p)
 		}
 		if sp != nil {
 			sp.lines(p, l, li, x, y, color, deco)
@@ -1015,7 +1087,7 @@ func (p *Painter) textForeground(l *text.Layout, x, y float32, color Color, ts t
 		}
 	}
 	if end := int32(len(p.s.Glyphs)); end > start {
-		p.add(scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
+		gs.add(p, scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
 	}
 }
 
@@ -1044,7 +1116,8 @@ func (p *Painter) textStrokes(l *text.Layout, x, y float32, color Color, ts text
 		sp = &spans
 	}
 	sys := p.rt.text
-	s := p.scale
+	gs := p.glyphSpace(l, x, y, moves)
+	s := gs.scale
 	shade := text.ShadeOf(color.R, color.G, color.B)
 	start := int32(len(p.s.Glyphs))
 	for li := range l.Lines {
@@ -1052,9 +1125,9 @@ func (p *Painter) textStrokes(l *text.Layout, x, y float32, color Color, ts text
 		if clips && (y+line.Y > p.clip.Y+p.clip.H || y+line.Y+line.Height < p.clip.Y) {
 			continue
 		}
-		baseline := sys.Baseline((y + line.Baseline) * s)
+		baseline := sys.Baseline((y+line.Baseline)*s + gs.dy)
 		for _, g := range line.Glyphs {
-			pen := (x + g.X) * s
+			pen := (x+g.X)*s + gs.dx
 			width, stroke := ts.strokeWidth, ts.strokeColor
 			if g.Object || clips && (pen > (p.clip.X+p.clip.W+width)*s || pen+(g.Advance+g.Size+width)*s < p.clip.X*s) {
 				continue
@@ -1076,15 +1149,15 @@ func (p *Painter) textStrokes(l *text.Layout, x, y float32, color Color, ts text
 			}
 			stroke = stroke.Alpha(p.opacity)
 			p.s.Glyphs = append(p.s.Glyphs, scene.Glyph{
-				X: float32(math.Floor(float64(pen))) + gi.Left, Y: baseline + gi.Top, W: float32(gi.W), H: float32(gi.H),
+				X: float32(math.Floor(float64(pen))) + gi.Left, Y: glyphBaseline(sys, &g, line, y, baseline, gs) + gi.Top, W: float32(gi.W), H: float32(gi.H),
 				U: gi.X, V: gi.Y, UW: gi.W, VH: gi.H,
-				Transform: p.inlineTransform(g.Cluster).Pixels(s),
+				Transform: gs.inlineTransform(p, g.Cluster, moves),
 				Color:     stroke.scene(), Wide: p.glyphWide(stroke),
 			})
 		}
 	}
 	if end := int32(len(p.s.Glyphs)); end > start {
-		p.add(scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
+		gs.add(p, scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
 	}
 }
 
@@ -1113,7 +1186,8 @@ func (p *Painter) textShadows(l *text.Layout, x, y float32, color Color, ts text
 		sp = &spans
 	}
 	sys := p.rt.text
-	s := p.scale
+	gs := p.glyphSpace(l, x, y, moves)
+	s := gs.scale
 	shade := text.ShadeOf(color.R, color.G, color.B)
 	start := int32(len(p.s.Glyphs))
 	for li := range l.Lines {
@@ -1145,65 +1219,84 @@ func (p *Painter) textShadows(l *text.Layout, x, y float32, color Color, ts text
 				gx-reach > p.clip.X+p.clip.W || gx+g.Advance+g.Size+reach < p.clip.X) {
 				continue
 			}
-			pen := gx * s
+			pen := gx*s + gs.dx
 			gi := shadowGlyph(sys, g.Font, g.ID, s, pen, glyphShade, p.opaque && !moves, sh.blur/2*s)
 			if !gi.OK {
 				continue
 			}
 			c := sh.color.Alpha(p.opacity)
 			p.s.Glyphs = append(p.s.Glyphs, scene.Glyph{
-				X: float32(math.Floor(float64(pen))) + gi.Left, Y: sys.Baseline((y+line.Baseline+sh.y)*s) + gi.Top, W: float32(gi.W), H: float32(gi.H),
+				X: float32(math.Floor(float64(pen))) + gi.Left, Y: sys.Baseline((y+g.Y+sh.y)*s+gs.dy) + gi.Top, W: float32(gi.W), H: float32(gi.H),
 				U: gi.X, V: gi.Y, UW: gi.W, VH: gi.H,
-				Transform: p.inlineTransform(g.Cluster).Pixels(s),
+				Transform: gs.inlineTransform(p, g.Cluster, moves),
 				Color:     c.scene(), Wide: p.glyphWide(c),
 			})
 		}
 	}
 	if end := int32(len(p.s.Glyphs)); end > start {
-		p.add(scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
+		gs.add(p, scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
 	}
+}
+
+// glyphBaseline returns the device row of the baseline that glyph g of
+// line, laid out from y, sits on: baseline, the line's as the text system
+// snaps it, or, for a glyph off it, its own, snapped likewise. Shaping
+// moves a mark above or below its base (OpenType's mark positioning, as
+// a fatha over a joined kaf and a kasra under a joined reh), and a span
+// its glyphs (text.Span.BaselineShift).
+func glyphBaseline(sys *text.System, g *text.Glyph, line *text.Line, y, baseline float32, gs glyphSpace) float32 {
+	if g.Y == line.Baseline {
+		return baseline
+	}
+	return sys.Baseline((y+g.Y)*gs.scale + gs.dy)
 }
 
 // glyphRun gathers glyphs of a line in one font and color whose
 // antialiased edges share pixels, which the text system joins where the
 // system's text stack draws them joined (System.JoinsGlyphs).
 type glyphRun struct {
-	font   *text.Font
+	font *text.Font
+	// scale is the pixels a DIP its glyphs rasterize at (glyphSpace).
+	scale  float32
 	shade  text.Shade
 	ids    []uint32
 	pens   []float32
 	glyphs []scene.Glyph
 	last   text.GlyphImage
+	// baseline is the device row its glyphs sit on, which they all share:
+	// GlyphRun joins glyphs on one baseline.
+	baseline float32
 }
 
-// add takes a glyph, its pen at pen and its scene glyph sg, into the run
-// if it shares pixels with the last, else starts a run with it.
+// add takes a glyph, its pen at pen and its scene glyph sg, sitting on
+// the baseline at device row baseline, into the run if it shares pixels
+// with the last on the same baseline, else starts a run with it.
 func (r *glyphRun) add(p *Painter, g text.Glyph, gi text.GlyphImage, pen float32, sg scene.Glyph, shade text.Shade, baseline float32) {
 	if n := len(r.glyphs); n > 0 {
 		prev := &r.glyphs[n-1]
-		if g.Font == r.font && sg.Color == prev.Color && sg.Wide == prev.Wide && !gi.Colored && p.rt.text.Shares(r.last, prev.X, prev.Y, gi, sg.X, sg.Y) {
+		if g.Font == r.font && baseline == r.baseline && sg.Color == prev.Color && sg.Wide == prev.Wide && !gi.Colored && p.rt.text.Shares(r.last, prev.X, prev.Y, gi, sg.X, sg.Y) {
 			r.ids, r.pens, r.glyphs, r.last = append(r.ids, g.ID), append(r.pens, pen), append(r.glyphs, sg), gi
 			return
 		}
-		r.flush(p, baseline)
+		r.flush(p)
 	}
-	r.font, r.shade, r.last = g.Font, shade, gi
+	r.font, r.shade, r.last, r.baseline = g.Font, shade, gi, baseline
 	r.ids, r.pens, r.glyphs = append(r.ids, g.ID), append(r.pens, pen), append(r.glyphs, sg)
 }
 
 // flush paints the run: one glyph as it is, more joined.
-func (r *glyphRun) flush(p *Painter, baseline float32) {
+func (r *glyphRun) flush(p *Painter) {
 	switch n := len(r.glyphs); {
 	case n == 1:
 		p.s.Glyphs = append(p.s.Glyphs, r.glyphs[0])
 	case n > 1:
-		gi := p.rt.text.GlyphRun(r.font, r.ids, r.pens, p.scale, r.shade, p.opaque)
+		gi := p.rt.text.GlyphRun(r.font, r.ids, r.pens, r.scale, r.shade, p.opaque)
 		if !gi.OK {
 			p.s.Glyphs = append(p.s.Glyphs, r.glyphs...)
 			break
 		}
 		sg := r.glyphs[0]
-		sg.X, sg.Y = float32(math.Floor(float64(r.pens[0])))+gi.Left, baseline+gi.Top
+		sg.X, sg.Y = float32(math.Floor(float64(r.pens[0])))+gi.Left, r.baseline+gi.Top
 		sg.W, sg.H, sg.U, sg.V, sg.UW, sg.VH = float32(gi.W), float32(gi.H), gi.X, gi.Y, gi.W, gi.H
 		sg.Subpixel, sg.Thin = gi.Subpixel, gi.Thin
 		p.s.Glyphs = append(p.s.Glyphs, sg)
@@ -1321,11 +1414,33 @@ func (p *Painter) image(e *node) {
 		p.drawSVG(s, e.contentBox(), e.fit, e.objectPos, e.radius, e.resolvedText().color, e.gray)
 		return
 	}
+	if e.texture != nil {
+		p.drawTexture(e, e.texture)
+		return
+	}
 	img := e.image
 	if img == nil || img.w == 0 || img.h == 0 {
 		return
 	}
 	p.drawBitmap(img, e.contentBox(), e.fit, e.objectPos, e.radius, e.gray)
+}
+
+// drawTexture draws the frame a native module presented last into a
+// texture; the next it presents asks the window for a frame.
+func (p *Painter) drawTexture(e *node, t imagesrc.Frames) {
+	rt := e.c.rt
+	owner := weak.Make(rt)
+	img := t.Frame(owner, func() { Services{owner: owner}.Invalidate() })
+	if img == nil || img.W == 0 || img.H == 0 {
+		return
+	}
+	iw, ih := float32(img.W), float32(img.H)
+	dst, frac := fitIn(e.contentBox(), iw, ih, e.fit, e.objectPos)
+	if dst.W <= 0 || dst.H <= 0 {
+		return
+	}
+	src := scene.Rect{X: frac.X * iw, Y: frac.Y * ih, W: frac.W * iw, H: frac.H * ih}
+	p.add(scene.Op{Kind: scene.OpImage, Rect: p.snap(dst), Radii: p.radii(e.radius), Continuous: continuousCorners, Image: img, Src: src, Opacity: p.opacity, Grayscale: e.gray})
 }
 
 // fitIn returns where a picture w×h DIPs goes in box as fit says, placed
@@ -1380,7 +1495,6 @@ func (p *Painter) drawBitmap(img *Bitmap, box Rect, fit Fit, pos [2]float32, rad
 func (p *Painter) scrollbars(e *node) {
 	st := e.st
 	rt := e.c.rt
-	theme := p.Theme()
 	hovered := false
 	for _, id := range rt.hover {
 		if id == e.id {
@@ -1390,15 +1504,32 @@ func (p *Painter) scrollbars(e *node) {
 	}
 	dragging := rt.scrollDrag.st == st
 	// A press takes the bars only where the window shows them
-	// (scrollbarPress). Kept, they show as on hover, the same thumb on no
-	// track, so that the pointer coming over changes nothing.
-	hide, keep := e.scrollbars()
-	st.barsShown = !hide && (keep || hovered || dragging)
-	if !st.barsShown {
-		return
+	// (scrollbarPress). Kept, they show as on hover, so that the pointer
+	// coming over changes nothing.
+	hide, keep := st.barFlags == 0, st.barFlags&keepBarsVisible != 0
+	if !hide && !keep {
+		// The bars show on hover (hoverNeeds).
+		st.hoverLook = true
 	}
-	color := theme.Scrollbar
-	w, h := e.contentW, e.contentH
+	// A finger is no pointer hovering, on it or after it, however it ended: only
+	// a mouse or a trackpad, as on a tablet, shows them by being over them.
+	hovered = hovered && !rt.lastPointerTouch
+	st.barsShown = !hide && (keep || hovered || dragging)
+	style := *st.barStyle
+	fade := float32(1)
+	if !st.barsShown {
+		// A finger shows a thin thumb on no track for a moment as it moves
+		// the content, and it fades: no press takes it.
+		if touchBars == nil {
+			return
+		}
+		fade = touchBars(st, rt)
+		if hide || fade <= 0 {
+			return
+		}
+		style.TrackWidth, style.ThumbWidth, style.Track = touchIndicatorWidth, touchIndicatorWidth, Color{}
+	}
+	w, h := st.contentW, st.contentH
 	x, y := st.scrollX, st.scrollY
 	if dragging {
 		// The thumb keeps its length, and goes as far along the track as
@@ -1408,12 +1539,49 @@ func (p *Painter) scrollbars(e *node) {
 		x = rescale(x, e.contentW-float64(e.w), w-float64(e.w))
 		y = rescale(y, e.contentH-float64(e.h), h-float64(e.h))
 	}
-	g := scrollBars(Rect{e.x, e.y, e.w, e.h}, e.barInset, float32(w), float32(h), float32(x), float32(y), e.flags, theme.scrollbarWidth(), e.rtl())
+	g := scrollBars(Rect{e.x, e.y, st.w, st.h}, st.barInset, float32(w), float32(h), float32(x), float32(y), st.flags, style, st.rtl)
+	g.vertical = g.vertical && st.barFlags&flagScrollY != 0
+	g.horizontal = g.horizontal && st.barFlags&flagScrollX != 0
+	if style.Track.A > 0 {
+		if g.vertical {
+			p.Fill(g.vTrack, style.Track, 0)
+		}
+		if g.horizontal {
+			p.Fill(g.hTrack, style.Track, 0)
+		}
+	}
+	// Hover colors the bar the pointer is over, and both while kept, as
+	// they show as on hover.
+	var overV, overH bool
+	if hovered {
+		lx, ly := st.local(rt.pointerX, rt.pointerY)
+		lx, ly = lx+e.x, ly+e.y
+		overV = g.vertical && g.vTrack.Contains(lx, ly)
+		overH = g.horizontal && g.hTrack.Contains(lx, ly)
+	}
+	vertical, horizontal := style.Thumb, style.Thumb
+	switch {
+	case dragging && !rt.scrollDrag.horizontal:
+		vertical = style.Active
+	case keep || overV:
+		vertical = style.Hover
+	}
+	switch {
+	case dragging && rt.scrollDrag.horizontal:
+		horizontal = style.Active
+	case keep || overH:
+		horizontal = style.Hover
+	}
+	if fade < 1 {
+		vertical.A = uint8(float32(vertical.A) * fade)
+		horizontal.A = uint8(float32(horizontal.A) * fade)
+	}
+	grow := style.ThumbWidth+2 <= style.TrackWidth
 	if g.vertical {
-		p.scrollThumbFill(g.v, false, dragging && !rt.scrollDrag.horizontal, color)
+		p.scrollThumbFill(g.v, false, grow && dragging && !rt.scrollDrag.horizontal, vertical, style.Radius)
 	}
 	if g.horizontal {
-		p.scrollThumbFill(g.h, true, dragging && rt.scrollDrag.horizontal, color)
+		p.scrollThumbFill(g.h, true, grow && dragging && rt.scrollDrag.horizontal, horizontal, style.Radius)
 	}
 }
 
@@ -1434,37 +1602,38 @@ type scrollGeometry struct {
 }
 
 // scrollBars returns the scroll bars of a container box scrolled by
-// (x, y) over content w×h, with thumbs width DIPs wide, moved in from its
-// edges by inset (top, right, bottom, left, ScrollbarInsets): those of the
-// directions its flags scroll that overflow, which leave each other the
-// corner where both show. Right to left (rtl), the vertical bar is on the
-// left, as in Flutter, browsers and GTK, the corner at the bottom left,
-// and x, which counts from the right, puts the horizontal thumb at the
-// right at 0.
-func scrollBars(box Rect, inset [4]float32, w, h, x, y float32, flags uint32, width float32, rtl bool) scrollGeometry {
+// (x, y) over content w×h, as style says, moved in from its edges by inset
+// (top, right, bottom, left, ScrollbarInsets): those of the directions its
+// flags scroll that overflow, which leave each other the corner where both
+// show. Right to left (rtl), the vertical bar is on the left, as in
+// Flutter, browsers and GTK, the corner at the bottom left, and x, which
+// counts from the right, puts the horizontal thumb at the right at 0.
+func scrollBars(box Rect, inset [4]float32, w, h, x, y float32, flags uint32, style ScrollbarStyle, rtl bool) scrollGeometry {
 	var g scrollGeometry
 	g.vertical = flags&flagScrollY != 0 && h > box.H+0.5
 	g.horizontal = flags&flagScrollX != 0 && w > box.W+0.5
+	width, thumb := style.TrackWidth, style.ThumbWidth
 	corner := float32(0)
 	if g.vertical && g.horizontal {
-		corner = width + 3
+		// The bars overlap by 3 DIPs, as the thumb's inset from the edge.
+		corner = max(width-3, 0)
 	}
 	top, right, bottom, left := inset[0], inset[1], inset[2], inset[3]
 	if g.vertical {
 		track := max(box.H-top-bottom-corner, 0)
-		g.vTrack = Rect{box.X + box.W - right - width - 6, box.Y + top, width + 6, track}
-		t := scrollThumb(box.Y+top, track, box.H, h, y)
-		g.v = Rect{box.X + box.W - right - width - 3, t.Y, width, t.H}
+		g.vTrack = Rect{box.X + box.W - right - width, box.Y + top, width, track}
+		t := scrollThumb(box.Y+top, track, box.H, h, y, style.MinLength, style.inset())
+		g.v = Rect{box.X + box.W - right - width + (width-thumb)/2, t.Y, thumb, t.H}
 		if rtl {
 			g.vTrack.X = box.X + left
-			g.v.X = box.X + left + 3
+			g.v.X = box.X + left + (width-thumb)/2
 		}
 	}
 	if g.horizontal {
 		track := max(box.W-left-right-corner, 0)
-		g.hTrack = Rect{box.X + left, box.Y + box.H - bottom - width - 6, track, width + 6}
-		t := scrollThumb(box.X+left, track, box.W, w, x)
-		g.h = Rect{t.Y, box.Y + box.H - bottom - width - 3, t.H, width}
+		g.hTrack = Rect{box.X + left, box.Y + box.H - bottom - width, track, width}
+		t := scrollThumb(box.X+left, track, box.W, w, x, style.MinLength, style.inset())
+		g.h = Rect{t.Y, box.Y + box.H - bottom - width + (width-thumb)/2, t.H, thumb}
 		if rtl {
 			g.hTrack.X += corner
 			// As far from the right of the track as the thumb would be
@@ -1477,16 +1646,20 @@ func scrollBars(box Rect, inset [4]float32, w, h, x, y float32, flags uint32, wi
 
 // scrollThumb returns the thumb's position (Y) and length (H) along a
 // track starting at pos, track long, for a view of content of size content
-// scrolled by offset.
-func scrollThumb(pos, track, view, content, offset float32) Rect {
-	inner := track - 4
-	thumb := min(max(inner*view/content, 24), inner)
+// scrolled by offset, no shorter than minLength, and inset from each end of
+// the track.
+func scrollThumb(pos, track, view, content, offset, minLength, inset float32) Rect {
+	if minLength <= 0 {
+		minLength = 24
+	}
+	inner := max(track-2*inset, 0)
+	thumb := min(max(inner*view/content, minLength), inner)
 	travel := inner - thumb
 	at := float32(0)
 	if content > view {
 		at = max(0, min(travel*offset/(content-view), travel))
 	}
-	return Rect{Y: pos + 2 + at, H: thumb}
+	return Rect{Y: pos + inset + at, H: thumb}
 }
 
 // Fill paints a rounded rectangle.
@@ -1741,8 +1914,12 @@ func (p *Painter) Clip(r Rect, radius float32, fn func()) {
 func (p *Painter) Transform(t Transform, ox, oy float32, fn func()) {
 	saved := p.transform
 	if t.set() {
-		m := Translation(-ox, -oy).Then(t).Then(Translation(ox, oy))
-		p.transform = saved.Mul(m.flat())
+		// Flattened around its own origin, then moved there in 2D, as an
+		// element's (transformAt): the product keeps the divisor's sign,
+		// so that a card turning over in perspective around (ox, oy) far
+		// from the window's origin is in front of the viewer, though the
+		// window's origin is behind it (#1406).
+		p.transform = saved.Mul(scene.Translation(ox, oy).Mul(t.flat()).Mul(scene.Translation(-ox, -oy)))
 	}
 	fn()
 	p.transform = saved

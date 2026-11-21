@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"encoding/binary"
+	"hash/maphash"
 	"math"
 	"slices"
 	"strings"
@@ -46,7 +48,12 @@ type Span struct {
 	// line's piece of a span that wraps gets both, and its corners, as
 	// with CSS's box-decoration-break: clone.
 	PaddingX, PaddingY float32
-	LetterSpacing      float32
+	// PaddingStart takes that much more room at the start of each line's
+	// piece of the span, past PaddingX, background or not: its left in
+	// left-to-right text, its right in right-to-left text. Room for an
+	// icon an app draws before it, as a link's site's.
+	PaddingStart  float32
+	LetterSpacing float32
 	// NoLetterSpacing makes a zero LetterSpacing the span's own, rather
 	// than the text's around it, as CSS's letter-spacing: 0 on an inline
 	// box: digits or code within tracked capitals.
@@ -169,7 +176,10 @@ func coreRichText(c *context, spans ...Span) *node {
 // textSpans encodes the styles of an element's spans for its layout, once
 // a frame, with those of the elements inside it, once it is built.
 func (e *node) textSpans() string {
+	rt := e.c.rt
 	if e.first != nil && !e.merged {
+		journalKeepSpans(rt, &e.spans)
+		journalKeep(rt, &e.merged)
 		e.spans, e.merged = e.inlineSpans(), true
 	}
 	if e.spans == nil || e.spansKey != "" {
@@ -177,6 +187,7 @@ func (e *node) textSpans() string {
 	}
 	sc := e.st.spanCache()
 	sc.update(e.spans)
+	journalKeepString(rt, &e.spansKey)
 	e.spansKey = sc.key
 	return e.spansKey
 }
@@ -259,7 +270,7 @@ func (sc *spanCache) update(spans []Span) {
 // layout.
 func spanStyle(s Span, end int) text.Span {
 	return text.Span{End: end, Family: s.Font, Size: s.Size, Weight: s.Weight, Italic: s.Italic, LetterSpacing: s.LetterSpacing, SpacingSet: s.NoLetterSpacing, Features: s.Features, Lang: s.Lang,
-		ObjectWidth: s.ObjectWidth, ObjectHeight: s.ObjectHeight, ObjectDescent: s.ObjectDescent, BaselineShift: s.BaselineShift, PaddingX: s.PaddingX}
+		ObjectWidth: s.ObjectWidth, ObjectHeight: s.ObjectHeight, ObjectDescent: s.ObjectDescent, BaselineShift: s.BaselineShift, PaddingX: s.PaddingX, PaddingStart: s.PaddingStart}
 }
 
 // encodeSpans encodes the styles of spans for a layout.
@@ -273,37 +284,93 @@ func encodeSpans(spans []Span) string {
 	return text.EncodeSpans(ts)
 }
 
-// richParams returns how to lay out spans over the text style of theme t,
-// wrapping lines at width (none for 0).
-func (rt *engine) richParams(t *Theme, width float32, spans []Span) text.Params {
+// measuredCap is how many spans laid out outside elements the engine
+// keeps (richSpans): more than the lines a view draws in a frame with
+// Painter.RichText, as a diff's.
+const measuredCap = 256
+
+// richSpans returns spans laid out over the text style of theme t,
+// wrapping lines at width (none for 0): how, and how to paint them.
+func (rt *engine) richSpans(t *Theme, width float32, spans []Span) *measuredSpans {
 	style := text.Style{Family: t.Font, Size: t.FontSize, Lang: rt.lang}
-	// Views measure the same spans frame after frame.
-	for i := range rt.measured {
+	// Views measure and draw the same spans frame after frame, as many as
+	// their lines: the entry of their fingerprint is theirs if it holds
+	// the same, and spans sharing a fingerprint only lay out again.
+	key := spansFingerprint(width, style, spans)
+	if i, ok := rt.measuredAt[key]; ok {
 		m := &rt.measured[i]
-		if m.p.Width == width && m.p.Style == style && m.spans != nil && slices.Equal(m.spans, spans) {
-			return m.p
+		if m.p.Width == width && m.p.Style == style && slices.Equal(m.spans, spans) {
+			return m
 		}
+	}
+	if rt.measured == nil {
+		rt.measured = make([]measuredSpans, measuredCap)
+		rt.measuredAt = make(map[uint64]int32, measuredCap)
+	}
+	i := rt.nextMeasured
+	rt.nextMeasured = (i + 1) % len(rt.measured)
+	m := &rt.measured[i]
+	if j, ok := rt.measuredAt[m.key]; ok && int(j) == i {
+		delete(rt.measuredAt, m.key)
 	}
 	var b strings.Builder
 	for _, s := range spans {
 		b.WriteString(s.Text)
 	}
-	p := text.Params{Text: b.String(), Width: width, Style: style, Spans: encodeSpans(spans)}
-	m := &rt.measured[rt.nextMeasured]
-	rt.nextMeasured = (rt.nextMeasured + 1) % len(rt.measured)
-	// Strings do not change: a copy of the spans keeps them.
-	m.spans, m.p = append(m.spans[:0], spans...), p
+	// Strings do not change: a copy of the spans keeps them, and paints
+	// them, as the caller may fill its own with others before the next
+	// frame.
+	m.spans = append(m.spans[:0], spans...)
 	if m.spans == nil {
 		m.spans = []Span{}
 	}
-	return p
+	var sc spanCache
+	sc.update(m.spans)
+	m.p = text.Params{Text: b.String(), Width: width, Style: style, Spans: sc.key}
+	m.paint, m.key = nil, key
+	if sc.paints {
+		m.paint = &spanPaint{spans: m.spans, styles: sc.styles}
+	}
+	rt.measuredAt[key] = int32(i)
+	return m
 }
 
-// measuredSpans are spans Painter.RichText or MeasureText laid out, and
-// how.
+// spansFingerprint returns a hash of spans laid out over style at width:
+// of their texts, fonts, sizes, weights and colors, which tell apart the
+// spans of a view's lines; spans differing in their other fields alone
+// share it.
+func spansFingerprint(width float32, style text.Style, spans []Span) uint64 {
+	var buf [16]byte
+	var hs maphash.Hash
+	hs.SetSeed(keySeed)
+	binary.LittleEndian.PutUint32(buf[:4], math.Float32bits(width))
+	binary.LittleEndian.PutUint32(buf[4:8], math.Float32bits(style.Size))
+	hs.Write(buf[:8])
+	hs.WriteString(style.Family)
+	hs.WriteByte(0)
+	hs.WriteString(style.Lang)
+	for _, s := range spans {
+		hs.WriteByte(0)
+		hs.WriteString(s.Text)
+		hs.WriteByte(0)
+		hs.WriteString(s.Font)
+		binary.LittleEndian.PutUint32(buf[:4], math.Float32bits(s.Size))
+		binary.LittleEndian.PutUint32(buf[4:8], uint32(s.Weight))
+		buf[8], buf[9], buf[10], buf[11] = s.Color.R, s.Color.G, s.Color.B, s.Color.A
+		buf[12], buf[13], buf[14], buf[15] = s.Background.R, s.Background.G, s.Background.B, s.Background.A
+		hs.Write(buf[:])
+	}
+	return hs.Sum64()
+}
+
+// measuredSpans are spans Painter.RichText or MeasureText laid out, how,
+// and how to paint them (nil when they paint nothing but the theme's
+// color); key is their fingerprint.
 type measuredSpans struct {
 	spans []Span
 	p     text.Params
+	paint *spanPaint
+	key   uint64
 }
 
 // RichText draws spans of text as RichText shows them, with its top-left
@@ -315,15 +382,16 @@ type measuredSpans struct {
 //	p.RichText(r.X+(r.W-w)/2, r.Y, 0, label)
 func (p *Painter) RichText(x, y, width float32, spans ...Span) (w, h float32) {
 	t := p.Theme()
-	l := p.rt.text.Layout(p.rt.richParams(t, width, spans))
-	p.textLayout(l, x, y, t.Text, textStyle{size: t.FontSize}, newSpanPaint(spans))
+	m := p.rt.richSpans(t, width, spans)
+	l := p.rt.text.Layout(m.p)
+	p.textLayout(l, x, y, t.Text, textStyle{size: t.FontSize}, m.paint)
 	return l.Width, l.Height
 }
 
 // MeasureText returns the size spans of text take as Painter.RichText draws
 // them, wrapping lines at width DIPs (none for 0).
 func (p *Painter) MeasureText(width float32, spans ...Span) (w, h float32) {
-	l := p.rt.text.Layout(p.rt.richParams(p.Theme(), width, spans))
+	l := p.rt.text.Layout(p.rt.richSpans(p.Theme(), width, spans).p)
 	return l.Width, l.Height
 }
 
@@ -331,7 +399,7 @@ func (p *Painter) MeasureText(width float32, spans ...Span) (w, h float32) {
 // them, wrapping lines at width DIPs (none for 0), to lay out what depends
 // on it while building.
 func (c *context) MeasureText(width float32, spans ...Span) (w, h float32) {
-	l := c.rt.text.Layout(c.rt.richParams(c.theme, width, spans))
+	l := c.rt.text.Layout(c.rt.richSpans(c.theme, width, spans).p)
 	return l.Width, l.Height
 }
 
@@ -462,15 +530,21 @@ func (sp *spanPaint) backgrounds(p *Painter, line *text.Line, x, y float32) {
 		if k < 0 || sp.spans[k].Background.A == 0 {
 			return
 		}
-		if s := &sp.spans[k]; s.Radius > 0 || s.PaddingX > 0 || s.PaddingY > 0 {
+		if s := &sp.spans[k]; s.Radius > 0 || s.PaddingX > 0 || s.PaddingY > 0 || s.PaddingStart > 0 {
 			size := line.Glyphs[i].Size
 			px := min(size*0.22, s.Radius)
-			if s.PaddingX > 0 || s.PaddingY > 0 {
+			if s.PaddingX > 0 || s.PaddingY > 0 || s.PaddingStart > 0 {
 				px = max(s.PaddingX, 0) // the room the layout left
+			}
+			pl, pr := px, px // the start's room on the side the piece's direction starts at
+			if line.Glyphs[i].RTL {
+				pr += max(s.PaddingStart, 0)
+			} else {
+				pl += max(s.PaddingStart, 0)
 			}
 			py := max(s.PaddingY, 0)
 			base := line.Baseline - s.BaselineShift
-			p.Fill(Rect{x + x0 - px, y + base - size*0.98 - py, x1 - x0 + 2*px, size*1.32 + 2*py}, s.Background, s.Radius)
+			p.Fill(Rect{x + x0 - pl, y + base - size*0.98 - py, x1 - x0 + pl + pr, size*1.32 + 2*py}, s.Background, s.Radius)
 			return
 		}
 		p.Fill(Rect{x + x0, y + line.Y, x1 - x0, line.Height}, sp.spans[k].Background, 0)

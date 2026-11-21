@@ -105,13 +105,41 @@ func (ed *editor) moveLines(dir int) bool {
 	}
 	sels := slices.Clone(ed.sels)
 	folds := slices.Clone(ed.folds)
-	ok := ed.apply(edits, editOther, func(move func(int, bias) int) []sel {
+	// The text is as long after: a selection through the newline of lines
+	// that become the last ends with them.
+	end := r.Len()
+	// Each line takes its ending with it: the breaks of an edit end, in
+	// order, the lines it puts in, the one after it the last of them.
+	ends := func(e lineEnds) []string {
+		n := e.codes.Len()
+		codes := make([]string, len(spans))
+		for i, sp := range spans {
+			inner := e.codes.Slice(sp.from, sp.to) // the block's
+			if dir < 0 {
+				// The block, then the line above it.
+				if sp.to < n {
+					codes[i] = inner + string(e.at(sp.to)) + string(e.at(sp.from-1))
+				} else {
+					codes[i] = inner + string(e.at(sp.from-1)) // the last line
+				}
+				continue
+			}
+			// The line below, then the block.
+			if sp.to+1 < n {
+				codes[i] = string(e.at(sp.to+1)) + inner + string(e.at(sp.to))
+			} else {
+				codes[i] = string(e.at(sp.to)) + inner // the last line
+			}
+		}
+		return codes
+	}
+	ok := ed.applyEnds(edits, ends, editOther, func(move func(int, bias) int) []sel {
 		for i := range sels {
 			s := &sels[i]
 			for _, sh := range shifts {
 				if s.start() >= sh.from && s.end() <= sh.to+1 {
-					s.anchor += sh.by
-					s.head += sh.by
+					s.anchor = min(s.anchor+sh.by, end)
+					s.head = min(s.head+sh.by, end)
 					break
 				}
 			}
@@ -345,13 +373,16 @@ func (ed *editor) toggleComment() bool {
 	spans := ed.selLines()
 	for _, sp := range spans {
 		minIndent := -1
-		all := true
+		// all is whether the lines are comments already, to take the prefix
+		// off: false for blank lines alone, which have none to take off.
+		all, any := true, false
 		for line := sp.from; line <= sp.to; line++ {
 			s := r.Line(line)
 			t := strings.TrimLeft(s, " \t")
 			if t == "" {
 				continue
 			}
+			any = true
 			if !strings.HasPrefix(t, prefix) {
 				all = false
 			}
@@ -359,6 +390,7 @@ func (ed *editor) toggleComment() bool {
 				minIndent = n
 			}
 		}
+		all = all && any
 		if minIndent < 0 {
 			minIndent = len(indentOf(r.Line(sp.from)))
 		}
@@ -464,7 +496,15 @@ func (ed *editor) manipulateLines(cmd Command) bool {
 		for i := range sels {
 			s := &sels[i]
 			if s.empty() {
-				s.collapse(min(s.head, t.Len()))
+				// At the start of the character that came there.
+				at := min(s.head, t.Len())
+				line := t.LineOf(at)
+				a := t.LineStart(line)
+				text := t.Slice(a, t.LineEnd(line))
+				for at > a && at-a < len(text) && !utf8.RuneStart(text[at-a]) {
+					at--
+				}
+				s.collapse(at)
 				continue
 			}
 			for _, e := range edits {
@@ -494,7 +534,8 @@ func (ed *editor) convertCase(cmd Command) bool {
 			sels[i].anchor, sels[i].head = a, z
 		}
 	}
-	ed.sels = sels
+	// Carets in one word, or in a word with a selection, convert it once.
+	ed.sels = mergeSels(sels)
 	return ed.replaceEach(editOther, true, func(_ int, s sel) string {
 		return convertCase(r.Slice(s.start(), s.end()), cmd)
 	})

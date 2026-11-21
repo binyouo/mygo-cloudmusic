@@ -1,16 +1,28 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mygo",
+  "main": "./worker.js",
   "compatibility_date": "2026-09-01",
-  // A static site: no Worker script, only the pages that `bun run build` prerenders.
+  // Production serves this domain; previews keep their own Cloudflare URLs.
+  "routes": [
+    { "pattern": "mygo.run", "custom_domain": true },
+    { "pattern": "mygo.egoist.dev", "custom_domain": true },
+  ],
+  // Redirect the old host before serving even an existing static asset.
   "assets": {
     "directory": "./dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": true,
     // docs/app/index.html is served at /docs/app.
     "html_handling": "drop-trailing-slash",
     // dist/client/404.html, with a 404 status.
     "not_found_handling": "404-page",
   },
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true },
+  },
   // `wrangler preview`, which Cloudflare's builds run, needs this block, even empty:
-  // previews take the settings above.
+  // previews use the assets above, not the production domain.
   "previews": {},
 }

@@ -85,7 +85,12 @@ func TestMenuBarClosesOnAlt(t *testing.T) {
 	if !openMenus(w, 0) {
 		t.Skip("the window cannot come to the front, where the keyboard types")
 	}
-	// A Down in the bar opens its first menu, a menu of Windows'.
+	// openMenus enters the bar from another goroutine: a key typed before
+	// its loop starts goes to the window, or to its page, not to the bar.
+	eventually(t, "the keyboard in the menu bar", func() bool { return inMenuLoop(w) })
+	// A Down in the bar opens its first menu, a menu of Windows'. The page,
+	// another process's window, would read some of the keys typed in the
+	// menus, had the bar not taken the keyboard from it.
 	mygo.RunOnMain(func() { win.TestPressKeys(0x28) }) // VK_DOWN
 	eventually(t, "the first menu of the bar open", func() bool { menus, _ := popupMenus(); return len(menus) > 0 })
 	mygo.RunOnMain(func() { win.TestPressKeys(0x12) }) // VK_MENU

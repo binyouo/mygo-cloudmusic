@@ -214,7 +214,9 @@ func loadCoreText() error {
 	text := lib("/System/Library/Frameworks/CoreText.framework/CoreText")
 	cg := lib("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
 	objcLib := lib("/usr/lib/libobjc.A.dylib")
-	lib("/System/Library/Frameworks/AppKit.framework/AppKit") // NSFont
+	if runtime.GOOS != "ios" {
+		lib("/System/Library/Frameworks/AppKit.framework/AppKit") // NSFont
+	}
 	if len(missing) > 0 {
 		return fmt.Errorf("cannot load %s", strings.Join(missing, ", "))
 	}
@@ -413,6 +415,8 @@ type coreText struct {
 	// oblique maps an upright Font to its synthetic italic variant. Both
 	// are retained by fonts, and have distinct glyph/outline cache keys.
 	oblique map[*Font]*Font
+	// delegates size the inline objects of the text being laid out.
+	delegates delegates
 	// italic names an attribute that marks the runes of italic spans in a
 	// text that is not italic, owned, so that Core Text ends a run where
 	// italics start or stop even when both sides are in one font, as a
@@ -471,8 +475,13 @@ type registeredFace struct {
 	mono   bool
 }
 
+// coreTextLoaded binds the functions of Core Text and its frameworks
+// once, as engines are made apart, on the goroutine of each, and what
+// one bound the others reuse.
+var coreTextLoaded = sync.OnceValue(loadCoreText)
+
 func newCoreText() (*coreText, error) {
-	if err := loadCoreText(); err != nil {
+	if err := coreTextLoaded(); err != nil {
 		return nil, err
 	}
 	e := &coreText{
@@ -504,7 +513,8 @@ func newCoreText() (*coreText, error) {
 	if e.srgb == 0 {
 		e.srgb = ct.colorSpaceDeviceRGB()
 	}
-	e.smooth = fontSmoothing()
+	// iOS smooths no text: it draws glyphs as Core Graphics does.
+	e.smooth = runtime.GOOS != "ios" && fontSmoothing()
 	return e, nil
 }
 
@@ -598,6 +608,14 @@ func (e *coreText) systemFont(size float32, weight int, italic, mono bool) uintp
 			font = e.named("Menlo", size, weight, false)
 		} else {
 			font = ct.uiFontForLanguage(ctFontUIFontSystem, float64(size), 0)
+			// iOS has no NSFont: the weight goes in the system font's
+			// descriptor, as UIFont's systemFontOfSize:weight: does.
+			if runtime.GOOS == "ios" && font != 0 && weight != 400 {
+				if f := e.weighted(font, size, weight); f != 0 {
+					ct.release(font)
+					font = f
+				}
+			}
 		}
 	}
 	if font != 0 && italic {
@@ -607,6 +625,24 @@ func (e *coreText) systemFont(size float32, weight int, italic, mono bool) uintp
 		}
 	}
 	return font
+}
+
+// weighted returns font at a weight, owned, or 0: a copy of it with the
+// weight trait in its descriptor, which picks the system font's face of
+// that weight.
+func (e *coreText) weighted(font uintptr, size float32, weight int) uintptr {
+	w := cfFloat(nsWeight(weight))
+	defer ct.release(w)
+	traits := cfDictionary([]uintptr{ct.weightTrait}, []uintptr{w})
+	defer ct.release(traits)
+	attrs := cfDictionary([]uintptr{ct.traitsAttribute}, []uintptr{traits})
+	defer ct.release(attrs)
+	desc := ct.descriptorWithAttrs(attrs)
+	if desc == 0 {
+		return 0
+	}
+	defer ct.release(desc)
+	return ct.fontWithAttrs(font, float64(size), 0, desc)
 }
 
 // named returns a font of a family the system has, owned, or 0.
@@ -795,7 +831,7 @@ func (e *coreText) styleSpans(attributed uintptr, style Style, spans []Span, tex
 			objects += max(min(sp.End, len(text))-start, 0)
 		}
 	}
-	runDelegates.reset(objects)
+	e.delegates.reset(objects)
 	objects = 0
 	from := 0
 	for _, sp := range spans {
@@ -810,8 +846,8 @@ func (e *coreText) styleSpans(attributed uintptr, style Style, spans []Span, tex
 			// Each rune is an object of its own: a run Core Text sizes by
 			// its delegate.
 			for k := start; k < to; k++ {
-				if d := runDelegates.delegate(objects, sp.ObjectWidth, sp.ObjectHeight, sp.ObjectDescent); d != 0 {
-					ct.attributedSet(styled, cfRange{at[k], at[k+1] - at[k]}, runDelegates.attribute, d)
+				if d := e.delegates.delegate(objects, sp.ObjectWidth, sp.ObjectHeight, sp.ObjectDescent); d != 0 {
+					ct.attributedSet(styled, cfRange{at[k], at[k+1] - at[k]}, runDelegate.attribute, d)
 					ct.release(d)
 				}
 				objects++
@@ -958,6 +994,11 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 	if font == 0 || len(text) == 0 {
 		return nil
 	}
+	if len(spans) > 0 {
+		// After the typesetter and its lines are released, deferred
+		// below.
+		defer e.delegates.done()
+	}
 	lang := style.Lang
 	if ct.languageName == 0 || !languageShapes(text, lang) {
 		lang = ""
@@ -1005,16 +1046,23 @@ func (e *coreText) shapeText(text []rune, style Style, spans []Span, width float
 	u16, index := e.u16, e.index
 	n := len(u16)
 	var breaks []bool
-	if wholeWords && width > 0 {
+	keepWords := false
+	if width > 0 && (wholeWords || keepsAnyWords(style.Lang, spans)) {
 		e.breaks = lineBreaks(&e.seg, e.breaks, text)
-		breaks = e.breaks
+		keepWords = keepWordsWhole(e.breaks, text, style.Lang, spans)
+		if wholeWords || keepWords {
+			breaks = e.breaks
+		}
 	}
-	return e.typesetLines(typesetter, n, width, breaks, index, style.Italic)
+	return e.typesetLines(typesetter, n, width, breaks, wholeWords, keepWords, index, style.Italic)
 }
 
 // typesetLines has Core Text break a typesetter's text of n UTF-16 units into
-// lines, carrying on to the next of breaks when given, and shape them.
-func (e *coreText) typesetLines(typesetter uintptr, n int, width float32, breaks []bool, index []int, italic bool) []shapedLine {
+// lines, and shape them. Where Core Text breaks a line elsewhere than at one
+// of breaks, when given, the line goes back to the last of them in it when
+// keepWords (keepWordsWhole), or carries on to the next of them when
+// wholeWords and there is none to go back to.
+func (e *coreText) typesetLines(typesetter uintptr, n int, width float32, breaks []bool, wholeWords, keepWords bool, index []int, italic bool) []shapedLine {
 	var lines []shapedLine
 	mark := len(e.shapeScratch.lines)
 	for start := 0; start < n; {
@@ -1024,12 +1072,21 @@ func (e *coreText) typesetLines(typesetter uintptr, n int, width float32, breaks
 			// may round below Core Text's own line width and wrap the
 			// last word; allow a 1/1024 point, as Pango's units do.
 			count = max(ct.suggestLineBreak(typesetter, start, float64(width)+1.0/1024), 1)
-			// Core Text breaks a word that does not fit a line; carry
-			// on to the next break instead.
-			if breaks != nil {
-				end := min(start+count, n)
-				for end < n && (index[end] == index[end-1] || !breaks[index[end]]) {
-					end++
+			// Core Text breaks a Korean word, and a word that does not
+			// fit a line: the line ends at the last break before it, or
+			// a whole word carries on to the next break instead.
+			if end := min(start+count, n); breaks != nil && end < n && !breakAt(breaks, index, end) {
+				back := end
+				for keepWords && back > start && !breakAt(breaks, index, back) {
+					back--
+				}
+				switch {
+				case keepWords && back > start:
+					end = back
+				case wholeWords:
+					for end < n && !breakAt(breaks, index, end) {
+						end++
+					}
 				}
 				count = end - start
 			}
@@ -1111,12 +1168,6 @@ type typesetterKey struct {
 	spacing float32
 	noKern  bool
 	text    uint64
-}
-
-// textHash is what a text comes to in a typesetterKey, its own rather than
-// a string of it, which would take making one for each text at each width.
-func textHash(seed maphash.Seed, text []rune) uint64 {
-	return maphash.Bytes(seed, unsafe.Slice((*byte)(unsafe.Pointer(&text[0])), len(text)*4))
 }
 
 // keptTypesetter is a typesetter kept across frames, with the font it holds
@@ -1520,8 +1571,10 @@ func (e *coreText) inkInBand(f *Font, id uint32, lo, hi float32) (a, b float32, 
 }
 
 // The outline of a glyph, flattened into segments, as CGPathApply hands
-// its elements to the one callback made for it.
+// its elements to the one callback made for it. outlineMu serializes the
+// engines that read outlines, each System's on a goroutine of its own.
 var (
+	outlineMu   sync.Mutex
 	outlineOnce sync.Once
 	outlineFn   uintptr
 	outlineSegs [][4]float64
@@ -1535,8 +1588,10 @@ type cgPathElement struct {
 }
 
 // glyphOutline returns the outline of a glyph in points, y up, as line
-// segments. The text system's lock serializes its callers.
+// segments.
 func glyphOutline(font uintptr, glyph uint16) [][4]float64 {
+	outlineMu.Lock()
+	defer outlineMu.Unlock()
 	outlineOnce.Do(func() {
 		outlineFn = purego.NewCallback(func(_ uintptr, el *cgPathElement) uintptr {
 			pt := func(i int) [2]float64 {
