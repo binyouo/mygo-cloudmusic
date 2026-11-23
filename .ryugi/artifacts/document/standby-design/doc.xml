@@ -1,0 +1,79 @@
+<doc>
+  <h1 id="Ez_ObDGS">待机显示 · iPhone StandBy 式全屏播放页</h1>
+  <p id="aGhTnX4I"><b>意图。</b>用户想要 iPhone 息屏待机（StandBy）那种横屏环境光展示：播放中随时抬眼一看，封面、当前行歌词、进度都在。模型已确认：这是<b>应用内</b>的全屏横屏表面（不是真的 iOS StandBy API），像 iPhone 待机那样以一张居中的播放卡呈现；播放中从跳动的音量条点击进入，与屏保共用同一套进入/退出。</p>
+  <h2 id="vstzmIxP">画板决定</h2>
+  <p id="pj8PkFcG">三轮画板，每轮的用户选择：</p>
+  <p id="YofT2N-B"><ref artboard="standby-settings" to="clgKwkykrS4Iut4Wy4mXe" group="q1" /></p>
+  <ul id="g0BTnI5m">
+    <li><b>设置形态 → q1-b</b>：待机是「播放屏保」的一种样式，并入现有组，不长独立分组、不加预览卡。</li>
+  </ul>
+  <p id="qpwZJV9x"><ref artboard="standby-settings" to="clgKwkykrS4Iut4Wy4mXe" group="q2" /></p>
+  <ul id="Mq7ZVySb">
+    <li><b>页面构成 → r2-c</b>（终端口述，已代录）：单屏，不翻页，不需要时钟页；「和横屏的时候一样」指按 App 自己的横屏播放页重构。</li>
+  </ul>
+  <p id="MZa8c1dh"><ref artboard="standby-settings" to="clgKwkykrS4Iut4Wy4mXe" group="q3" /></p>
+  <ul id="BamvpIZ8">
+    <li><b>单屏形态 → r3-c</b>：iPhone 式单卡——内容收进一张居中的半透明卡：左封面，右列从上到下是标题/艺人、当前行歌词+下一句、三个走带键、进度条+时间；右上角一枚很小的时间。</li>
+  </ul>
+  <h2 id="CUcDa_l-">目标</h2>
+  <ul id="FW_zvnel">
+    <li>屏保多一种样式「待机显示」：全屏横屏表面上一张 iPhone StandBy 式播放卡，远看可读。</li>
+    <li>新入口：播放中点击<b>跳动的音量条</b>（刘海播放器 compact/展开形态里的电平条 <code>n.levels</code>）进入同一表面。</li>
+    <li>设置页只多一行「屏保样式」，放在现有「播放屏保」组里。</li>
+  </ul>
+  <h2 id="4TMNuH4I">非目标</h2>
+  <ul id="44GXXCvp">
+    <li>不做翻页/多页面（时钟页、相册页都不做）；不做真正 iOS StandBy/WidgetKit 集成。</li>
+    <li>不动普通 Now Playing 窗口内布局；不改退出逻辑（Esc / 双击空白 / ⌘T）。</li>
+    <li>竖屏布局不做（屏保窗口本身即全屏横屏）。</li>
+  </ul>
+  <h2 id="_Lloapd5">设置</h2>
+  <ul id="cCgyxMOp">
+    <li><code>settings.WallpaperStyle string</code>：<code>&quot;&quot;/&quot;playing&quot;</code> 现状播放页，<code>&quot;standby&quot;</code> 待机卡。<code>settings.StandbyClock bool</code>：右上角小时钟，默认 true。随 settings.json 保存。</li>
+    <li><b>范围</b>：与屏保一致，仅 macOS（设置组本来就在 darwin 分支里；刘海入口同理）。</li>
+    <li>「播放屏保」组内新行<b>屏保样式</b>：分段控件 <b>播放页 / 待机显示</b>，描述沿用板上文案（封面全屏，或 iPhone 待机式单卡）。<i>（我的判断：板上原有的「待机页面」「时钟样式」两行随翻页/时钟页概念一起撤掉，不再出现。）</i></li>
+    <li>新行<b>待机页显示小时钟</b>（开关，默认开）：控制右上角那枚小时钟。<i>（我的判断：用户说「不需要时钟 或者很小」，开关两边都照顾到。）</i></li>
+  </ul>
+  <h2 id="HDIYetlS">待机表面</h2>
+  <ul id="VL7uepL-">
+    <li>复用屏保窗口全套机制（<code>openWallpaperWindow</code>、渐显渐隐、Esc/双击退出、快捷键、输入探测）。<code>wallpaperView</code> 按 <code>WallpaperStyle</code> 分流：现状走 <code>nowPlayingSurface(c, true)</code>；待机走新 <code>a.standbyView(c)</code>。</li>
+    <li>背景：现有 <code>a.backdrop</code> 封面取色 bloom，与播放页同源。</li>
+    <li>卡片：居中，圆角半透明深色（参考板 rgba(18,14,18,.5)，半径 ~26）。左封面（高度随卡片，沿用 <code>npMorph</code>/封面过渡），右列：</li>
+    <li>
+      <ul>
+        <li>标题 + 艺人（与播放页同款 <code>artistLinks</code>）</li>
+        <li>当前歌词行（粗体）+ 下一句（淡）；无定时歌词、纯音乐、播客节目时整块省略，不显示占位</li>
+        <li>走带三个键：上一首 / 播放暂停 / 下一首（板上没有随机与循环，跟板走）</li>
+        <li>进度条（沿用 <code>scrubber</code>，可拖）+ 已播/剩余时间；不带音质徽章、音量条、喜欢、菜单（板上都没有）</li>
+      </ul>
+    </li>
+    <li>右上角小时钟：HH:MM，约 15px、白 55%，随「待机页显示小时钟」开关。</li>
+    <li>无 tab 行、无关闭 chevron、无悬停才现的控件——待机是展示面，不是窗。</li>
+    <li>退出与现状一致：Esc、双击空白、⌘T；卡片上的按钮照常可点。</li>
+  </ul>
+  <h2 id="ES2ZhoCN">音量条入口</h2>
+  <ul id="3pCrdwJN">
+    <li>刘海播放器 compact 形态右侧电平条（<code>ui_notch.go</code> <code>compact</code> 里的 <code>n.levels</code>，~16pt 4 柱）与展开形态右侧电平条（<code>expanded</code> 里 26×22 5 柱）包一层可点区，点击 = <code>a.toggleWallpaper()</code>，即进入当前配置的屏保样式（配置了待机就进待机）。辅助标签「打开待机显示」。注意刘海目前是悬停展开：电平条的可点区不能破坏 hover 展开（点下只触屏保，悬停照常）。</li>
+    <li><i>（我的判断：列表行/每日推荐里的跳动指示条不加点击——它们是列表态指示，不是环境入口；只有刘海这个常驻环境表面当入口。）</i></li>
+  </ul>
+  <h2 id="_w9fRLVY">视觉方向（已定，按 interface-craft）</h2>
+  <ul id="uQF-fCbx">
+    <li><b>产品</b>：桌面音乐 app，人在房间另一头瞟一眼的表面，不是操作台。</li>
+    <li><b>气质</b>：环境光、安静、像 iPhone 待机那样&quot;放着看&quot;。</li>
+    <li><b>世界</b>：封面取色驱动一切——bloom 背景、卡片半透明玻璃；iPhone StandBy 卡片是参照物。</li>
+    <li><b>时刻</b>：进入时卡片随窗口渐显浮现（沿用屏保 reveal 动效）。</li>
+    <li><b>签名</b>：与播放页同源的封面色背景 + 卡内歌词行。</li>
+  </ul>
+  <h2 id="a1GgKizj">留给实现者</h2>
+  <ul id="kfgYzz39">
+    <li>卡片尺寸与最小屏适配（参考板约 880×470 屏卡 ~640×320；小屏收缩规则自定，封面不被挤压）。</li>
+    <li>非拉丁歌词行的字号微调；进度/控制细节沿用现有控件。</li>
+    <li>测试按 AGENTS.md：ui.NewTester 覆盖——点击电平条进入待机、Esc/双击退出、样式切换生效、小时钟开关；`go test ./internal/...`、新 UI 测试 `-count=5`。</li>
+  </ul>
+  <h2 id="VJ6jh7-w">用到的工件</h2>
+  <ul id="yFGD-nxt">
+    <li>artboard <code>standby-settings</code>（本仓库 <code>.ryugi/artifacts/artboard/standby-settings/</code>）：三轮选择 q1→b、q2→r2-c（单屏）、q3→r3-c（iPhone 式单卡），本文已在上文复述结论。</li>
+    <li>参考图：用户提供两张 iPhone StandBy 截图（时钟页、正在播放页），已收进画板 ref-clock / ref-music；待机视觉只参照播放页那张。</li>
+  </ul>
+</doc>
+
