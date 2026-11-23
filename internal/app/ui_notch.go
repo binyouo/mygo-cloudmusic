@@ -415,14 +415,20 @@ func (n *notch) levels(c *ui.Context, tr *netease.Track, w, h float32, count int
 	if art := a.art.get(netease.Sized(tr.Album.PicURL, 96), false); art != nil && !art.failed {
 		color = art.tint.Mix(white, 0.35)
 	}
-	ui.Box(c).Size(w, h).Draw(func(p *ui.Painter, r ui.Rect) {
-		lv, live := a.pl.Levels()
-		n.bars.step(p.Now(), lv, live)
-		drawBars(p, r, &n.bars, count, color, 2.5)
-		if live || n.bars.group(0, player.Bands) > 0.01 {
-			p.AnimationFrame()
-		}
+	open := ui.ButtonBase(c).FocusRing(false).Label("打开待机显示").Padding(4).Margin(-4)
+	open.Children(func() {
+		ui.Box(c).Size(w, h).Draw(func(p *ui.Painter, r ui.Rect) {
+			lv, live := a.pl.Levels()
+			n.bars.step(p.Now(), lv, live)
+			drawBars(p, r, &n.bars, count, color, 2.5)
+			if live || n.bars.group(0, player.Bands) > 0.01 {
+				p.AnimationFrame()
+			}
+		})
 	})
+	if open.Clicked() {
+		a.toggleWallpaper()
+	}
 }
 
 func (n *notch) expanded(c *ui.Context, tr *netease.Track, open, left float32) {

@@ -165,3 +165,26 @@ func TestStandbyFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The jumping level bars in the notch, compact and expanded alike, open
+// the configured fullscreen surface.
+func TestNotchLevelsOpensStandby(t *testing.T) {
+	for _, open := range []bool{false, true} {
+		a := newTestApp()
+		a.settings = defaultSettings()
+		n := &notch{a: a, real: true, w0: 185, h0: 32, winW: notchOpenW + 60, winH: 292}
+		a.notch = n
+		a.pl.Cue([]netease.Track{{ID: 7, Name: "宝船", Duration: 200000}})
+		n.open = open
+		tt := ui.NewTester(n.view, int(n.winW), int(n.winH))
+		tt.Advance(time.Second)
+		tt.Frame()
+		if err := tt.Click("打开待机显示"); err != nil {
+			t.Fatalf("open=%v: %v", open, err)
+		}
+		tt.Frame()
+		if !a.wallpaper.active {
+			t.Fatalf("open=%v: the level bars did not enter the surface", open)
+		}
+	}
+}
