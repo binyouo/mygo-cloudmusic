@@ -17,15 +17,24 @@ func (a *app) wallpaperView(c *ui.Context) {
 		ui.Box(c).Fill().Background(ui.Hex("#0b0b0d"))
 		return
 	}
-	for i, tab := range a.npTabs() {
-		c.OnShortcut(ui.Cmd, ui.Key1+ui.Key(i), func() { a.choosePane(tab.pane) })
+	standby := a.settings.WallpaperStyle == "standby"
+	if !standby {
+		for i, tab := range a.npTabs() {
+			c.OnShortcut(ui.Cmd, ui.Key1+ui.Key(i), func() { a.choosePane(tab.pane) })
+		}
 	}
 	root := ui.Box(c).Fill()
 	if local[0].Key != ui.KeyUnknown {
 		root.OnShortcut(local[0].Mods, local[0].Key, a.pl.TogglePlay)
 		c.OnShortcut(local[0].Mods, local[0].Key, a.pl.TogglePlay)
 	}
-	root.Children(func() { a.nowPlayingSurface(c, true) })
+	root.Children(func() {
+		if standby {
+			a.standbyView(c)
+		} else {
+			a.nowPlayingSurface(c, true)
+		}
+	})
 	a.loginDialog(c)
 	a.playlistNameDialog(c)
 	a.deletePlaylistDialog(c)
