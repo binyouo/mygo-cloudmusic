@@ -138,7 +138,7 @@ func (a *app) settingsView(c *ui.Context) {
 						a.changed()
 					}
 				})
-				row("待机页显示小时钟", "在待机卡右上角显示一枚小时间", func() {
+				row("待机页显示小时钟", "在待机页右上角显示一枚小时间", func() {
 					if ui.Switch(c.Key("standby-clock"), &s.StandbyClock).Label("显示小时钟").Disabled(s.WallpaperStyle != "standby").Changed() {
 						a.changed()
 					}

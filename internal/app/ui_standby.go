@@ -33,6 +33,7 @@ func (a *app) standbyView(c *ui.Context) {
 	if art == nil && tr.Album.PicURL != "" {
 		shown = a.npVisual.current
 	}
+	a.npArt = shown
 	tint := ui.RGB(120, 120, 130)
 	if shown != nil && !shown.failed {
 		tint = shown.tint
@@ -75,6 +76,7 @@ func (a *app) standbyView(c *ui.Context) {
 // left, the song, the lyric and the transport at the right.
 func (a *app) standbyCard(c *ui.Context, tr *netease.Track, art *artwork, accent ui.Color, w, h float32) {
 	pl := a.pl
+	a.tickTimes(c)
 	const pad = 40
 	cardW := min(w*0.72, 1080)
 	cardH := min(h*0.68, 560)
@@ -115,6 +117,9 @@ func (a *app) standbyCard(c *ui.Context, tr *netease.Track, art *artwork, accent
 				}
 				ui.Text(c, status).FontSize(11).FontFeatures("tnum").TextColor(white.Alpha(0.5))
 			})
+			if err := pl.Err(); err != "" {
+				ui.Text(c, err).FontSize(12).LineHeight(1.35).TextColor(white.Alpha(0.75)).MaxLines(2).Margin(6, 0, 0, 0)
+			}
 		})
 	})
 }
@@ -124,7 +129,6 @@ func (a *app) standbyCard(c *ui.Context, tr *netease.Track, art *artwork, accent
 // without them leaves the space to the controls instead of a placeholder.
 func (a *app) standbyLyrics(c *ui.Context, tr *netease.Track) {
 	pl := a.pl
-	a.tickTimes(c)
 	lines, _ := pl.Lyrics()
 	if tr.ProgramID != 0 || len(lines) == 0 {
 		ui.Box(c).Grow(1)

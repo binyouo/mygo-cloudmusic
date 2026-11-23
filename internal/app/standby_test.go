@@ -188,3 +188,29 @@ func TestNotchLevelsOpensStandby(t *testing.T) {
 		}
 	}
 }
+
+// Standby has no tabs to switch with ⌘1..n, and a double click on the
+// empty background leaves it as it does the playing style.
+func TestStandbyExitAndShortcuts(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.settings.WallpaperStyle = "standby"
+	a.pl.Cue([]netease.Track{{ID: -1, Name: "测试", LocalPath: "test.mp3", Duration: 200000}})
+	a.pl.SetLyrics(nil)
+	a.npPane = paneQueue
+	a.toggleWallpaper()
+	a.wallpaper.revealed = true
+	tt := ui.NewTester(a.wallpaperView, 1440, 900)
+	tt.Frame()
+	tt.Key(ui.Cmd, ui.Key2)
+	tt.Frame()
+	if !a.wallpaper.active || a.npPane != paneQueue {
+		t.Fatalf("a pane shortcut reached under the standby card: pane=%d", a.npPane)
+	}
+	tt.ClickAt(30, 30)
+	tt.ClickAt(30, 30)
+	tt.Frame()
+	if a.wallpaper.active {
+		t.Fatal("double click on the background did not close the standby card")
+	}
+}
