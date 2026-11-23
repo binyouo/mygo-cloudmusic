@@ -125,6 +125,24 @@ func (a *app) settingsView(c *ui.Context) {
 						a.changed()
 					}
 				})
+				row("屏保样式", "封面全屏的播放页，或 iPhone 待机式的一张播放卡", func() {
+					styles := []string{"playing", "standby"}
+					i := 0
+					for k, st := range styles {
+						if st == s.WallpaperStyle {
+							i = k
+						}
+					}
+					if segmented(c.Key("wallpaper-style"), &i, "播放页", "待机显示") {
+						s.WallpaperStyle = styles[i]
+						a.changed()
+					}
+				})
+				row("待机页显示小时钟", "在待机卡右上角显示一枚小时间", func() {
+					if ui.Switch(c.Key("standby-clock"), &s.StandbyClock).Label("显示小时钟").Disabled(s.WallpaperStyle != "standby").Changed() {
+						a.changed()
+					}
+				})
 			})
 			group("菜单栏", func() {
 				row("菜单栏歌词", "在菜单栏显示当前歌词，可切歌、暂停和喜欢歌曲", func() {
