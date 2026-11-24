@@ -49,7 +49,7 @@ const (
 func newNotch(a *app) *notch {
 	n := &notch{a: a}
 	n.measure()
-	n.winW, n.winH = notchOpenW+60, 240
+	n.winW, n.winH = notchOpenW+60, 292
 	n.place()
 	n.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:         mygo.App.Name() + "迷你播放器",
@@ -225,7 +225,7 @@ func (n *notch) target() (w, h float32) {
 	case n.open && tr == nil:
 		return notchIdleW, n.h0 + 72
 	case n.open:
-		return notchOpenW, n.h0 + 178
+		return notchOpenW, n.h0 + 220
 	case n.hello && tr != nil:
 		return notchHelloW, n.h0 + 58
 	case !n.real && !s.NotchVirtual:
@@ -452,9 +452,7 @@ func (n *notch) expanded(c *ui.Context, tr *netease.Track, open, left float32) {
 			}
 			cov.Children(func() { artImage(c, bitmap(art), 12, in) })
 			if cov.Clicked() {
-				a.nowPlaying = true
-				a.showMain()
-				a.win.Invalidate()
+				a.openNowPlaying(a.npPane)
 			}
 			ui.Column(c).Grow(1).MinWidth(0).Gap(4).Children(func() {
 				ui.Text(c, tr.Name).FontSize(15).FontWeight(700).SingleLine()
@@ -472,10 +470,47 @@ func (n *notch) expanded(c *ui.Context, tr *netease.Track, open, left float32) {
 			a.scrubber(c.Key("notch-scrub"), &n.scrub, white.Alpha(0.18), white.Alpha(0.9), 14, ui.Color{}).Grow(1)
 			ui.Text(c, "-"+clock(pl.Duration()-pl.Position())).FontSize(10.5).FontFeatures("tnum").TextColor(white.Alpha(0.5)).Width(34).TextAlign(ui.End)
 		})
-		ui.Box(c).Margin(-6, 0, 0, 0).Children(func() {
-			a.transport(c, white, white.Alpha(0.4), a.pal.accent, 20)
+		// The transport, as iPhone Music's: three, the one that plays
+		// far the biggest, its shuffle and repeat away in the queue.
+		ui.Row(c).Margin(-4, 0, -4, 0).Gap(36).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+			if iconButton(c.Key("prev"), iconPrev, 24, white, "上一首").Clicked() {
+				pl.Prev()
+			}
+			if playButton(c.Key("play"), pl.Playing(), 40, white).Clicked() {
+				pl.TogglePlay()
+			}
+			if iconButton(c.Key("next"), iconNext, 24, white, "下一首").Clicked() {
+				pl.Next()
+			}
+		})
+		// The three at the foot, as iPhone Music's: the lyrics, the
+		// volume, and the queue, from one end to the other.
+		ui.Row(c).AlignItems(ui.Center).Children(func() {
+			dim := white.Alpha(0.6)
+			label := "歌词"
+			if tr.ProgramID != 0 {
+				label = "节目简介"
+			}
+			if iconButton(c.Key("lyrics"), iconLyrics, 16, dim, label).Clicked() {
+				a.openNowPlaying(a.lyricsPaneChosen())
+			}
+			ui.Spacer(c)
+			a.volumeButton(c, dim)
+			ui.Spacer(c)
+			if iconButton(c.Key("queue"), iconQueue, 16, dim, "待播清单").Clicked() {
+				a.openNowPlaying(paneQueue)
+			}
 		})
 	})
+}
+
+// openNowPlaying shows the app on Now Playing, on pane.
+func (a *app) openNowPlaying(pane int) {
+	a.nowPlaying, a.npPane = true, pane
+	a.showMain()
+	if a.win != nil {
+		a.win.Invalidate()
+	}
 }
 
 // helloRow says, under the housing, what the notch is, while it greets.

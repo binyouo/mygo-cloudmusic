@@ -20,7 +20,7 @@ import (
 func TestNotchGreetsOnce(t *testing.T) {
 	a := newTestApp()
 	a.settings = defaultSettings()
-	n := &notch{a: a, w0: 200, h0: 32, winW: notchOpenW + 60, winH: 240}
+	n := &notch{a: a, w0: 200, h0: 32, winW: notchOpenW + 60, winH: 292}
 	a.notch = n
 	a.pl.Cue([]netease.Track{{ID: 7, Name: "宝船", Duration: 200000}})
 	a.syncWindows()
@@ -62,7 +62,7 @@ func TestNotchGreetsOnce(t *testing.T) {
 func TestNotchGreetingKeptUnderPointer(t *testing.T) {
 	a := newTestApp()
 	a.settings = defaultSettings()
-	n := &notch{a: a, real: true, w0: 185, h0: 32, winW: notchOpenW + 60, winH: 240}
+	n := &notch{a: a, real: true, w0: 185, h0: 32, winW: notchOpenW + 60, winH: 292}
 	a.notch = n
 	a.pl.Cue([]netease.Track{{ID: 7, Name: "宝船", Duration: 200000}})
 	n.greet()
@@ -92,6 +92,44 @@ func TestNotchGreetingKeptUnderPointer(t *testing.T) {
 	}
 }
 
+// The open notch's transport is iPhone Music's three, previous, play and
+// next, and its foot's three open the lyrics, the volume and the queue in
+// the app's Now Playing.
+func TestNotchExpandedControls(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	n := &notch{a: a, real: true, w0: 185, h0: 32, winW: notchOpenW + 60, winH: 292}
+	a.notch = n
+	a.pl.Cue([]netease.Track{
+		{ID: 7, Name: "宝船", Duration: 200000},
+		{ID: 8, Name: "又一首", Duration: 200000},
+	})
+	n.open = true
+	tt := ui.NewTester(n.view, int(n.winW), int(n.winH))
+	tt.Advance(time.Second)
+	tt.Frame()
+
+	if err := tt.Click("下一首"); err != nil {
+		t.Fatal(err)
+	}
+	if tr := a.pl.Current(); tr == nil || tr.ID != 8 {
+		t.Fatalf("next: %+v", tr)
+	}
+	if err := tt.Click("待播清单"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.nowPlaying || a.npPane != paneQueue {
+		t.Fatalf("queue: nowPlaying %v pane %v", a.nowPlaying, a.npPane)
+	}
+	a.nowPlaying = false
+	if err := tt.Click("歌词"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.nowPlaying || a.npPane != paneLyrics {
+		t.Fatalf("lyrics: nowPlaying %v pane %v", a.nowPlaying, a.npPane)
+	}
+}
+
 // With NM_FRAMES set, saves the notch as it greets, growing and grown, and
 // the player bar holding a song a login picked up.
 func TestFirstUseFrames(t *testing.T) {
@@ -106,7 +144,7 @@ func TestFirstUseFrames(t *testing.T) {
 	}
 	a := newTestApp()
 	a.settings = defaultSettings()
-	n := &notch{a: a, real: true, w0: 185, h0: 32, winW: notchOpenW + 60, winH: 240}
+	n := &notch{a: a, real: true, w0: 185, h0: 32, winW: notchOpenW + 60, winH: 292}
 	a.notch = n
 	a.pl.Cue([]netease.Track{{ID: 7, Name: "NAINAINAI", Artists: []netease.Artist{{Name: "ATARASHII GAKKO!"}}, Duration: 193877}})
 	main := ui.NewTester(a.view, 1200, 800) // for the app's colors
