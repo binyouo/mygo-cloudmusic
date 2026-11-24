@@ -344,7 +344,6 @@ func Run() error {
 			a.freshenHome()
 			a.refreshLikedSongs()
 		})
-		a.watchLikedSongs()
 		a.applyTray()
 		a.syncMenuBar()
 		if shotHook != nil {
@@ -376,8 +375,8 @@ func Run() error {
 		a.noteScrobble()
 		a.quitting = true
 		e.PreventDefault()
-		if a.likeSync.timer != nil {
-			a.likeSync.timer.Stop()
+		if a.likeSync.verify != nil {
+			a.likeSync.verify.Stop()
 		}
 		a.stopWallpaper()
 		a.unregisterPlaybackShortcuts()
@@ -393,7 +392,7 @@ func Run() error {
 		// A stalled network must not trap the application in its quit sequence.
 		go func() {
 			done := make(chan struct{})
-			go func() { a.scrobbleWork.Wait(); close(done) }()
+			go func() { a.scrobbleWork.Wait(); a.likeSync.work.Wait(); close(done) }()
 			select {
 			case <-done:
 			case <-time.After(2 * time.Second):

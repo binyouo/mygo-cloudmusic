@@ -170,7 +170,7 @@ func TestLikeSyncFailureAndAccountChange(t *testing.T) {
 	oldRead := a.likeSync.request
 	a.profile = &netease.Profile{UserID: 1} // A new login, including the same UID.
 	a.liked = map[int64]bool{8: true}
-	a.likeSync.request, a.likeSync.changes = nil, nil
+	a.likeSync.request, a.likeSync.changes, a.likeSync.pins = nil, nil, nil
 	a.loadLiked(1)
 	newRead := a.likeSync.request
 	wait(t, reads, "the new account read")
@@ -178,6 +178,71 @@ func TestLikeSyncFailureAndAccountChange(t *testing.T) {
 	a.songLikeAnswered(change, false, errors.New("late refusal"))
 	if !a.liked[8] || a.liked[7] || a.likeSync.request != newRead {
 		t.Fatal("a prior login overwrote the new session")
+	}
+}
+
+// The liked list can lag a write it follows: NetEase answered the like but
+// the next list still lacks the song. The answered write pins the heart
+// until a read agrees it landed.
+func TestLaggingLikedReadCannotUnfillLike(t *testing.T) {
+	reads, writes, _ := fakeSongSync(t)
+	a := newTestApp()
+	a.profile = &netease.Profile{UserID: 1}
+	a.liked = map[int64]bool{}
+	a.toggleLike(&netease.Track{ID: 7})
+	change := a.likeSync.changes[7]
+	wait(t, writes, "the like")
+	a.songLikeAnswered(change, true, nil)
+	wait(t, reads, "the refresh after the like")
+	a.likedSongsAnswered(a.likeSync.request, nil, nil) // the list lags the write
+	if !a.liked[7] {
+		t.Fatal("a lagging list swallowed a confirmed like")
+	}
+	a.loadLiked(1)
+	wait(t, reads, "the verification read")
+	a.likedSongsAnswered(a.likeSync.request, []int64{7}, nil)
+	if len(a.likeSync.pins) != 0 || !a.liked[7] {
+		t.Fatal("an agreeing read did not release the pin")
+	}
+}
+
+// A read still listing a song the unlike just dropped must not put its
+// heart back either.
+func TestLaggingLikedReadCannotResurrectUnlike(t *testing.T) {
+	reads, writes, _ := fakeSongSync(t)
+	a := newTestApp()
+	a.profile = &netease.Profile{UserID: 1}
+	a.liked = map[int64]bool{7: true}
+	a.toggleLike(&netease.Track{ID: 7})
+	change := a.likeSync.changes[7]
+	wait(t, writes, "the unlike")
+	a.songLikeAnswered(change, false, nil)
+	wait(t, reads, "the refresh after the unlike")
+	a.likedSongsAnswered(a.likeSync.request, []int64{7}, nil)
+	if a.liked[7] {
+		t.Fatal("a lagging list resurrected a confirmed unlike")
+	}
+}
+
+// When the list keeps answering without the song, the server's word wins
+// after a few tries: the like never really landed.
+func TestLikePinTrustsServerAfterRetries(t *testing.T) {
+	reads, writes, _ := fakeSongSync(t)
+	a := newTestApp()
+	a.profile = &netease.Profile{UserID: 1}
+	a.liked = map[int64]bool{}
+	a.toggleLike(&netease.Track{ID: 7})
+	change := a.likeSync.changes[7]
+	wait(t, writes, "the like")
+	a.songLikeAnswered(change, true, nil)
+	wait(t, reads, "the refresh after the like")
+	for i := 0; i <= likeVerifyReads; i++ {
+		a.likedSongsAnswered(a.likeSync.request, nil, nil)
+		a.loadLiked(1)
+		wait(t, reads, "a verification read")
+	}
+	if a.liked[7] {
+		t.Fatal("a list that never caught up kept a like it refused")
 	}
 }
 

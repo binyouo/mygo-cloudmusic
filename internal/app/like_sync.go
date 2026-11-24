@@ -2,6 +2,7 @@ package app
 
 import (
 	"maps"
+	"sync"
 	"time"
 
 	"netease-music-mygo/internal/netease"
@@ -16,7 +17,9 @@ type likeSyncState struct {
 	request  *likedSongsRequest
 	revision uint64
 	changes  map[int64]*songLikeChange
-	timer    *time.Timer
+	pins     map[int64]*likePin
+	verify   *time.Timer
+	work     sync.WaitGroup // like writes in flight, drained before quitting
 }
 
 type likedSongsRequest struct {
@@ -29,6 +32,23 @@ type songLikeChange struct {
 	id                   int64
 	before, sent, wanted bool
 }
+
+// A likePin is a like write NetEase answered, which the next read of the
+// liked list has yet to reflect: the list can lag the write, and a read
+// that misses it must not unmake it. A few disagreeing reads earn the
+// server's list the last word.
+type likePin struct {
+	profile *netease.Profile
+	wanted  bool
+	reads   int // reads since the write that did not agree with it
+}
+
+const (
+	// The reads a pin gets to agree with the server's list before the
+	// server is trusted instead, and how soon it asks again.
+	likeVerifyReads    = 5
+	likeVerifyInterval = 2 * time.Second
+)
 
 // loadLiked refreshes the shared heart state, coalescing overlapping reads.
 func (a *app) loadLiked(uid int64) {
@@ -54,15 +74,40 @@ func (a *app) likedSongsAnswered(request *likedSongsRequest, ids []int64, err er
 		return // A read started before a local click cannot undo it.
 	}
 	if err != nil {
+		a.ageLikePins()
 		return // Keep the last good state while offline.
 	}
 	liked := make(map[int64]bool, len(ids))
 	for _, id := range ids {
 		liked[id] = true
 	}
+	resolved := false
+	for id, pin := range a.likeSync.pins {
+		if pin.profile != request.profile || liked[id] == pin.wanted {
+			// The list caught up with the write, or the pin is another
+			// account's.
+			delete(a.likeSync.pins, id)
+			resolved = true
+			continue
+		}
+		if pin.reads++; pin.reads > likeVerifyReads {
+			// The server insists after all: take its list.
+			delete(a.likeSync.pins, id)
+			resolved = true
+			continue
+		}
+		if pin.wanted {
+			liked[id] = true
+		} else {
+			delete(liked, id)
+		}
+	}
+	if len(a.likeSync.pins) != 0 {
+		a.verifyLikedSoon()
+	}
 	changed := a.liked == nil || !maps.Equal(a.liked, liked)
 	a.liked = liked
-	if changed {
+	if changed || resolved {
 		a.likeSync.revision++
 		a.refreshLikedPlaylist()
 	}
@@ -114,7 +159,9 @@ func (a *app) toggleSongLike(id int64) {
 
 func (a *app) sendSongLike(change *songLikeChange) {
 	send, sent := likeSong, change.sent
+	a.likeSync.work.Add(1)
 	go func() {
+		defer a.likeSync.work.Done()
 		err := send(change.id, sent)
 		a.post(func() { a.songLikeAnswered(change, sent, err) })
 	}()
@@ -138,26 +185,52 @@ func (a *app) songLikeAnswered(change *songLikeChange, sent bool, err error) {
 		a.setLiked(change.id, remote)
 		a.toast = "操作失败，请稍后再试"
 	}
+	a.pinLike(change.id, remote)
 	delete(a.likeSync.changes, change.id)
 	if len(a.likeSync.changes) == 0 {
 		a.refreshLikedSongs()
 	}
 }
 
-// Poll while the app is in front so a phone's changes appear without
-// switching windows. This uses a timer, never continuous rendering.
-const likedRefreshInterval = 30 * time.Second
+// pinLike remembers what the write for id left remotely, until a read of
+// the liked list agrees with it.
+func (a *app) pinLike(id int64, wanted bool) {
+	if a.likeSync.pins == nil {
+		a.likeSync.pins = map[int64]*likePin{}
+	}
+	a.likeSync.pins[id] = &likePin{profile: a.profile, wanted: wanted}
+}
 
-func (a *app) watchLikedSongs() {
-	a.likeSync.timer = time.AfterFunc(likedRefreshInterval, func() {
+// verifyLikedSoon asks the liked list again while pins wait for a read to
+// confirm them. A read of its own, or the writes still running, ask again
+// when they answer.
+func (a *app) verifyLikedSoon() {
+	if a.likeSync.verify != nil {
+		return
+	}
+	a.likeSync.verify = time.AfterFunc(likeVerifyInterval, func() {
 		a.post(func() {
-			if a.quitting {
+			a.likeSync.verify = nil
+			if a.quitting || a.profile == nil || len(a.likeSync.pins) == 0 {
 				return
 			}
-			if a.profile != nil && (a.win.IsFocused() || a.wallpaper.active) {
-				a.loadLiked(a.profile.UserID)
+			a.loadLiked(a.profile.UserID)
+			if a.likeSync.request == nil {
+				a.verifyLikedSoon() // a read or a write was in the way
 			}
-			a.watchLikedSongs()
 		})
 	})
+}
+
+// ageLikePins counts a read that could not confirm the pins toward giving
+// the server's list the last word.
+func (a *app) ageLikePins() {
+	for id, pin := range a.likeSync.pins {
+		if pin.reads++; pin.reads > likeVerifyReads {
+			delete(a.likeSync.pins, id)
+		}
+	}
+	if len(a.likeSync.pins) != 0 {
+		a.verifyLikedSoon()
+	}
 }

@@ -47,7 +47,11 @@ func (a *app) boot() {
 // signedIn shows what is personal to prof, or to nobody.
 func (a *app) signedIn(prof *netease.Profile) {
 	a.profile = prof
-	a.likeSync.request, a.likeSync.changes = nil, nil
+	a.likeSync.request, a.likeSync.changes, a.likeSync.pins = nil, nil, nil
+	if a.likeSync.verify != nil {
+		a.likeSync.verify.Stop()
+		a.likeSync.verify = nil
+	}
 	a.likeSync.revision++
 	// Playback picks up where it was left, once the session that lets
 	// the listener play their songs is back.
