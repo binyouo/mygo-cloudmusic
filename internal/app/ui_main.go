@@ -26,7 +26,7 @@ func (a *app) view(c *ui.Context) {
 		c.Root().Background(ui.Transparent)
 	}
 	root := ui.Box(c).Fill()
-	if !c.Focused(a.searchBox) && !c.Focused(a.playlistSearchBox) && !c.Focused(a.lyricBlurSwitch) && !c.Focused(a.coverTransitionSwitch) {
+	if !c.Focused(a.searchBox) && !c.Focused(a.playlistSearchBox) && !c.Focused(a.lyricBlurSwitch) && !c.Focused(a.coverTransitionSwitch) && !c.Focused(a.chatBox) {
 		// Space plays and pauses wherever the focus is, as in Music. On
 		// the container around everything, it comes before a button the
 		// pointer focused, which would take Space as a click; on the
@@ -169,6 +169,13 @@ func (a *app) load(r route) {
 		a.loadPodcast(r.id)
 	case pagePodcasts:
 		a.loadPodcastTab()
+	case pageMessages:
+		a.loadConversations()
+	case pageChat:
+		ch := a.chatFor(r.id, a.peerOf(r.id))
+		if !ch.loaded {
+			a.loadChat(ch, r.id, false)
+		}
 	}
 }
 
@@ -221,6 +228,7 @@ func (a *app) sidebar(c *ui.Context) {
 			a.navItem(c, iconCharts, "排行榜", route{page: pageCharts})
 			a.navItem(c, iconNote, "本地音乐", route{page: pageLocal})
 			a.navItem(c, iconPodcast, "播客", route{page: pagePodcasts})
+			a.navItem(c, iconMail, "私信", route{page: pageMessages})
 			if a.searched.query != "" {
 				a.navItem(c, iconSearch, "搜索结果", a.searched)
 			}
@@ -409,6 +417,10 @@ func (a *app) content(c *ui.Context) {
 		a.podcastsPage(c)
 	case pageLocal:
 		a.localPage(c)
+	case pageMessages:
+		a.messagesPage(c)
+	case pageChat:
+		a.chatPage(c)
 	}
 }
 

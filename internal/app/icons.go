@@ -51,6 +51,8 @@ var (
 	iconCheck   = strokeIcon(`<path d="m5 12 4 4L19 6"/>`)
 	iconX       = strokeIcon(`<path d="M18 6 6 18"/><path d="m6 6 12 12"/>`)
 	iconMore    = fillIcon(`<circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/>`)
+	iconMail    = strokeIcon(`<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>`)
+	iconSend    = strokeIcon(`<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>`)
 )
 
 // iconThumbFill is iconThumb filled, its cuff and hand apart as the outline

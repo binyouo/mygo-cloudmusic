@@ -29,6 +29,8 @@ const (
 	pagePodcast
 	pagePodcasts
 	pageLocal
+	pageMessages
+	pageChat
 )
 
 type route struct {
@@ -108,6 +110,10 @@ type app struct {
 	searches    map[route]*searchData // the results of each search, by its page
 	searched    route                 // the search last shown, which the sidebar goes back to
 	suggestions suggestState          // what the search field's query may be after
+
+	msgs    convsState             // the listener's private-message threads
+	chats   map[int64]*chatState   // each thread's messages, by the other end's ID
+	chatBox ui.Handle              // the chat's field, which Space must not pause for
 
 	nowPlaying            bool
 	npOpen                bool    // Now Playing as it last showed: open or not
@@ -263,6 +269,7 @@ func Run() error {
 		podcasts:       map[int64]*podcastData{},
 		podcastTab:     &podcastTab{},
 		searches:       map[route]*searchData{},
+		chats:          map[int64]*chatState{},
 		lyricPaneState: lyricPaneState{lyricAt: -1},
 		queueAt:        -1,
 		cacheUsed:      -1,
