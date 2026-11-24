@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"image"
 	"testing"
 	"time"
 
@@ -9,6 +10,15 @@ import (
 
 	"netease-music-mygo/internal/netease"
 )
+
+// solidCover returns a cover bitmap of one color.
+func solidCover(r, g, b uint8) *ui.Bitmap {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for i := 0; i < len(img.Pix); i += 4 {
+		img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3] = r, g, b, 255
+	}
+	return ui.NewBitmap(img)
+}
 
 func TestNowPlayingClosesAsOneLayer(t *testing.T) {
 	a := newTestApp()
@@ -43,6 +53,47 @@ func TestNowPlayingClosesAsOneLayer(t *testing.T) {
 	tt.Frame()
 	if tt.HasText("待播清单") {
 		t.Error("now playing still shows after closing")
+	}
+}
+
+// The layer hid its first moving frame, so the cover waited a frame in
+// the bar it had left; it paints the bar's cover over the layer's while
+// one is where the other is.
+func TestNowPlayingMovesOnItsFirstFrame(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	// No dissolve: the cover shows at once.
+	a.settings.CoverTransition = false
+	tr := netease.Track{ID: 1, Name: "宝船", Artists: []netease.Artist{{Name: "DOUDOU"}}, Duration: 200000, Album: netease.Album{PicURL: "pic"}}
+	a.pl.Cue([]netease.Track{tr})
+	a.pl.SetLyrics(nil)
+	// The bar's cover is green, Now Playing's own red.
+	a.art.art[netease.Sized("pic", 120)] = &artwork{bmp: solidCover(0, 200, 0)}
+	a.art.art[netease.Sized("pic", 600)+"#backdrop"] = &artwork{bmp: solidCover(200, 0, 0)}
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	tt.Frame()
+	at := func() (uint32, uint32) {
+		img := tt.Image()
+		sx, sy := img.Bounds().Dx(), img.Bounds().Dy()
+		from := a.npFrom
+		r, g, _, _ := img.At(int((from.X+from.W/2)*float32(sx)/1200), int((from.Y+from.H/2)*float32(sy)/800)).RGBA()
+		return r, g
+	}
+	a.nowPlaying = true
+	tt.Frame()
+	tt.Advance(time.Second / 60)
+	if r, g := at(); r < g {
+		t.Errorf("a frame in, the bar's cover still showed where the layer's had reached: r=%x, g=%x", r>>8, g>>8)
+	}
+	// Back in the bar the handoff follows the landing, rather than the
+	// cover creeping on frames nobody sees.
+	tt.Advance(2 * time.Second)
+	a.nowPlaying = false
+	tt.Frame()
+	tt.Advance(600 * time.Millisecond)
+	if r, g := at(); r > g {
+		t.Errorf("the bar's cover was not back 600ms after closing: r=%x, g=%x", r>>8, g>>8)
 	}
 }
 

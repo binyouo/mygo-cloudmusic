@@ -15,8 +15,9 @@ var white = ui.RGB(255, 255, 255)
 
 // npSpring is how Now Playing grows out of the player bar's cover and
 // shrinks back into it, and how it springs back from a pull too short to
-// close it.
-var npSpring = ui.SpringOptions{Duration: 440 * time.Millisecond}
+// close it. Its precision ends the flight when the cover is a couple of
+// pixels out rather than letting it creep for frames nobody sees.
+var npSpring = ui.SpringOptions{Duration: 440 * time.Millisecond, Precision: 0.004}
 
 // npFade is how Now Playing comes and goes while the desktop asks for less
 // motion: it fades, in place.
@@ -103,7 +104,7 @@ func (a *app) nowPlayingLayer(c *ui.Context, open, settled bool) {
 	} else {
 		shift = layer.AnimateTo("pull", 0, ui.Animation{Spring: npSpring})
 	}
-	fresh, was := a.npT <= 0 && t > 0, a.npT
+	was := a.npT
 	a.npT, a.npShift = t, shift
 	if a.npAtRest(open) != settled {
 		// Another build, for the page under it to come or go, and the
@@ -119,17 +120,11 @@ func (a *app) nowPlayingLayer(c *ui.Context, open, settled bool) {
 		a.queueAt, a.wallState.track = -1, 0
 		return
 	}
-	switch {
-	case fresh:
-		// Its first frame lays it out, for what flies to its place to know
-		// where that is; it shows from the next.
-		layer.Opacity(0)
-		c.AnimationFrame()
-	case a.npStill:
+	if a.npStill {
 		if t < 1 {
 			layer.Opacity(max(t, 0))
 		}
-	default:
+	} else {
 		a.npCard(layer, t, shift, w, h)
 	}
 	if !open {
