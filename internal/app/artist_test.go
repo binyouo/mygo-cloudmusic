@@ -64,6 +64,36 @@ func TestArtistNameOpensTheirPage(t *testing.T) {
 	}
 }
 
+// An artist with an account of their own links to their user page, and a
+// user who is an artist links back to their artist page.
+func TestArtistAndUserPagesLink(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.artists[12] = &artistData{profile: &netease.ArtistProfile{
+		Artist:    netease.Artist{ID: 12, Name: "乙"},
+		AccountID: 34,
+		Songs:     []netease.Track{{ID: 2, Name: "起风了", Artists: []netease.Artist{{ID: 12, Name: "乙"}}, Duration: 200000}},
+	}}
+	a.users[34] = &userData{user: &netease.User{UserID: 34, Nickname: "乙本人", ArtistID: 12}}
+	a.open(route{page: pageArtist, id: 12})
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Frame()
+	if err := tt.Click("用户主页"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.route != (route{page: pageUser, id: 34}) {
+		t.Fatalf("the artist's account opened %+v", a.route)
+	}
+	if err := tt.Click("歌手主页"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.route != (route{page: pageArtist, id: 12}) {
+		t.Fatalf("the user's artist page opened %+v", a.route)
+	}
+}
+
 // 最新 lists an artist's newest songs, asked of NetEase once, and a click
 // on one plays the list shown.
 func TestArtistSongsByLatest(t *testing.T) {

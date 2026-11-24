@@ -139,6 +139,8 @@ type User struct {
 	Signature string `json:"signature"`
 	Followeds int    `json:"followeds"` // their followers
 	Follows   int    `json:"follows"`
+	// ArtistID is their artist's page, or 0 when they are none.
+	ArtistID int64 `json:"artistId"`
 }
 
 // UserDetail returns who a user is.

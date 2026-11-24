@@ -144,6 +144,14 @@ func (a *app) userPage(c *ui.Context) {
 				if u.Signature != "" {
 					ui.Text(c, u.Signature).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
 				}
+				// A user who is an artist has a page of their songs too.
+				if u.ArtistID != 0 {
+					ui.Row(c).Margin(10, 0, 0, 0).Children(func() {
+						if pillButton(c.Key("artist"), iconNote, "歌手主页", p.hover.Over(p.bg), p.text).Clicked() {
+							a.openPage(route{page: pageArtist, id: u.ArtistID})
+						}
+					})
+				}
 			})
 		})
 		a.section(c, "创建的歌单")

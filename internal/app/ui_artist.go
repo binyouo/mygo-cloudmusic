@@ -382,6 +382,10 @@ func (a *app) artistHeader(c *ui.Context, d *artistData) {
 				if pillButton(c.Key("follow"), icon, label, p.hover.Over(p.bg), p.text).Clicked() {
 					a.toggleFollow(ar.ID)
 				}
+				// An artist with an account of their own has a user page too.
+				if ar.AccountID != 0 && pillButton(c.Key("user"), iconUser, "用户主页", p.hover.Over(p.bg), p.text).Clicked() {
+					a.openPage(route{page: pageUser, id: ar.AccountID})
+				}
 			})
 		})
 	})
