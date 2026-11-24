@@ -5,8 +5,8 @@
   "version": "0.1.25",
   "out": "build",
   "updates": {
-    "publicKey": "WzJsOGNIuf6mcEqo5ff8jub+NoQQOEk4JXreLPYjgyQ=",
-    "github": "egoist/mygo-cloudmusic"
+    "publicKey": "OU5C+thLntpCApHqJNURu3TPwKIw6ID5LBWvxP0SpbY=",
+    "github": "binyouo/mygo-cloudmusic"
   },
   "macos": {
     "icon": "icon/AppIcon.icon",
