@@ -7,6 +7,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write # the draft release, and the uploads to it
