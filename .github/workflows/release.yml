@@ -45,6 +45,10 @@ jobs:
     needs: draft-release
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # macOS needs a Developer ID certificate (a paid Apple Developer
+    # account) and notary credentials as secrets; set RELEASE_MACOS=true in
+    # the repo's variables once they exist.
+    if: ${{ matrix.name != 'macOS' || vars.RELEASE_MACOS == 'true' }}
     strategy:
       fail-fast: false
       matrix:
