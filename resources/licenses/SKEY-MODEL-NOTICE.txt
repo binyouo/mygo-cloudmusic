@@ -1,0 +1,11 @@
+S-KEY model weights (skey.pt)
+Source: https://github.com/deezer/skey
+Upstream README: https://github.com/deezer/skey#-license
+
+The MIT license applies to the code, not to skey.pt model weights.
+Upstream permits the model weights only for non-commercial research purposes.
+This local experimental build includes the model for the user's requested
+Smart Fades research. A public or commercial distribution must obtain suitable
+permission or replace these weights.
+
+The model architecture's MIT license is supplied separately as SKEY-LICENSE.txt.

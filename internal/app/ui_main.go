@@ -15,10 +15,18 @@ const sidebarWidth = 232
 func (a *app) view(c *ui.Context) {
 	t := *c.Theme()
 	a.pal = paletteFor(&t)
+	if a.phone && a.pal.dark {
+		a.pal.bg = ui.Hex("#222228")
+		a.pal.sidebar = ui.Hex("#2b2b31")
+	}
 	p := a.pal
 	t.Accent, t.AccentText = p.accent, p.onAccent
 	t.Selection = p.accent.Alpha(0.3)
 	c.SetTheme(&t)
+	if a.phone {
+		a.phoneView(c)
+		return
+	}
 
 	a.shortcuts(c)
 
@@ -111,7 +119,7 @@ func (a *app) shortcuts(c *ui.Context) {
 	if a.wallpaper.active {
 		c.OnShortcut(0, ui.KeyEscape, a.leaveWallpaper)
 	} else if a.nowPlaying {
-		c.OnShortcut(0, ui.KeyEscape, a.closeNowPlaying)
+		c.OnShortcut(0, ui.KeyEscape, a.startPhoneClose)
 		// ⌘ and a number choose Now Playing's tab of that place.
 		if a.pl.Current() != nil {
 			for i, t := range a.npTabs() {
@@ -133,11 +141,36 @@ func (a *app) open(r route) {
 		return
 	}
 	a.history, a.forward = append(a.history, a.route), nil
+	if a.phone {
+		a.phoneNavDir = 1
+		a.dropPhoneScrolls(len(a.history))
+	}
 	a.show(r)
 }
 
 // show shows the page of r.
 func (a *app) show(r route) {
+	if a.phone && a.route != r {
+		a.phoneEdge = ui.Point{}
+		a.phoneTrackTarget = nil
+		a.phoneProgram = nil
+		a.phonePlaylistTarget = 0
+		a.phoneSetting = ""
+		if a.route.page == pagePlaylist {
+			a.phonePlaylistSearch, a.phonePlaylistEditing = false, false
+			a.playlistFilter.query = ""
+		}
+		if a.route.page == pageSearch {
+			a.dismissSuggestions()
+			if r.page != pageSearch {
+				a.phoneSearchEditing = false
+			}
+		}
+		if r.page == pageSearch && r.query == "" && a.hotFailed {
+			// A hot list that failed before tries once more on a fresh show.
+			a.hotFailed, a.hotAsked = false, false
+		}
+	}
 	a.route = r
 	if r.page == pageSearch {
 		a.query, a.searched = r.query, r
@@ -158,7 +191,9 @@ func (a *app) load(r route) {
 			a.loadPlaylist(r.id, false)
 		}
 	case pageSearch:
-		a.loadSearch(r, false)
+		if r.query != "" {
+			a.loadSearch(r, false)
+		}
 	case pageArtist:
 		a.loadArtist(r.id)
 	case pageAlbum:
@@ -183,11 +218,18 @@ func (a *app) load(r route) {
 // closes Now Playing, which covers the pages.
 func (a *app) back() {
 	if a.nowPlaying {
-		a.closeNowPlaying()
+		a.startPhoneClose()
 		return
 	}
+	a.popPage(-1)
+}
+
+func (a *app) popPage(direction int) {
 	if len(a.history) == 0 {
 		return
+	}
+	if a.phone {
+		a.phoneNavDir = direction
 	}
 	a.forward = append(a.forward, a.route)
 	r := a.history[len(a.history)-1]
@@ -205,6 +247,9 @@ func (a *app) goForward() {
 	a.history = append(a.history, a.route)
 	r := a.forward[len(a.forward)-1]
 	a.forward = a.forward[:len(a.forward)-1]
+	if a.phone {
+		a.phoneNavDir = 1
+	}
 	a.nowPlaying = false
 	a.show(r)
 }
@@ -298,12 +343,34 @@ const pageGap = 12
 // insets returns the room the bars over a page take at its top and its
 // bottom: pages pad their content by it, and scroll under the bars.
 func (a *app) insets(c *ui.Context) (top, bottom float32) {
+	if a.phone {
+		safeTop, _, safeBottom, _ := phoneSafeArea(c)
+		if !a.phoneHeaderInFlow() {
+			top = safeTop + 44
+		}
+		if safeBottom > 120 {
+			// The keyboard is up: the dock is not built, and its room goes
+			// to it.
+			return top, safeBottom
+		}
+		return top, safeBottom + a.phoneDockHeight(safeBottom)
+	}
 	top = topBar(c)
 	if runtime.GOOS == "darwin" {
 		// The edge reaches a little below the traffic lights' strip.
 		top += topEdgePad
 	}
 	return top, playerBarHeight
+}
+
+// phoneDockHeight is how much of the window's foot the phone's floating
+// dock covers above its safe area's inset, plus a little breathing room.
+func (a *app) phoneDockHeight(safeBottom float32) float32 {
+	height := float32(62) + max(10, safeBottom-14) - safeBottom + 12
+	if a.pl.Current() != nil {
+		height += 56 + 8
+	}
+	return height
 }
 
 // topEdgePad is the room the edge over a page leaves below the strip, on
@@ -387,7 +454,7 @@ func (a *app) pageTop(c *ui.Context) {
 func (a *app) content(c *ui.Context) {
 	// A new page starts at its top. Not as it is opened: a control in a
 	// list, as a page's tabs in its header, opens it as the list builds.
-	if a.scrolled != a.route {
+	if !a.phone && a.scrolled != a.route {
 		a.trackList, a.pageScroll, a.scrolled = ui.ListState{}, ui.ScrollState{}, a.route
 	}
 	// Pages mark where their content is, as they scroll.
@@ -402,7 +469,11 @@ func (a *app) content(c *ui.Context) {
 	case pagePlaylist:
 		a.playlistPage(c)
 	case pageSearch:
-		a.searchPage(c)
+		if r := a.route; a.phone && r.query == "" {
+			a.phoneSearchHistory(c)
+		} else {
+			a.searchPage(c)
+		}
 	case pageFM:
 		a.fmPage(c)
 	case pageArtist:
@@ -415,8 +486,14 @@ func (a *app) content(c *ui.Context) {
 		a.podcastPage(c)
 	case pagePodcasts:
 		a.podcastsPage(c)
+	case pageFeed:
+		a.phoneFeed(c)
 	case pageLocal:
 		a.localPage(c)
+	case pageLibrary:
+		a.phoneLibrary(c)
+	case pageSettings:
+		a.settingsView(c)
 	case pageMessages:
 		a.messagesPage(c)
 	case pageChat:
@@ -430,7 +507,7 @@ func (a *app) centered(c *ui.Context, err string, retry func()) {
 	top, bottom := a.insets(c)
 	ui.Column(c).Grow(1).Padding(top, 0, bottom, 0).Center().Gap(12).Children(func() {
 		ui.Text(c, err).TextColor(a.pal.muted).FontSize(13)
-		if retry != nil && ui.Button(c, "重试").Clicked() {
+		if retry != nil && a.settingButton(c, "retry", "重试", false).Clicked() {
 			retry()
 		}
 	})
@@ -438,8 +515,16 @@ func (a *app) centered(c *ui.Context, err string, retry func()) {
 
 // Loading what the pages show.
 
+type homeFeed struct {
+	featured, charts, recommended []netease.Playlist
+	daily                         []netease.Track
+	at                            time.Time
+	loaded                        bool
+}
+
 func (a *app) loadHome() {
 	a.homeLoading, a.homeErr = true, ""
+	revision := a.accountRevision
 	signedIn := a.profile != nil
 	at := time.Now()
 	go func() {
@@ -451,19 +536,28 @@ func (a *app) loadHome() {
 			rec, _ = netease.RecommendedPlaylists()
 		}
 		a.post(func() {
-			a.homeLoading = false
-			if err1 != nil && err2 != nil {
-				// Loading the new day's again, what shows stays, to try
-				// once more.
-				if len(a.featured) == 0 && len(a.charts) == 0 {
-					a.homeErr = "无法连接网易云音乐，请检查网络"
-				}
-				return
-			}
-			a.featured, a.charts, a.daily, a.recPlaylists = featured, charts, daily, rec
-			a.homeAt = at
+			a.homeLoaded(revision, homeFeed{
+				featured: featured, charts: charts, recommended: rec, daily: daily,
+				at: at, loaded: err1 == nil || err2 == nil,
+			})
 		})
 	}()
+}
+
+func (a *app) homeLoaded(revision uint64, feed homeFeed) {
+	if revision != a.accountRevision {
+		return
+	}
+	a.homeLoading = false
+	if !feed.loaded {
+		// Loading the new day's again, what shows stays, to try once more.
+		if len(a.featured) == 0 && len(a.charts) == 0 {
+			a.homeErr = "无法连接网易云音乐，请检查网络"
+		}
+		return
+	}
+	a.featured, a.charts, a.daily, a.recPlaylists = feed.featured, feed.charts, feed.daily, feed.recommended
+	a.homeAt = feed.at
 }
 
 // freshenHome loads the home page again once NetEase has picked the day's

@@ -1,7 +1,7 @@
-//go:build !darwin && !linux
+//go:build (!darwin && !linux) || (ios && !cgo) || android
 
 package player
 
-func openRubberBandLibrary(string) (*rubberBandAPI, error) {
+func openTailStretcher() (*rubberBandAPI, error) {
 	return nil, errStretchUnavailable
 }

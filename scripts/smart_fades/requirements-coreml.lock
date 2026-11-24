@@ -1,0 +1,3 @@
+# Install separately from the desktop runtime, then put this directory on PYTHONPATH.
+coremltools==9.0
+numpy==2.3.5

@@ -44,7 +44,7 @@ def load_models():
     return beat, skey, vocal
 
 
-def analyze(path: Path, rate: int):
+def analyze(path: Path, rate: int, models=None):
     import asyncio
     import numpy as np
     import soxr
@@ -61,7 +61,7 @@ def analyze(path: Path, rate: int):
     duration = len(data) / rate
     if rate != 48000 or not 8 <= duration <= 1200 or not np.isfinite(data).all():
         raise ValueError('Invalid analysis PCM')
-    beat, (vqt, chromanet, crop), (vocal, means, inv_std) = load_models()
+    beat, (vqt, chromanet, crop), (vocal, means, inv_std) = load_models() if models is None else models
     mel = AdvancedBeatFeatureExtractor()
     fbank = FireRedFbank(means, inv_std)
     rs_beat = soxr.ResampleStream(rate, 22050, 1, dtype='float32')

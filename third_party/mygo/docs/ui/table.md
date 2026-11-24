@@ -37,6 +37,12 @@ Chosen and hovered rows are square from edge to edge, as in Finder's list
 view; `RoundRows` rounds their corners at the theme's `Radius`, as a list's
 rows are, for an app whose other lists are rounded.
 
+Rows are at least the theme's `Space(8)` high, and as high as their tallest
+cell. `RowHeight` makes every row exactly that high instead, as AppKit's
+`rowHeight` does, with each cell's content in the middle: a denser table,
+showing more rows, for a log or a list of branches. The header keeps its
+height.
+
 ## Choosing cells
 
 With `Selection`, `CellSelect` makes the table choose a block of cells, as a
@@ -72,8 +78,8 @@ block's column IDs in the order shown, and `SelectColumns` chooses every row
 and a range of columns, for the app's own commands. `CellSelected(row, col)`
 tells a cell builder whether its cell is chosen, for text of its own color
 to show on the accent. A cell that reads its
-row's double click with `RowDoubleClicked` leaves the click to the row, so
-the block follows it.
+row's click with `RowClicked`, or its double click with `RowDoubleClicked`,
+leaves the click to the row, so the block follows it.
 
 `CellsStyle` paints the block in colors of its own rather than the accent,
 as a spreadsheet's two levels and stripes: `Cell` fills the block's cells,
@@ -123,7 +129,20 @@ The user arranges the columns, as in Finder:
 
 `ListState.Columns` keeps the order and the widths, by the columns' `ID`s
 (their titles by default): set it from saved settings to restore them, and
-save it as it changes.
+save it when the table's `Changed` reports it. `Columns` changes as the
+pointer moves, but `Changed` reports it once, as the user lets go of a header
+or an edge, when the order or a width is new, and once a double click fits a
+column to its cells, so the settings are written once per gesture:
+
+```go
+if ui.Table(c, &app.files, cols, len(files), cell).Grow(1).Changed() {
+	app.settings.Columns = app.files.Columns
+	app.saveSettings()
+}
+```
+
+With `Sort` or `SortBy` set too, `Changed` also reports a new sort: save
+both when it reports either.
 
 ## Sorting
 

@@ -21,6 +21,14 @@ func TestVibrancy(t *testing.T) {
 	if alpha(100, 600) != 0 || alpha(600, 600) != 255 {
 		t.Errorf("over the material, the sidebar's alpha is %d and the pane's %d; want 0 and 255", alpha(100, 600), alpha(600, 600))
 	}
+	// How far down the sidebar Mica sits depends on the system's fonts;
+	// scroll it into the window first.
+	for range 20 {
+		if r, ok := tt.Find("Mica"); !ok || r.Y+r.H <= 640 {
+			break
+		}
+		tt.Scroll(100, 400, 0, 40)
+	}
 	if err := tt.Click("Mica"); err != nil {
 		t.Fatal(err)
 	}

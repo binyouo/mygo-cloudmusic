@@ -8,19 +8,52 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/netease"
-	"netease-music-mygo/internal/player"
 )
 
-const pagePad = 40
+func (a *app) pagePadding() float32 {
+	if a.phone {
+		return 20
+	}
+	return 40
+}
+
+func (a *app) contentWidth(c *ui.Context) float32 {
+	w, _ := c.Size()
+	if !a.phone {
+		w -= sidebarWidth
+	}
+	return w
+}
+
+// detailHeader stacks the artwork over its metadata on phones.
+func (a *app) detailHeader(c *ui.Context) ui.Element {
+	if a.phone {
+		return ui.Column(c).Gap(16).AlignItems(ui.Stretch)
+	}
+	return ui.Row(c).Gap(28).AlignItems(ui.End)
+}
 
 // columns returns how many cards of at least min DIPs fit across the page.
 func (a *app) columns(c *ui.Context, min float32) int {
-	w, _ := c.Size()
-	inner := w - sidebarWidth - 2*pagePad
+	inner := a.contentWidth(c) - 2*a.pagePadding()
+	if a.phone {
+		// A phone's grids keep two across at least, as NetEase's do.
+		return max(2, int((inner+16)/(min+16)))
+	}
 	return max(2, int((inner+20)/(min+20)))
 }
 
 func (a *app) heading(c *ui.Context, title, sub string) {
+	if a.phone {
+		// Apple's large title, its descriptor over it.
+		ui.Column(c).Gap(2).Margin(0, 0, 14, 0).Children(func() {
+			if sub != "" {
+				ui.Text(c, sub).FontSize(13).FontWeight(600).TextColor(a.pal.muted)
+			}
+			ui.Text(c, title).FontSize(34).FontWeight(800).LetterSpacing(-0.6)
+		})
+		return
+	}
 	ui.Column(c).Gap(4).Margin(0, 0, 18, 0).Children(func() {
 		if sub != "" {
 			ui.Text(c, sub).FontSize(12).FontWeight(600).TextColor(a.pal.muted).LetterSpacing(0.4)
@@ -29,11 +62,20 @@ func (a *app) heading(c *ui.Context, title, sub string) {
 	})
 }
 
+// largeTitle is a phone page's heading where it has no descriptor.
+func (a *app) largeTitle(c *ui.Context, title string) {
+	ui.Text(c, title).FontSize(34).FontWeight(800).LetterSpacing(-0.6).Margin(0, 0, 14, 0)
+}
+
 func (a *app) section(c *ui.Context, title string) ui.Element {
 	return ui.Text(c, title).FontSize(19).FontWeight(700).LetterSpacing(-0.3).Margin(34, 0, 14, 0)
 }
 
 func (a *app) homePage(c *ui.Context) {
+	if a.phone {
+		a.phoneHome(c)
+		return
+	}
 	loading := len(a.featured) == 0 && len(a.charts) == 0
 	if loading && !a.homeLoading {
 		a.centered(c, a.homeErr, a.loadHome)
@@ -41,7 +83,7 @@ func (a *app) homePage(c *ui.Context) {
 	}
 	now := c.Now()
 	top, bottom := a.insets(c)
-	ui.Scroll(c.Key("home")).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, pagePad, bottom+48, pagePad).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
+	ui.Scroll(c.Key("home")).TrackScroll(a.ps()).Grow(1).Padding(top+pageGap, a.pagePadding(), bottom+48, a.pagePadding()).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
 		a.startMark(c)
 		defer a.endMark(c)
 		hello := greeting(now)
@@ -66,7 +108,7 @@ func (a *app) homePage(c *ui.Context) {
 
 		a.section(c, "官方榜单")
 		official := a.charts[:min(4, len(a.charts))]
-		cols := min(4, max(2, a.columns(c, 260)))
+		cols := min(4, a.columns(c, 260))
 		ui.Grid(c).Columns(cols).Gap(20).Children(func() {
 			for i := range official {
 				a.chartCard(c.Key(official[i].ID), &official[i])
@@ -93,7 +135,7 @@ func (a *app) chartsPage(c *ui.Context) {
 		return
 	}
 	top, bottom := a.insets(c)
-	ui.Scroll(c.Key("charts")).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, pagePad, bottom+48, pagePad).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
+	ui.Scroll(c.Key("charts")).TrackScroll(a.ps()).Grow(1).Padding(top+pageGap, a.pagePadding(), bottom+48, a.pagePadding()).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
 		a.startMark(c)
 		defer a.endMark(c)
 		a.heading(c, "排行榜", "每日更新")
@@ -105,7 +147,7 @@ func (a *app) chartsPage(c *ui.Context) {
 			return
 		}
 		official := a.charts[:min(4, len(a.charts))]
-		cols := min(4, max(2, a.columns(c, 260)))
+		cols := min(4, a.columns(c, 260))
 		ui.Grid(c).Columns(cols).Gap(20).Children(func() {
 			for i := range official {
 				a.chartCard(c.Key(official[i].ID), &official[i])
@@ -140,6 +182,9 @@ func (a *app) coverCard(c *ui.Context, name, cover string, playCount float64, su
 	// tallest, whose name or line under it takes two lines.
 	card := ui.ButtonBase(c).Column().Gap(10).AlignItems(ui.Stretch).Justify(ui.Start).FocusRing(false).Label(name)
 	hovered := card.Hovered()
+	if a.phone {
+		phonePressScale(c, card, 0.97)
+	}
 	card.Children(func() {
 		art := ui.Box(c).AspectRatio(1).Radius(10)
 		lift := ui.Pose{}
@@ -159,7 +204,9 @@ func (a *app) coverCard(c *ui.Context, name, cover string, playCount float64, su
 					ui.Text(c, plays(playCount)).FontSize(10.5).FontWeight(600)
 				})
 			}
-			a.coverPlayButton(c, hovered, play)
+			if !a.phone {
+				a.coverPlayButton(c, hovered, play)
+			}
 		})
 		ui.Text(c, name).FontSize(13).FontWeight(500).MaxLines(2).LineHeight(1.35)
 		if sub != "" {
@@ -174,7 +221,8 @@ func (a *app) coverCard(c *ui.Context, name, cover string, playCount float64, su
 // by a transform, as a card lifting under the pointer, is drawn on the CPU.
 func (a *app) coverFill(c *ui.Context, url string, px int, radius float32) {
 	bmp := bitmap(a.art.get(netease.Sized(url, px), false))
-	box := ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Radius(radius)
+	// PassThrough: a cover paints, it never takes a tap from a sibling.
+	box := ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Radius(radius).PassThrough()
 	in := artIn(box, bmp)
 	if in < 1 {
 		box.Background(a.pal.hover)
@@ -207,6 +255,9 @@ func (a *app) chartCard(c *ui.Context, pl *netease.Playlist) {
 	p := a.pal
 	card := ui.ButtonBase(c).Gap(14).Padding(12).Radius(14).AlignItems(ui.Center).FocusRing(false).Label(pl.Name)
 	hovered := card.Hovered()
+	if a.phone {
+		phonePressScale(c, card, 0.97)
+	}
 	bg := p.hover
 	if hovered {
 		bg = p.press
@@ -250,10 +301,17 @@ func (a *app) playlistPage(c *ui.Context) {
 		return
 	}
 	a.morePlaylistSongs(a.remainingPlaylist(pl))
-	// Its search is in the header's row of buttons (playlistSearch).
-	indices := a.playlistFilter.rows(pl)
-	a.trackRowsIndexed(c, pl.Tracks, indices, true, func(c *ui.Context) { a.playlistHeader(c, pl) }, func(c *ui.Context) {
-		if indices != nil && len(indices) == 0 {
+	var indices []int
+	if a.phonePreviewScroll == nil {
+		indices = a.playlistFilter.rows(pl)
+	}
+	showHeader := !a.phonePlaylistSearch || a.phonePreviewScroll != nil
+	a.trackRowsIndexed(c, pl.Tracks, indices, true, func(c *ui.Context) {
+		if showHeader {
+			a.playlistHeader(c, pl)
+		}
+	}, func(c *ui.Context) {
+		if indices != nil && len(indices) == 0 && pl.TrackOffset >= len(pl.TrackIDs) {
 			a.empty(c, "没有找到匹配的歌曲")
 		}
 		a.playlistProgress(c, pl)
@@ -261,8 +319,12 @@ func (a *app) playlistPage(c *ui.Context) {
 }
 
 func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
+	if a.phone {
+		a.playlistPhoneHeader(c, pl)
+		return
+	}
 	p := a.pal
-	ui.Row(c).Gap(28).AlignItems(ui.End).Padding(0, 0, 26, 0).Children(func() {
+	a.detailHeader(c).Padding(0, 0, 26, 0).Children(func() {
 		ui.Box(c).Size(212, 212).Radius(14).Shadow(0, 18, 40, -10, p.cardShade).Children(func() {
 			a.coverFill(c, pl.Cover(), 600, 14)
 		})
@@ -285,7 +347,11 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 			if d := strings.TrimSpace(pl.Description); d != "" {
 				ui.Text(c, strings.ReplaceAll(d, "\n", " ")).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
 			}
-			ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
+			actions := ui.Row(c).Gap(10).Margin(10, 0, 0, 0)
+			if a.phone {
+				actions.Wrap()
+			}
+			actions.Children(func() {
 				if pillButton(c.Key("play"), iconPlay, "播放", p.accent, p.onAccent).Clicked() {
 					a.playPlaylist(pl, 0, false)
 				}
@@ -302,16 +368,11 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 					}
 				}
 				if mine := a.editable(pl.ID); mine != nil {
-					more := iconButton(c.Key("more"), iconMore, 18, p.muted, "更多")
-					more.Menu(func(m *ui.Menu) {
-						if m.Item("重命名…").Chosen() {
-							a.startRename(mine)
-						}
-						m.Separator()
-						if m.Item("删除歌单…").Chosen() {
-							a.confirmDelete(mine)
-						}
-					})
+					if a.phone {
+						a.phonePlaylistActions(c.Key("more"), mine)
+					} else {
+						iconButton(c.Key("more"), iconMore, 18, p.muted, "更多").Menu(a.playlistManagementItems(mine, true))
+					}
 				}
 				switch {
 				case pl.SpecialType != 5:
@@ -321,14 +382,17 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 					}
 				default:
 					label := "心动模式"
-					if a.radioStarting == heartRadio {
-						label = "正在开启…"
+					if a.startingRadio() == heartRadio {
+						label = "取消开启心动模式"
 					}
 					if pillButton(c.Key("heart"), iconHeartFill, label, p.hover.Over(p.bg), p.text).Clicked() {
 						a.startHeartMode()
 					}
 				}
-				a.playlistSearch(c)
+				if !a.phone {
+					ui.Box(c).Grow(1)
+					a.playlistSearch(c)
+				}
 			})
 		})
 	})
@@ -348,9 +412,8 @@ func (a *app) trackRowsIndexed(c *ui.Context, tracks []netease.Track, indices []
 	if a.route.page == pagePlaylist {
 		pid = a.route.id
 	}
-	w, _ := c.Size()
 	// An album's page has no column of the album its songs are on.
-	wide := w-sidebarWidth > 820 && a.route.page != pageAlbum
+	wide := !a.phone && a.contentWidth(c) > 820 && a.route.page != pageAlbum
 	top, bottom := a.insets(c)
 	// Rows out of view are not built, their marks with them: a list
 	// scrolled away from its start or end has content under the bars.
@@ -360,11 +423,17 @@ func (a *app) trackRowsIndexed(c *ui.Context, tracks []netease.Track, indices []
 		count = len(indices)
 	}
 	rows := count + 1 + len(footer)
-	ui.List(c.Key(a.route), &a.trackList, rows, func(i int) {
+	list := ui.List(c.Key(a.route), a.ls(), rows, func(i int) {
 		if i == 0 {
 			ui.Column(c).Children(func() {
 				a.startMark(c)
-				header(c)
+				// The list's padding is the rows': headers line their text
+				// up with what a row's own padding leaves.
+				if a.phone {
+					ui.Column(c).Padding(0, 12).Children(func() { header(c) })
+				} else {
+					header(c)
+				}
 			})
 			return
 		}
@@ -381,33 +450,73 @@ func (a *app) trackRowsIndexed(c *ui.Context, tracks []netease.Track, indices []
 		}
 		tr := &tracks[i]
 		playing := cur != nil && cur.ID == tr.ID
-		row := ui.ButtonBase(c.Key(tr.ID)).Height(54).PaddingX(12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
-			ContextMenu(a.songItems(tr, pid))
+		row := ui.ButtonBase(c.Key(tr.ID)).Height(54).PaddingX(12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(tr.Name)
+		textAt := float32(12 + 26 + 14)
+		if a.phone {
+			row.Height(60).Radius(0)
+			// Phone rows carry the song's cover where the list's songs
+			// differ in albums, and number them where they do not.
+			textAt = 12 + 32 + 14
+			if covers {
+				textAt = 12 + 44 + 14
+			}
+		}
+		if !a.phone {
+			row.ContextMenu(a.songItems(tr, pid))
+		}
 		hovered := row.Hovered()
 		bg := ui.Transparent
 		switch {
-		case playing:
+		case a.phone && row.Pressed():
+			bg = p.press
+		case playing && !a.phone:
 			bg = p.accent.Alpha(0.09)
 		case hovered:
 			bg = p.hover
 		}
-		row.Background(row.AnimateColor("bg", bg, ui.Animation{Duration: 100 * time.Millisecond}))
-		if !tr.Playable() {
+		if !a.phone {
+			bg = row.AnimateColor("bg", bg, ui.Animation{Duration: 100 * time.Millisecond})
+		}
+		row.Background(bg)
+		playable := tr.Playable()
+		if !playable {
 			row.Opacity(0.42)
 		}
 		row.Children(func() {
-			ui.Box(c).Width(26).Center().Children(func() {
-				switch {
-				case playing:
-					a.nowPlayingBars(c)
-				case hovered:
-					ui.Icon(c, iconPlay).Size(13, 13).TextColor(p.text)
-				default:
-					ui.Textf(c, "%d", i+1).FontSize(13).FontFeatures("tnum").TextColor(p.faint)
+			if a.phone {
+				ui.Box(c).Absolute().Left(textAt).Right(-8).Bottom(0).Height(1).Background(p.hairline)
+				if covers {
+					cov := a.cover(c, tr.Album.PicURL, 120, 44, 8).Shrink(0)
+					if playing {
+						cov.Children(func() {
+							ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Radius(8).
+								Background(ui.RGBA(0, 0, 0, 0.45)).PassThrough().Children(func() {
+								a.nowPlayingBars(c)
+							})
+						})
+					}
+				} else {
+					ui.Box(c).Width(32).Shrink(0).Center().Children(func() {
+						if playing {
+							ui.Icon(c, iconVolume).Size(16, 16).TextColor(p.accent)
+						} else {
+							ui.Textf(c, "%d", i+1).FontSize(15).FontFeatures("tnum").TextColor(p.muted)
+						}
+					})
 				}
-			})
-			if covers {
+			} else if covers {
 				a.cover(c, tr.Album.PicURL, 96, 38, 6)
+			} else {
+				ui.Box(c).Width(26).Center().Children(func() {
+					switch {
+					case playing:
+						a.nowPlayingBars(c)
+					case hovered:
+						ui.Icon(c, iconPlay).Size(13, 13).TextColor(p.text)
+					default:
+						ui.Textf(c, "%d", i+1).FontSize(13).FontFeatures("tnum").TextColor(p.faint)
+					}
+				})
 			}
 			ui.Column(c).Grow(3).Basis(0).MinWidth(0).Gap(3).Children(func() {
 				name := p.text
@@ -418,16 +527,39 @@ func (a *app) trackRowsIndexed(c *ui.Context, tracks []netease.Track, indices []
 				if len(tr.Alias) > 0 {
 					spans = append(spans, ui.Span{Text: "（" + tr.Alias[0] + "）", Color: p.faint})
 				}
-				ui.RichText(c, spans...).FontSize(14).SingleLine()
-				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-					if !tr.Playable() && (tr.Fee == 1 || tr.Fee == 4) {
-						ui.Text(c, "VIP").FontSize(9).FontWeight(800).TextColor(p.accent).Padding(0, 4).Radius(3).Border(1, p.accent.Alpha(0.6))
-					}
-					a.artistLinks(c, tr, p.muted, p.text).FontSize(12.5).SingleLine().Shrink(1).MinWidth(0)
-					if tr.Reason != "" {
-						ui.Text(c, tr.Reason).FontSize(10.5).FontWeight(600).TextColor(p.accent).Padding(1, 6).Radius(999).Background(p.accent.Alpha(0.1)).SingleLine()
-					}
-				})
+				nameSize, artistSize := float32(14), float32(12.5)
+				if a.phone {
+					nameSize, artistSize = 16, 12
+				}
+				ui.RichText(c, spans...).FontSize(nameSize).SingleLine()
+				// A second line only exists when it has something to say:
+				// an empty one would push the title off the row's middle.
+				artists := tr.ArtistNames()
+				vip := !playable && (tr.Fee == 1 || tr.Fee == 4)
+				sub := artists != "" || tr.Reason != "" || vip || a.route.page != pageAlbum && tr.Album.Name != ""
+				if !a.phone || sub {
+					ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+						if vip {
+							ui.Text(c, "VIP").FontSize(9).FontWeight(800).TextColor(p.accent).Padding(0, 4).Radius(3).Border(1, p.accent.Alpha(0.6))
+						}
+						if a.phone {
+							// "artist - album", the album left off its own page.
+							text := artists
+							if a.route.page != pageAlbum && tr.Album.Name != "" {
+								if text != "" {
+									text += " - "
+								}
+								text += tr.Album.Name
+							}
+							ui.Text(c, text).FontSize(artistSize).TextColor(p.muted).SingleLine().Shrink(1).MinWidth(0)
+						} else {
+							a.artistLinks(c, tr, p.muted, p.text).FontSize(artistSize).SingleLine().Shrink(1).MinWidth(0)
+						}
+						if tr.Reason != "" {
+							ui.Text(c, tr.Reason).FontSize(10.5).FontWeight(600).TextColor(p.accent).Padding(1, 6).Radius(999).Background(p.accent.Alpha(0.1)).SingleLine()
+						}
+					})
+				}
 			})
 			if wide {
 				album := ui.RichText(c).Grow(2).Basis(0).MinWidth(0).FontSize(12.5).TextColor(p.muted).SingleLine()
@@ -439,33 +571,34 @@ func (a *app) trackRowsIndexed(c *ui.Context, tracks []netease.Track, indices []
 					}
 				})
 			}
-			// A liked song's heart shows; the others' as the pointer is on them.
+			// A liked song's heart shows; on the desktop the others' as the
+			// pointer is on them, on the phone only when already liked.
 			ui.Box(c).Size(32, 32).Center().Children(func() {
-				if a.liked[tr.ID] || hovered {
+				if tr.LocalPath == "" && (a.liked[tr.ID] || (!a.phone && hovered)) {
 					a.likeButton(c.Key("like"), tr, 15, p.muted)
 				}
 			})
-			ui.Text(c, clock(tr.Length())).FontSize(12.5).FontFeatures("tnum").TextColor(p.faint).Width(44).TextAlign(ui.End)
+			if a.phone {
+				a.phoneTrackActions(c.Key("song-actions"), tr, pid, p.muted)
+			} else {
+				ui.Text(c, clock(tr.Length())).FontSize(12.5).FontFeatures("tnum").TextColor(p.faint).Width(44).TextAlign(ui.End)
+			}
 		})
 		if row.Clicked() {
 			if pid != 0 {
+				a.phonePlaylistEditing = false
 				a.playPlaylist(a.playlists[pid], tr.ID, a.pl.Shuffle())
 			} else {
 				a.pl.PlayQueue(tracks, i)
 			}
 		}
-	}).Grow(1).Padding(top+pageGap, pagePad-12, bottom+32, pagePad-12).ScrollbarInsets(top, 0, bottom, 0)
+	}).Grow(1).Padding(top+pageGap, a.pagePadding()-12, bottom+32, a.pagePadding()-12).ScrollbarInsets(top, 0, bottom, 0)
+	if a.phone {
+		list.TrackScroll(a.ps())
+		if a.route.page == pagePlaylist || a.route.page == pageAlbum {
+			list.ScrollbarStyle(ui.ScrollbarStyle{TrackWidth: 18, ThumbWidth: 3})
+		}
+	}
 }
 
-// nowPlayingBars dance in the row of the track playing.
-func (a *app) nowPlayingBars(c *ui.Context) {
-	color := a.pal.accent
-	ui.Box(c).Size(16, 14).Draw(func(p *ui.Painter, r ui.Rect) {
-		lv, live := a.pl.Levels()
-		a.rowBars.step(p.Now(), lv, live)
-		drawBars(p, r, &a.rowBars, 4, color, 2.5)
-		if live || a.rowBars.group(0, player.Bands) > 0.01 {
-			p.AnimationFrame()
-		}
-	})
-}
+// nowPlayingBars moved to playing_bars.go, which keeps Apple's patterns.

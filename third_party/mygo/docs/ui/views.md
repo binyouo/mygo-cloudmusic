@@ -162,8 +162,10 @@ pointer keys the object it points to, whatever the object holds, so an
 item's pointer serves as its key as well as an ID does. A key Go cannot
 compare, as a slice, or not equal to itself, as a NaN, compares by its
 value printed. `Element.Key` can
-key a container before its children or local state are built. Use
-`Context.Key` for stateful controls and custom base widgets.
+key a container before its state is read or bound (`Local`, `Clicked`,
+`Hovered`, `Focused`, `OnUnmount`, `AnimateTo`, and the like); calling it
+afterward logs a warning in apps and panics in `Tester`. Use `Context.Key`
+before construction for stateful controls and custom widgets.
 
 `Context.Key` sets one pending key for the next control; calling it again
 replaces that key. `c.Key("account").Key("secret")` uses only `"secret"`.
@@ -222,6 +224,37 @@ widgets you build yourself; see [custom widgets](custom-widgets.md). A
 value of it that is an `io.Closer` closes when the element is no longer
 built, which stops the work the widget started
 ([stopping what a widget started](custom-widgets.md#stopping-what-a-widget-started)).
+
+A view that only needs to run a function as an element goes, such as the
+`cancel` of a streaming request, a ticker or a subscription it started,
+gives it to `OnUnmount` instead of defining a type with `Close`:
+
+```go
+func Feed(c *ui.Context, win *mygo.Window, app *App, url string) {
+	e := ui.Column(c)
+	cancel := ui.Local(e, "stream", func() context.CancelFunc {
+		ctx, cancel := context.WithCancel(context.Background())
+		go read(ctx, url, func(line string) {
+			win.Update(func() { app.lines = append(app.lines, line) })
+		})
+		return cancel
+	})
+	e.OnUnmount(*cancel)
+	e.Children(func() {
+		for _, line := range app.lines {
+			ui.Text(c, line)
+		}
+	})
+}
+```
+
+The function runs as a `Local`'s `Close` does: once, on the main thread,
+after the first frame that no longer builds the element, as the view
+switches to another screen, a list's row scrolls out of view or a popover
+closes. An element leaving with an exit transition runs it once its exit
+ended, and every element runs it as its window closes. Call `OnUnmount`
+as the element is built, after `Key`: each call replaces the function,
+and the last one given runs; a nil function takes it away.
 
 ## Check build lifetimes
 

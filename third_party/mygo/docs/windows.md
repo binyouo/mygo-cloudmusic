@@ -58,8 +58,9 @@ on the screen. Sizes and positions are in device-independent pixels.
 | `CornerRadius` | rounds a frameless window's corners: its content and material are cut to them on macOS, and Windows 11 gives it its own rounded corners |
 | `BackgroundColor` | fills the window until the page paints, in CSS syntax such as `"#1e1e1e"`, or `"light-dark(#f5f5f7, #1e1e1e)"` to follow the appearance |
 | `Opacity` | between 0 and 1 |
+| `IgnoreMouseEvents` | creates the window letting the mouse through to what is behind it, as `SetIgnoreMouseEvents(true)` does later (see [click-through windows](#click-through-windows)) |
 | `DisableResize`, `DisableMove`, `DisableMinimize`, `DisableMaximize`, `DisableClose`, `DisableFullScreen`, `DisableShadow` | take abilities away. On Linux under Wayland, `DisableShadow` keeps a frameless window or a hidden title bar without the shadow and border GTK draws around them |
-| `AlwaysOnTop` | keeps the window above others |
+| `AlwaysOnTop` | keeps the window above others; under Wayland only a frameless one out of the taskbar, see [click-through windows](#click-through-windows) |
 | `SkipTaskbar` | leaves the window out of the taskbar (Linux, Windows) |
 | `AutoHideMenuBar` | shows the menu bar only while the keyboard is in it, from Alt or F10 (Linux, Windows), see [the menu bar](menus.md#the-menu-bar) |
 | `Parent`, `Modal` | a child window, modal to its parent, a [flyout](#a-dialog-over-a-flyout) too; for one placed next to a part of it, see [flyouts](#flyouts) |
@@ -156,6 +157,25 @@ quits, on the main thread. Windows open with their options when there are
 no states or loading them fails; a save that fails is tried again the next
 time.
 
+In a quit, the states are saved after the `OnBeforeQuit` listeners have
+run, as each window closes, and once more after the event loop has
+stopped, right before the `OnQuit` listeners run. A "Reset settings"
+action that removed `window-state.json`, or the states from its own store,
+would see them written again. `App.ClearWindowStates()` forgets them for
+good instead: it saves no states, an empty map for a `WindowStateStore`,
+and the windows save theirs no more until the app exits. The windows open
+keep their bounds, and those created afterwards, as at the next launch,
+get their options. It can be called at any time, from a quit listener
+too:
+
+```go
+mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+	if resetRequested {
+		_ = mygo.App.ClearWindowStates()
+	}
+})
+```
+
 ### Bring a page back
 
 A window's position comes back with its `StateKey`; its page comes back
@@ -215,6 +235,25 @@ win.Hide()              // Show, ShowInactive (without focusing), IsVisible
 win.Focus()             // Blur, IsFocused
 ```
 
+`IsVisible` tells whether `Show` showed the window and `Hide` did not hide
+it since: a minimized window is still visible, on every platform, as is one
+covered by others or on another desktop. `IsMinimized` tells that it is
+minimized, and in a window of native UI,
+[`Context.WindowHidden`](ui/windows.md#hidden-windows) whether any of it shows on screen.
+
+`CornerRadius` returns the radius the window's corners are rounded to on
+screen, in DIPs, for content inset from the window's edges to round its own
+corners concentric with them: a card inset by 8 takes `CornerRadius() - 8`.
+On macOS it is a frameless window's `CornerRadius`, or the corners the system
+draws the window with, which depend on the system and the title bar (on
+macOS 26, 26 with `TitleBarHiddenInset`'s toolbar and 16 without one). On
+Windows 11 it is 8. It is 0 where the corners are square: in full screen, a
+maximized window on Windows, on Linux, in browsers.
+
+```go
+inner := max(win.CornerRadius()-8, 0) // a card 8 DIPs in from the edges
+```
+
 Sizes and positions are in the window's DIPs, whatever the zoom of its
 page (`Page.SetZoomFactor`) or of its [native UI](ui/windows.md#zoom):
 at a zoom of 1.25, a page area of 1000 DIPs shows 800 of the page's CSS
@@ -248,7 +287,10 @@ Other properties:
   regular apps there, but [panels](#panels).
 - `SetContentProtection(true)` keeps it out of screenshots and screen
   recordings.
-- `SetIgnoreMouseEvents(true)` lets clicks through to what is behind it.
+- `SetIgnoreMouseEvents(true)` lets clicks through to what is behind it,
+  which `IgnoresMouseEvents` reads back, and `SetInputRegion` all of them
+  but those on parts of it (see
+  [click-through windows](#click-through-windows)).
 - `SetActiveAppearance(true)` keeps the window drawn as active while
   another app is in front (macOS), so that the clear Liquid Glass
   (`VibrancyGlassClear`) of a panel floating over it stays clear. It uses a
@@ -383,7 +425,9 @@ neither a border nor rounded corners there).
 
 On macOS, `Popover` gives it the look of the system's popovers instead: it
 shows in an `NSPopover`, which draws its material, rounded corners and an
-arrow pointing at the middle of the anchor, and animates. AppKit places it
+arrow pointing at the middle of the anchor, and animates. The material and
+arrow follow the application's theme, including changes while open; a tray's
+menu-bar contrast appearance does not override them. AppKit places it
 on the side `Placement` names, or the opposite one; the rest of the
 placement, and `Gap`, do not apply. As AppKit's popovers do, it has the
 keyboard while it shows, and with `Focusable` it closes as the user clicks
@@ -649,6 +693,67 @@ Escape, which the user presses there. Elsewhere, as on GNOME, which has no
 layer shell, it is a window as others: the compositor decides where it
 shows and what is above it.
 
+## Click-through windows
+
+A desktop pet is a frameless, transparent window always on top, which
+shows a character, and a speech bubble now and then: clicks on them reach
+the app, and clicks anywhere else the window or the desktop under it, as
+if the pet's window were not there. `SetInputRegion` gives the window the
+rectangles that take the mouse, in DIPs from the top-left corner of its
+content; presses, moves and the wheel elsewhere go through to what is
+behind it:
+
+```go
+pet := mygo.NewWindow(mygo.WindowOptions{
+	Frameless:   true,
+	Transparent: true,
+	AlwaysOnTop: true,
+	SkipTaskbar: true,
+	Width:       320,
+	Height:      240,
+	Content:     ui.View(app.pet),
+})
+character := mygo.Rectangle{X: 200, Y: 120, Width: 110, Height: 110}
+pet.SetInputRegion([]mygo.Rectangle{character})
+
+// The bubble shows: it takes clicks too, until it goes.
+pet.SetInputRegion([]mygo.Rectangle{character, {X: 10, Y: 10, Width: 220, Height: 90}})
+```
+
+Set the region again as what takes clicks moves or changes size: the
+rectangles stay where they were in the window, which may move as a whole
+(`SetPosition`, or `StartDrag` from the character). A page finds its
+rectangles with `getBoundingClientRect` and sends them through a bound
+method; native UI with an element's `Bounds`. `SetInputRegion(nil)` gives
+the window the mouse everywhere again, as it starts, and an empty slice
+lets it all through, as `SetIgnoreMouseEvents(true)` does, which wins
+over the region while it is set. `PassThrough` in native UI is another
+thing: it lets the pointer through an element to what the window shows
+under it, never to another window.
+
+How each platform does it:
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| region | the window lets the mouse through (`ignoresMouseEvents`) while the pointer is outside the rectangles, switched as it moves, from monitors of the pointer's moves in the app and in other apps | the window's input shape: X11's SHAPE extension, Wayland's input region | the window lets the mouse through (layered, `WS_EX_TRANSPARENT`) while the cursor is outside the rectangles, which a timer asks at each tick of the system's clock (15.6 ms) while the window shows |
+
+On macOS and Windows a button held keeps the window as it is: a drag that
+started on the character ends there, as one that started on what is
+behind ends there, and the release settles which takes the mouse next.
+
+Under Wayland, which ignores keep-above, such a window, frameless,
+`AlwaysOnTop` and `SkipTaskbar`, nobody's child, is a surface of the layer
+shell as [panels](#panels) are, where the compositor speaks the protocol
+(KDE Plasma, Sway, Hyprland, COSMIC…) and `libgtk-layer-shell.so.0` is
+installed: on the overlay layer, above full-screen windows too, out of the
+taskbar, where its bounds put it whatever the desktop's panels reserve,
+and taking the keyboard only when clicked, so that the app under it keeps
+it. It stays above until it closes: `SetAlwaysOnTop(false)` cannot make a
+layer surface a window again, so an app that lets the user turn it off
+opens the window again without `AlwaysOnTop`. Elsewhere, as on GNOME, which has no layer shell, it is a window as
+others, which other windows may cover; under XWayland (`GDK_BACKEND=x11`)
+GNOME keeps it above, full-screen windows too.
+
 ## Events
 
 Listeners run on the main thread: keep them short, and start goroutines for
@@ -663,7 +768,7 @@ slow work. Each `On…` method returns a function that removes the listener.
 | `OnResize`, `OnMove` | it was resized or moved |
 | `OnMaximize`, `OnUnmaximize`, `OnMinimize`, `OnRestore` | its state changed |
 | `OnEnterFullScreen`, `OnLeaveFullScreen` | it entered or left full screen |
-| `OnReadyToShow` | its first page is ready to be displayed, or its native UI drew its first frame |
+| `OnReadyToShow` | its first page is ready to be displayed or failed to load (unless an `OnDidFailLoad` listener loaded another page, which it then waits for), or its native UI drew its first frame |
 | `OnFileDrop` | files were dropped on its page, see [dropped files](frontend.md#dropped-files), or on native UI that did not take them, see [dropped files](ui/input.md#dropped-files) |
 
 Ask before closing a window with unsaved changes:
@@ -746,7 +851,7 @@ Page events, on `win.Page()`:
 |---|---|
 | `OnWillNavigate(func(e *mygo.NavigateEvent))` | the page is about to navigate, for example after a click on a link; `e.PreventDefault()` cancels it. `e.UserInitiated` says whether a user's gesture started it, a click on a link or a click whose handler sets `location.href`, or the page's script did on its own. Not called for `LoadURL` and its siblings, nor for the page's iframes, except on Linux before WebKitGTK 2.56, which tells no navigation's frame: there it is called for an iframe's too, but a `srcdoc` one's. |
 | `OnDidNavigate(func(url string))` | a navigation committed |
-| `OnDOMReady` | the page's DOM is ready (`DOMContentLoaded`) |
+| `OnDOMReady` | the page's DOM is ready (`DOMContentLoaded`), or the web view shows the page again as it was left, on Back or Forward |
 | `OnDidFinishLoad` | the page finished loading |
 | `OnDidFailLoad(func(err *mygo.LoadError))` | the page failed to load |
 | `OnPageTitleUpdated(func(e *mygo.TitleEvent))` | the page's `<title>` changed; preventing the event keeps the window title as it is |
@@ -1166,7 +1271,32 @@ win.Page().SetCertificateErrorHandler(func(e mygo.CertificateError) bool {
 
 On Linux only the page itself is asked about, not what it loads, and on
 Linux and Windows a certificate allowed for a host stays allowed in every
-window until the app quits. Client certificates are left to the system.
+window until the app quits.
+
+A server, or a proxy, can also ask for the client's certificate before it
+serves the page (mutual TLS). `Page.SetClientCertificateHandler` answers
+with one of the certificates the platform offers, or with an empty
+`ClientCertificateResponse` to refuse, which fails the load as when a
+user dismisses a browser's prompt:
+
+```go
+win.Page().SetClientCertificateHandler(func(req mygo.ClientCertificateRequest) mygo.ClientCertificateResponse {
+	for _, c := range req.Certificates {
+		if c.Subject == "CN=alice" {
+			return mygo.ClientCertificateResponse{Certificate: c}
+		}
+	}
+	return mygo.ClientCertificateResponse{}
+})
+```
+
+What is offered is the platform's: WebView2's mutually trusted
+certificates on Windows, the keychain's identities on macOS. WebKitGTK
+lists none, so on Linux `Certificates` is empty and a handler can only
+refuse; without a handler each platform shows its own choice (WebView2's
+dialog, WebKitGTK's chooser; macOS never asks). A refusal on Linux ends
+the load as a cancellation, which `OnDidFinishLoad` reports and
+`OnDidFailLoad` does not.
 
 ### Blocking content
 
@@ -1249,6 +1379,29 @@ pid := win.Page().ProcessID()
 
 It is 0 too before the web view has started a process, after the window
 closed, and for a window showing native UI.
+
+`GPUProcessID` returns the ID of the process that does the page's graphics
+and media. On macOS that is where the page's sound comes out, so an app
+that shows what a page plays (a music player's visualizer, say) can capture
+it with a Core Audio process tap (`CATapDescription`, macOS 14.2 and
+later), which needs the process's ID:
+
+```go
+pid := win.Page().GPUProcessID()
+```
+
+| Platform | The process |
+|---|---|
+| macOS | WebKit's GPU process (`com.apple.WebKit.GPU`), which plays the page's audio and video, from WebKit's private `_gpuProcessIdentifier`; 0 if WebKit doesn't answer it or hasn't started the process yet, which it does once a page first needs it, to play media or draw with the GPU |
+| Windows | WebView2's GPU process (`msedgewebview2.exe --type=gpu-process`), a child of `ProcessID`'s browser process, from `ICoreWebView2Environment8`'s `GetProcessInfos`; 0 on runtimes without it. WebView2 plays sound from its audio service, a utility process, not this one: capture the tree of `ProcessID`'s process for it (process loopback) |
+| Linux | none: WebKitGTK has no API for its GPU process, so it is always 0 |
+| Browsers | none: always 0 |
+
+It is 0 too before the web view has started a process, after the window
+closed, and for a window showing native UI. The app's web views may share
+the process, and it gets a new ID each time the app runs and whenever the
+web view starts it again, after it crashed or exited, so ask again rather
+than keep the ID.
 
 ## Finding windows
 

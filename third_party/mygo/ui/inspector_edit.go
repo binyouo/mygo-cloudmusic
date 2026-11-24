@@ -68,6 +68,7 @@ func (in *inspector) applyEditsTo(e *node) {
 		return
 	}
 	if edits := in.edits[e.id]; len(edits) > 0 {
+		journalKeepNode(e)
 		for i := range edits {
 			ed := &edits[i]
 			switch {
@@ -340,6 +341,7 @@ func setStyle(e *node, name, value string) bool {
 		v, ok := parseCSSLength(lower)
 		if ok {
 			e.inset[side] = v
+			e.insetSet = true
 			if side%2 == 1 {
 				e.unlog(side, logInset)
 			}
@@ -613,13 +615,17 @@ func unsetStyle(e *node, name string) {
 		e.self = alignAuto
 	case "top":
 		e.inset[0] = length{}
+		e.insetSet = e.insetAny()
 	case "right":
 		e.inset[1] = length{}
+		e.insetSet = e.insetAny()
 		e.unlog(1, logInset)
 	case "bottom":
 		e.inset[2] = length{}
+		e.insetSet = e.insetAny()
 	case "left":
 		e.inset[3] = length{}
+		e.insetSet = e.insetAny()
 		e.unlog(3, logInset)
 	case "width":
 		e.width = length{}

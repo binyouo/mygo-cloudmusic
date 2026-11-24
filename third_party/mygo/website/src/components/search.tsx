@@ -7,16 +7,22 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { Kbd } from "@/components/ui/kbd"
 import { docHref, type SearchEntry } from "@/lib/docs"
+import { useLanguage, useT } from "@/lib/i18n"
+import { localePath, type Language } from "@/lib/locale"
 
 // Prerendered by the /docs/search.json route, and fetched the first time the
-// search opens.
-let index: Promise<SearchEntry[]> | undefined
-function loadIndex() {
-  index ??= fetch("/docs/search.json").then((r) => {
-    if (!r.ok) throw new Error(`search index: ${r.status}`)
-    return r.json() as Promise<SearchEntry[]>
-  })
-  index.catch(() => (index = undefined))
+// search opens: in the language of the page, /zh/docs/search.json in Chinese.
+const indexes = new Map<Language, Promise<SearchEntry[]>>()
+function loadIndex(lang: Language) {
+  let index = indexes.get(lang)
+  if (!index) {
+    index = fetch(lang === "zh" ? "/zh/docs/search.json" : "/docs/search.json").then((r) => {
+      if (!r.ok) throw new Error(`search index: ${r.status}`)
+      return r.json() as Promise<SearchEntry[]>
+    })
+    index.catch(() => indexes.delete(lang))
+    indexes.set(lang, index)
+  }
   return index
 }
 
@@ -69,6 +75,8 @@ function Highlight({ text, terms }: { text: string; terms: string[] }) {
 }
 
 export function Search() {
+  const t = useT()
+  const lang = useLanguage()
   const [open, setOpen] = React.useState(false)
   const [mac, setMac] = React.useState(true)
 
@@ -90,20 +98,20 @@ export function Search() {
       <Button
         variant="outline"
         onClick={() => setOpen(true)}
-        onPointerEnter={() => void loadIndex().catch(() => {})}
+        onPointerEnter={() => void loadIndex(lang).catch(() => {})}
         className="hidden h-8 w-56 justify-start gap-2 bg-muted/40 px-2.5 font-normal text-muted-foreground shadow-none hover:bg-muted lg:flex dark:bg-muted/30"
       >
         <SearchIcon />
-        Search docs…
+        {t("Search docs…")}
         <Kbd className="ml-auto border bg-background">{mac ? "⌘K" : "Ctrl K"}</Kbd>
       </Button>
-      <Button variant="ghost" size="icon" onClick={() => setOpen(true)} className="lg:hidden" aria-label="Search docs">
+      <Button variant="ghost" size="icon" onClick={() => setOpen(true)} className="lg:hidden" aria-label={t("Search docs")}>
         <SearchIcon />
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent showCloseButton={false} className="top-[12%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-xl">
-          <DialogTitle className="sr-only">Search the docs</DialogTitle>
-          <DialogDescription className="sr-only">Find a page or a section of the docs.</DialogDescription>
+          <DialogTitle className="sr-only">{t("Search the docs")}</DialogTitle>
+          <DialogDescription className="sr-only">{t("Find a page or a section of the docs.")}</DialogDescription>
           {open && <SearchPanel onClose={() => setOpen(false)} />}
         </DialogContent>
       </Dialog>
@@ -112,6 +120,8 @@ export function Search() {
 }
 
 function SearchPanel({ onClose }: { onClose: () => void }) {
+  const t = useT()
+  const lang = useLanguage()
   const navigate = useNavigate()
   const [query, setQuery] = React.useState("")
   const [entries, setEntries] = React.useState<SearchEntry[]>()
@@ -119,8 +129,8 @@ function SearchPanel({ onClose }: { onClose: () => void }) {
   const listRef = React.useRef<HTMLDivElement>(null)
 
   React.useEffect(() => {
-    loadIndex().then(setEntries, () => setFailed(true))
-  }, [])
+    loadIndex(lang).then(setEntries, () => setFailed(true))
+  }, [lang])
 
   const terms = React.useMemo(() => query.toLowerCase().split(/\s+/).filter(Boolean), [query])
   const groups = React.useMemo(() => {
@@ -139,21 +149,21 @@ function SearchPanel({ onClose }: { onClose: () => void }) {
 
   function go(entry: SearchEntry) {
     onClose()
-    void navigate({ href: docHref(entry.slug, entry.id) })
+    void navigate({ href: localePath(lang, docHref(entry.slug, entry.id)) })
   }
 
   return (
     <Command shouldFilter={false} className="rounded-none! bg-transparent p-0">
       <div className="border-b p-1.5">
-        <CommandInput value={query} onValueChange={setQuery} placeholder="Search the docs…" className="h-9" />
+        <CommandInput value={query} onValueChange={setQuery} placeholder={t("Search the docs…")} className="h-9" />
       </div>
       <CommandList ref={listRef} className="max-h-[min(60vh,26rem)] p-1.5">
         {failed ? (
-          <p className="py-10 text-center text-sm text-muted-foreground">The search index could not be loaded.</p>
+          <p className="py-10 text-center text-sm text-muted-foreground">{t("The search index could not be loaded.")}</p>
         ) : !entries ? (
-          <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
+          <p className="py-10 text-center text-sm text-muted-foreground">{t("Loading…")}</p>
         ) : (
-          <CommandEmpty className="py-10 text-muted-foreground">No results for “{query}”</CommandEmpty>
+          <CommandEmpty className="py-10 text-muted-foreground">{t("No results for “{query}”", { query })}</CommandEmpty>
         )}
         {groups.map((results) => (
           <CommandGroup key={results[0]!.entry.slug} heading={terms.length ? results[0]!.entry.page : undefined}>

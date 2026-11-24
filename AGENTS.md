@@ -26,3 +26,14 @@ Only write a test for behaviour that can actually break. If the code under test 
 - Look at visuals instead of asserting on them. The `NM_FRAMES` tests save PNGs into that directory and skip when it isn't set. Check pixels only for coverage, such as whether a layer still covers the window.
 - Start each test with a one-sentence comment saying the behaviour it checks, in the style of the code.
 - Run `go test ./internal/...` before committing, and run a new UI test with `-count=5`. Fix or delete a flaky test; don't retry it.
+
+## iOS checkout
+
+- The desktop build uses `third_party/mygo` through `go.mod` and carries a local fix for pointer hover during momentum scrolling. iOS builds use the module pinned in `go.ios.mod` through `scripts/mygo-ios.sh`. Keep the MyGo versions aligned and run iOS tests with `GOFLAGS=-modfile=go.ios.mod go test ./internal/...`.
+
+### iOS device delivery and acceptance
+
+- After each change to the iOS app, build the current checkout with the existing iPhone development signing and install it on the user's paired iPhone over Wi-Fi. Use the existing development bundle ID (`dev.egoist.cloudmusic.dev`) and a build number higher than the one on the phone. Keep device signing overrides in a separate build directory.
+- Check that `xcrun devicectl list devices` reports the iPhone's transport as `localNetwork` before installing with `xcrun devicectl device install app`.
+- Read back the installed bundle ID, version, and build number with `xcrun devicectl device info apps`. Report the installed build and what to try on the phone. If wireless installation or readback is blocked, report the blocker and which step succeeded.
+- The user performs hands-on acceptance on their iPhone, including visuals, animations, gestures, and playback. Leave the app ready for them to open and wait for their acceptance. Automated tests remain available for development checks.

@@ -15,9 +15,18 @@ var white = ui.RGB(255, 255, 255)
 
 // npSpring is how Now Playing grows out of the player bar's cover and
 // shrinks back into it, and how it springs back from a pull too short to
-// close it. Its precision ends the flight when the cover is a couple of
-// pixels out rather than letting it creep for frames nobody sees.
-var npSpring = ui.SpringOptions{Duration: 440 * time.Millisecond, Precision: 0.004}
+// close it: Apple's quick spring, 0.325 s at damping 0.8. Its channels
+// are fractions of the way, so its precision stays the spring's own.
+var npSpring = ui.SpringOptions{Duration: 325 * time.Millisecond, Bounce: 0.2}
+
+// npDragSpring is npSpring for the pull channels, whose values are
+// pixels: a sheet let go off-screen counts as arrived a couple of pixels
+// short, rather than at a thousandth.
+var npDragSpring = ui.SpringOptions{Duration: 325 * time.Millisecond, Bounce: 0.2, Precision: 2}
+
+// npGlassPress is how the glass capsules give on a press and spring back:
+// a quick squash with a visible bounce, as iOS's Liquid Glass does.
+var npGlassPress = ui.SpringOptions{Duration: 340 * time.Millisecond, Bounce: 0.45}
 
 // npFade is how Now Playing comes and goes while the desktop asks for less
 // motion: it fades, in place.
@@ -102,7 +111,7 @@ func (a *app) nowPlayingLayer(c *ui.Context, open, settled bool) {
 		// Pulled up, it gives less and less.
 		shift = layer.Jump("pull", ui.Rubberband(a.npPull, 0, h, h))
 	} else {
-		shift = layer.AnimateTo("pull", 0, ui.Animation{Spring: npSpring})
+		shift = layer.AnimateTo("pull", 0, ui.Animation{Spring: npDragSpring})
 	}
 	was := a.npT
 	a.npT, a.npShift = t, shift
@@ -232,32 +241,13 @@ func (a *app) nowPlayingView(c *ui.Context) {
 }
 
 func (a *app) nowPlayingSurface(c *ui.Context, fullscreen bool) {
-	pl := a.pl
-	tr := pl.Current()
+	tr := a.pl.Current()
 	w, h := c.Size()
-	art := a.art.get(netease.Sized(tr.Album.PicURL, 600), true)
-	if tr.Album.PicURL == "" {
-		a.npVisual.clearArtwork()
-	}
-	if a.npVisual.track != tr.ID {
-		a.prefetchNowPlaying()
-	}
-	progress, duration, mixing := pl.TransitionProgress()
-	a.npVisual.step(c.Now(), tr.ID, art, c.Preferences().ReduceMotion, progress, duration, mixing, a.settings.CoverTransition)
-	// The colors stay the last song's while its cover loads, rather than
-	// going gray between the two.
-	shown := art
-	if art == nil && tr.Album.PicURL != "" {
-		shown = a.npVisual.current
-	}
-	a.npArt = shown
-	tint := ui.RGB(120, 120, 130)
-	if shown != nil && !shown.failed {
-		tint = shown.tint
-	}
+	art, tint := a.prepareNowPlayingArt(c, tr)
+	shown := a.npArt
 	accent := tint.Mix(white, 0.45)
 
-	bg := ui.Hex("#0b0b0d")
+	bg := ui.Hex("#151519")
 	if !fullscreen && a.npT < 1 && !a.npStill {
 		bg = bg.Alpha(smoothstep(0, 0.35, a.npT))
 	}
@@ -429,9 +419,9 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 				case paneLyrics:
 					a.lyricsPane(c, tr, h)
 				case paneComments:
-					a.commentsPane(c, tr)
+					a.commentsPane(c)
 				case paneProgram:
-					a.programPane(c, tr)
+					a.programPane(c, tr, white)
 				case paneCaptions:
 					a.captionsPane(c, tr, h)
 				default:
@@ -535,6 +525,9 @@ func (a *app) paneTabs(c *ui.Context) {
 // whichever was chosen, for the next song.
 func (a *app) choosePane(i int) {
 	a.npPane = i
+	if a.phone {
+		a.phonePaneAnim = true
+	}
 	if (i == paneLyrics || i == paneStage) && a.settings.LyricsStage != (i == paneStage) {
 		a.settings.LyricsStage = i == paneStage
 		a.settings.save()
@@ -637,11 +630,26 @@ func (a *app) paneTab(c *ui.Context, i int, label string) {
 	}
 }
 
+// glideRow keys a phone lyric row's wrapper, which carries the glide's
+// pose where the row itself already carries its scale's.
+type glideRow int
+
 type lyricPaneState struct {
-	lyricScroll ui.ScrollState
-	lyricGlide  lyricGlide
-	lyricAt     int
-	lyricTrack  int64
+	lyricScroll   ui.ScrollState
+	lyricGlide    lyricGlide
+	lyricAt       int
+	lyricTrack    int64
+	lyricList     ui.ListState
+	lyricListJump bool
+	lyricViewport ui.Point
+	lyricWindow   ui.Point
+	linesFirst    *lyrics.Line
+	linesCount    int
+	lang          string
+	// Manual browsing suspends follow until the listener chooses a line or stops scrolling.
+	seeking   bool
+	seekStamp time.Time
+	seekY     float32
 }
 
 // lyricClarityButton toggles the blur of the lyrics not sung, floating
@@ -732,17 +740,33 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 	pos := pl.Position()
 	cur := lyrics.Index(lines, pos)
 	// Redraw as the next line begins.
-	if pl.Playing() && cur+1 < len(lines) {
+	if pl.Playing() && cur+1 < len(lines) && !a.phonePlayerMoving {
 		c.After(lines[cur+1].At - pos + 20*time.Millisecond)
 	}
 	if state.lyricTrack != tr.ID {
-		state.lyricTrack, state.lyricAt = tr.ID, -2
-		state.lyricScroll, state.lyricGlide = ui.ScrollState{}, lyricGlide{}
+		*state = lyricPaneState{lyricTrack: tr.ID, lyricAt: -2}
 	}
-	lag := state.lyricGlide.step(c, &state.lyricScroll)
+	if state.lyricListJump {
+		// A jump changes the list's offset as it measures the new rows.
+		state.lyricGlide.set = state.lyricScroll.Y
+		state.lyricListJump = false
+	}
+	following := state.lyricGlide.pending
+	lag, took := state.lyricGlide.step(c, &state.lyricScroll, a.phone)
+	if a.phone {
+		if took {
+			state.seeking, state.seekStamp, state.seekY = true, c.Now(), state.lyricScroll.Y
+		}
+		a.phoneLyricSeekWatch(c, state)
+	}
 
-	scroll := ui.Scroll(c.Key("lyrics")).Grow(1).TrackScroll(&state.lyricScroll).Padding(0, 8, h*0.5, 0)
-	if !c.Preferences().ReduceMotion {
+	var scroll ui.Element
+	if a.phone {
+		scroll = ui.Column(c.Key("lyrics").Key(tr.ID)).Grow(1).MinHeight(0)
+	} else {
+		scroll = ui.Scroll(c.Key("lyrics")).Grow(1).TrackScroll(&state.lyricScroll).Padding(0, 8, h*0.5, 0)
+	}
+	if !a.phone && !c.Preferences().ReduceMotion {
 		scroll.Transition(ui.ElementTransition{Duration: 500 * time.Millisecond, Enter: &ui.Motion{Y: 12}})
 	}
 	var dim float32
@@ -755,8 +779,33 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 		// Under the hot comment, gone, not drawn faint.
 		scroll.Invisible()
 	}
-	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: 30, weight: 800, lineHeight: 1.25, quiet: quiet, state: state, depth: true}, nil)
-	if state == &a.lyricPaneState && dim < .98 {
+	size := float32(30)
+	if a.phone {
+		w, height := c.Size()
+		top, right, bottom, left := phoneSafeArea(c)
+		height -= top + bottom
+		if phonePlayerIsWide(w-left-right, height) {
+			size = clampL((height-64)*0.09, 24, size)
+		}
+	}
+	a.timedLines(c, scroll, lines, pos, cur, lag, linesStyle{size: size, weight: 800, lineHeight: 1.25, quiet: quiet, state: state, depth: true, virtual: a.phone, listPadding: h * 0.5}, nil)
+	if a.phone && !c.Preferences().ReduceMotion {
+		ready := ui.Local(scroll, "lyrics-ready", func() bool { return false })
+		if !*ready && scroll.LayoutBounds().H > 0 && (state.seeking || state.lyricAt == cur) && !state.lyricListJump && !state.lyricGlide.pending {
+			*ready = true
+		}
+		fade := float32(1)
+		if *ready {
+			fade = 0
+		} else {
+			scroll.IgnoreInput(true).AccessHidden(true)
+		}
+		scroll.AnimatePose(ui.Pose{Fade: fade}, ui.Animation{Duration: 120 * time.Millisecond})
+	}
+	if a.phone && following {
+		state.lyricListJump = true
+	}
+	if !a.phone && state == &a.lyricPaneState && dim < .98 {
 		w, _ := c.Size()
 		ui.Box(c.Key("lyric-top-fade")).Absolute().Top(npCoverTop).Left(0).Right(0).Height(36).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
 			a.backdropOver(p, ui.Rect{W: w, H: h}, r, func(t float32) float32 { return 1 - smoothstep(0, .9, t) })
@@ -768,15 +817,34 @@ func (a *app) lyricsPaneWithState(c *ui.Context, tr *netease.Track, h float32, s
 	}
 }
 
+// phoneLyricSeekWatch keeps the lyrics unfollowed while the listener
+// holds the scroll, then sends them back to the line sung after a few
+// seconds at rest.
+func (a *app) phoneLyricSeekWatch(c *ui.Context, state *lyricPaneState) {
+	if !state.seeking {
+		return
+	}
+	if state.lyricScroll.Y != state.seekY {
+		state.seekStamp, state.seekY = c.Now(), state.lyricScroll.Y
+	}
+	if left := 3*time.Second - c.Now().Sub(state.seekStamp); left > 0 {
+		c.After(left)
+	} else {
+		state.seeking, state.lyricAt = false, -2
+	}
+}
+
 // linesStyle is how timedLines sets its lines: the size, weight and
 // leading of their type; quiet nearly hides them, under a hot comment.
 type linesStyle struct {
-	state      *lyricPaneState
-	size       float32
-	weight     int
-	lineHeight float32
-	quiet      bool
-	depth      bool // lyric depth must not change spoken podcast captions.
+	state       *lyricPaneState
+	size        float32
+	weight      int
+	lineHeight  float32
+	virtual     bool
+	listPadding float32 // space below the last lyric, inside the phone list
+	quiet       bool
+	depth       bool // lyric depth must not change spoken podcast captions.
 }
 
 // timedLines fills scroll with lines that follow the track playing at
@@ -791,89 +859,242 @@ func (a *app) timedLines(c *ui.Context, scroll ui.Element, lines []lyrics.Line, 
 		state = &a.lyricPaneState
 	}
 	var active ui.Element
-	lang := lyrics.Lang(lines)
-	scroll.Children(func() {
-		ui.Column(c).Gap(6).Translate(0, -lag).Children(func() {
-			for i, l := range lines {
-				line := ui.ButtonBase(c.Key(i)).Column().AlignItems(ui.Start).Padding(10, 12).Radius(12).Gap(6).FocusRing(false).Label(l.Text)
-				on := i == cur
-				alpha := float32(0.28)
-				if on {
-					alpha = 1
-				} else if line.Hovered() {
-					alpha = 0.55
+	// Lyrics and transcript updates publish new slices. Keep the language
+	// across frames so scrolling doesn't scan an episode's whole transcript.
+	if state.linesFirst != &lines[0] || state.linesCount != len(lines) {
+		state.linesFirst, state.linesCount, state.lang = &lines[0], len(lines), lyrics.Lang(lines)
+	}
+	lang := state.lang
+	seeking := a.phone && state.seeking
+	virtual := st.virtual
+	glide := &state.lyricGlide
+	now := c.Now()
+	// The build that first sees a new line on the phone holds the rows
+	// where the glide leaving has them, unposed, so the next build's
+	// poses take their lags at once.
+	glideDetect := virtual && a.phone && cur != state.lyricAt && state.lyricAt >= -1 && !seeking && !a.phonePlayerMoving
+	if virtual && !seeking && cur >= 0 && cur != state.lyricAt {
+		first, last := state.lyricList.Visible()
+		if cur < first || cur > last {
+			// Start a long seek at the active row without laying out the
+			// lines before it. Follow the measured row on the next frame.
+			state.lyricList.ScrollTo(cur, ui.Center)
+			state.lyricGlide, state.lyricListJump = lyricGlide{}, true
+			lag = 0
+			c.AnimationFrame()
+		}
+	}
+	render := func(i int) {
+		l := lines[i]
+		padding := float32(10)
+		if a.phone && st.depth && st.size < 30 {
+			padding = 7
+		}
+		line := ui.ButtonBase(c.Key(i)).Column().AlignItems(ui.Start).Padding(padding, 12).Radius(12).Gap(6).FocusRing(false).Label(l.Text)
+		on := i == cur
+		alpha := float32(0.28)
+		if on {
+			alpha = 1
+		} else if line.Hovered() {
+			alpha = 0.55
+		}
+		if st.quiet {
+			// Nearly gone under a hot comment.
+			alpha *= quietFaded
+		}
+		if line.Hovered() || a.phone && line.Pressed() {
+			line.Background(white.Alpha(0.06))
+		}
+		scale := float32(0.94)
+		if on {
+			scale = 1
+		}
+		scaleMotion := ui.Animation{Spring: ui.SpringOptions{Duration: 600 * time.Millisecond, Bounce: 0.1}}
+		fadeTime := 380 * time.Millisecond
+		if a.phone {
+			scaleMotion = ui.Animation{Duration: 220 * time.Millisecond, Ease: ui.EaseOut}
+			fadeTime = 220 * time.Millisecond
+		}
+		line.TransformOrigin(0, 0.5).AnimatePose(ui.Pose{Scale: scale}, scaleMotion)
+		line.Children(func() {
+			// The line fades as a pose, in frames that only paint, rather
+			// than building the view at the display's rate as it does.
+			text := ui.Column(c).AlignItems(ui.Start).Gap(6)
+			blurEnabled := st.depth && a.settings.LyricsBlur && !c.Preferences().ReduceMotion
+			var blur float32
+			if blurEnabled && !on && !seeking && !line.Hovered() && !a.phonePlayerMoving {
+				distance := i - cur
+				if distance < 0 {
+					distance = -distance
 				}
-				if st.quiet {
-					// Nearly gone under a hot comment.
-					alpha *= quietFaded
-				}
-				if line.Hovered() {
-					line.Background(white.Alpha(0.06))
-				}
-				scale := float32(0.94)
-				if on {
-					scale = 1
-				}
-				line.TransformOrigin(0, 0.5).AnimatePose(ui.Pose{Scale: scale}, ui.Animation{Spring: ui.SpringOptions{Duration: 600 * time.Millisecond, Bounce: 0.1}})
-				line.Children(func() {
-					// The line fades as a pose, in frames that only paint, rather
-					// than building the view at the display's rate as it does.
-					text := ui.Column(c).AlignItems(ui.Start).Gap(6)
-					if st.depth && a.settings.LyricsBlur && !on && !line.Hovered() && !c.Preferences().ReduceMotion {
-						distance := i - cur
-						if distance < 0 {
-							distance = -distance
-						}
-						text.Blur(min(3, float32(distance)*0.65)).Cache()
+				if a.phone {
+					// Two radii reach furthest: a line change re-renders
+					// only the caches that move between them.
+					blur = 0.8
+					if distance >= 2 {
+						blur = 1.8
 					}
-					text.AnimatePose(ui.Pose{Fade: 1 - alpha}, ui.Animation{Duration: 380 * time.Millisecond})
-					text.Children(func() {
-						if on && len(l.Words) > 0 {
-							// The line sung lights up word by word as it is sung.
-							ui.RichText(c.Key("words")).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).Children(func() {
-								for wi, wd := range l.Words {
-									lit := clamp01(float32((pos - wd.Start).Seconds() / max(0.05, (wd.End-wd.Start).Seconds())))
-									ui.Text(c.Key(wi), wd.Text).TextColor(white.Alpha(0.38 + 0.62*lit))
-								}
-							})
-							if pl.Playing() {
-								// Words brighten smoothly enough at 25 frames a second.
-								c.After(40 * time.Millisecond)
+				} else {
+					blur = min(3, float32(distance)*0.65)
+				}
+			}
+			paintWords := func(text ui.Element) {
+				// The phone's sung line wipes bright across its words as
+				// Apple's do, painted rather than built; a line with
+				// words shows them joined, so turning lit doesn't reflow it.
+				if a.phone && st.depth {
+					switch {
+					case on && len(l.Words) > 0:
+						a.phoneLyricWords(c, l.Words, st, lang)
+					case len(l.Words) > 0:
+						ui.Text(c, joinLyricWords(l.Words)).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).TextColor(white)
+					default:
+						ui.Text(c, l.Text).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).TextColor(white)
+					}
+				} else if on && len(l.Words) > 0 {
+					// The line sung lights up word by word as it is sung.
+					var next time.Duration
+					ui.RichText(c.Key("words")).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).Children(func() {
+						for wi, wd := range l.Words {
+							span := max(50*time.Millisecond, wd.End-wd.Start)
+							elapsed := pos - wd.Start
+							lit := clamp01(float32(elapsed) / float32(span))
+							ui.Text(c.Key(wi), wd.Text).TextColor(white.Alpha(0.38 + 0.62*lit))
+							if elapsed >= span {
+								continue
 							}
-						} else {
-							ui.Text(c, l.Text).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).TextColor(white)
-						}
-						if l.Translation != "" {
-							ui.Text(c, l.Translation).FontSize(17).FontWeight(600).TextColor(white.Alpha(0.7))
+							delay := min(40*time.Millisecond, span-elapsed)
+							if elapsed < 0 {
+								delay = -elapsed
+							}
+							if next == 0 || delay < next {
+								next = delay
+							}
 						}
 					})
+					if pl.Playing() && next > 0 && !st.quiet && !a.phonePlayerMoving {
+						c.After(next)
+					}
+				} else {
+					ui.Text(c, l.Text).Lang(lang).FontSize(st.size).FontWeight(st.weight).LineHeight(st.lineHeight).LetterSpacing(-0.4).TextColor(white)
+				}
+				if l.Translation != "" {
+					ui.Text(c, l.Translation).FontSize(17).FontWeight(600).TextColor(white.Alpha(0.7))
+				}
+			}
+			text.AnimatePose(ui.Pose{Fade: 1 - alpha}, ui.Animation{Duration: fadeTime})
+			if a.phone && blurEnabled {
+				// Cache the result of the blur, so moving or fading the line
+				// can composite it without another GPU blur pass.
+				if blur > 0 {
+					text.Cache()
+				}
+				text.Children(func() {
+					ink := ui.Column(c).AlignItems(ui.Start).Gap(6)
+					if blur > 0 {
+						ink.Blur(blur).Cache()
+					}
+					ink.Children(func() { paintWords(ink) })
 				})
-				if line.Clicked() {
-					pl.Seek(l.At)
+			} else {
+				if blur > 0 {
+					text.Blur(blur).Cache()
 				}
-				if on {
-					active = line
+				text.Children(func() { paintWords(text) })
+			}
+		})
+		if line.Clicked() {
+			if a.phone {
+				state.seeking, state.lyricAt = false, -2
+				mygo.Haptics.Selection()
+			}
+			pl.Seek(l.At)
+		}
+		if on {
+			active = line
+		}
+	}
+	returnToCover := func() {
+		a.phoneDetails = false
+		mygo.Haptics.Selection()
+	}
+	scroll.Children(func() {
+		if virtual {
+			scroll = ui.List(c.Key("visible-lines"), &state.lyricList, len(lines)+1).
+				Grow(1).MinHeight(0).Gap(6).Padding(0, 8, 0, 0).TrackScroll(&state.lyricScroll).Rows(func(row ui.ListRow) {
+				i := row.Index
+				if i == len(lines) {
+					ui.Column(c.Key("tail")).Children(func() {
+						if foot != nil {
+							foot()
+						}
+						ui.ButtonBase(c.Key("tail-space")).Height(st.listPadding).Label("返回封面").OnClick(returnToCover)
+					})
+					return
 				}
+				wrap := ui.Column(c.Key(glideRow(i))).AlignItems(ui.Stretch)
+				// A new line moves the rows as poses, which paint
+				// themselves: the build that sees it holds each where the
+				// glide leaving has it, the next holds the lag it owes,
+				// and the one after lets it go, staggered down the list.
+				switch {
+				case glideDetect:
+					wrap.Translate(0, -float32(glide.rowLag(i, now)))
+				case glide.posing:
+					wrap.AnimatePose(ui.Pose{Y: -float32(glide.rowAmp(i))}, ui.Animation{Spring: lyricRowSpring})
+				case glide.on:
+					wrap.AnimatePose(ui.Pose{}, ui.Animation{Spring: lyricRowSpring, Delay: glide.delays[i]})
+				}
+				wrap.Children(func() { render(i) })
+			})
+			return
+		}
+		ui.Column(c).Gap(6).Translate(0, -lag).Children(func() {
+			for i := range lines {
+				render(i)
 			}
 		})
 		if foot != nil {
 			foot()
 		}
 	})
-	// Bring the line sung to a third of the way down, once it changed.
-	if cur != state.lyricAt {
-		box := scroll.Bounds()
+	if virtual && state.lyricListJump {
+		return
+	}
+	if a.phone {
+		w, h := c.Size()
+		top, right, bottom, left := phoneSafeArea(c)
+		window := ui.Point{X: w - left - right, Y: h - top - bottom}
+		if window != state.lyricWindow {
+			state.lyricWindow = window
+			state.lyricAt = -2
+			// Bounds still describe the layout before the resize.
+			c.AnimationFrame()
+			return
+		}
+	}
+	// Reflow can move the active line even while the playback position is fixed.
+	box := scroll.LayoutBounds()
+	viewport := ui.Point{X: box.W, Y: box.H}
+	if (cur != state.lyricAt || (a.phone && viewport != state.lyricViewport)) && !seeking {
 		target := float32(0)
 		if active.Valid() {
 			// Where the glide is going, without where it still is.
-			if lb := active.LayoutBounds(); lb.H > 0 && box.H > 0 {
-				target = lb.Y - box.Y + state.lyricScroll.Y - box.H*0.3
-			} else {
-				return // not laid out yet: the next frame scrolls
+			lb := active.LayoutBounds()
+			if lb.H == 0 || box.H == 0 {
+				c.AnimationFrame()
+				return
 			}
+			top := box.H * 0.3
+			if a.phone {
+				top = min(top, max(0, box.H-lb.H))
+			}
+			target = lb.Y - box.Y + state.lyricScroll.Y - top
 		}
-		state.lyricAt = cur
-		state.lyricGlide.to(c, &state.lyricScroll, min(max(0, target), state.lyricScroll.MaxY))
+		animate := !a.phone || state.lyricAt >= -1 && viewport == state.lyricViewport && !a.phonePlayerMoving
+		state.lyricAt, state.lyricViewport = cur, viewport
+		first, last := state.lyricList.Visible()
+		state.lyricGlide.to(c, &state.lyricScroll, min(max(0, target), state.lyricScroll.MaxY), animate, a.phone, cur, first, last)
 	}
 }
 
@@ -889,6 +1110,7 @@ type lyricGlide struct {
 	on bool
 	// The lag t after start: (a + b·t)·e^(−ωt), in DIPs.
 	a, b  float64
+	omega float64
 	start time.Time
 	// The offset it goes to, set in the next frame (pending), with the lag
 	// that holds the lines back from it: the layout of the frame that
@@ -896,11 +1118,24 @@ type lyricGlide struct {
 	target  float32
 	pending bool
 	set     float32 // the offset it set
+	// On the phone the rows glide as poses instead: amps is each visible
+	// row's starting lag and delays its stagger, base the lag of a row
+	// with neither, cur the line the glide goes to, start when they were
+	// let go, and posing the build that holds them at their lags.
+	amps   map[int]float64
+	delays map[int]time.Duration
+	base   float64
+	cur    int
+	posing bool
 }
 
 // lyricOmega is the spring's ω: a line or two away, it comes within half a
-// pixel in about 800 ms.
+// pixel in about 800 ms, which is the budget lyricScrollTime gives it.
 const lyricOmega = 10
+
+// lyricScrollTime is how long the lyric glide may take to come to rest on
+// the line being sung.
+const lyricScrollTime = 800 * time.Millisecond
 
 // at returns the lag at now, and how fast it changes, in DIPs a second.
 func (g *lyricGlide) at(now time.Time) (lag, v float64) {
@@ -908,45 +1143,147 @@ func (g *lyricGlide) at(now time.Time) (lag, v float64) {
 		return 0, 0
 	}
 	t := now.Sub(g.start).Seconds()
-	e := math.Exp(-lyricOmega * t)
-	return (g.a + g.b*t) * e, (g.b - lyricOmega*(g.a+g.b*t)) * e
+	e := math.Exp(-g.omega * t)
+	return (g.a + g.b*t) * e, (g.b - g.omega*(g.a+g.b*t)) * e
 }
 
 // to scrolls s to target from the next frame, gliding from where it
 // shows, at the speed it went if it was on its way.
-func (g *lyricGlide) to(c *ui.Context, s *ui.ScrollState, target float32) {
+func (g *lyricGlide) to(c *ui.Context, s *ui.ScrollState, target float32, animate, phone bool, cur, first, last int) {
 	now := c.Now()
+	if phone {
+		g.toPhone(c, s, target, animate, cur, first, last, now)
+		return
+	}
 	lag, v := g.at(now)
 	shown := float64(s.Y) + lag
 	g.target, g.pending = target, true
-	g.on = !c.Preferences().ReduceMotion
+	g.on = animate && !c.Preferences().ReduceMotion && math.Abs(shown-float64(target)) >= 0.5
 	g.start, g.a = now, shown-float64(target)
-	g.b = v + lyricOmega*g.a
+	g.omega = lyricOmega
+	g.b = v + g.omega*g.a
 	c.AnimationFrame()
 }
 
-// step returns the lag of the lines in this frame, and asks for the next
-// while there is one. The listener scrolling stops the glide where it
-// shows.
-func (g *lyricGlide) step(c *ui.Context, s *ui.ScrollState) float32 {
-	if g.pending {
-		s.Y, g.set, g.pending = g.target, g.target, false
+// toPhone starts a phone glide: the offset jumps to target in the next
+// frame, and each visible row keeps where it showed as a pose let go a
+// stagger later, the next row first when the glide moves down the lines.
+func (g *lyricGlide) toPhone(c *ui.Context, s *ui.ScrollState, target float32, animate bool, cur, first, last int, now time.Time) {
+	// The rows hold where the glide already on the way has them.
+	oldLag := func(i int) float64 { return g.rowLag(i, now) }
+	shown := float64(s.Y) + oldLag(cur)
+	amps := map[int]float64{}
+	delays := map[int]time.Duration{}
+	for i := max(0, first-2); i <= last+2; i++ {
+		amps[i] = float64(s.Y) + oldLag(i) - float64(target)
+		if target > s.Y {
+			delays[i] = time.Duration(min(max(i-(cur-1), 0), 6)) * 35 * time.Millisecond
+		}
 	}
+	g.amps, g.delays, g.cur = amps, delays, cur
+	var ok bool
+	if g.base, ok = amps[cur]; !ok {
+		g.base = float64(s.Y) + oldLag(cur) - float64(target)
+	}
+	g.target, g.pending = target, true
+	g.on = animate && !c.Preferences().ReduceMotion && math.Abs(shown-float64(target)) >= 0.5
+	g.start = now
+	c.AnimationFrame()
+}
+
+// rowLag is where a phone row's pose has it at now: its start lag fallen
+// since start, delayed by its stagger, zero once the glide is off.
+func (g *lyricGlide) rowLag(i int, now time.Time) float64 {
 	if !g.on {
 		return 0
+	}
+	return phoneLag(g.rowAmp(i), now.Sub(g.start)-g.delays[i])
+}
+
+func (g *lyricGlide) rowAmp(i int) float64 {
+	if a, ok := g.amps[i]; ok {
+		return a
+	}
+	return g.base
+}
+
+// settled reports whether every stored row's lag has fallen under half a
+// pixel, where the pose springs rest.
+func (g *lyricGlide) settled(now time.Time) bool {
+	for i, a := range g.amps {
+		if math.Abs(phoneLag(a, now.Sub(g.start)-g.delays[i])) >= 0.5 {
+			return false
+		}
+	}
+	return math.Abs(phoneLag(g.base, now.Sub(g.start))) < 0.5
+}
+
+// step returns the lag of the lines in this frame, and asks for the next
+// while there is one, and whether the listener took the scroll over since
+// the last frame. The listener scrolling stops the glide where it shows.
+func (g *lyricGlide) step(c *ui.Context, s *ui.ScrollState, phone bool) (float32, bool) {
+	if g.posing {
+		// The rows were posed at their lags in the frame before: they
+		// are let go now, and their lags count from here.
+		g.posing, g.start = false, c.Now()
+	}
+	if g.pending {
+		s.Y, g.set, g.pending = g.target, g.target, false
+		if g.on && phone {
+			// The offset jumps: this build's rows take their lags as
+			// poses, which the next build lets go.
+			g.posing = true
+			c.AnimationFrame()
+		}
+	}
+	if !g.on {
+		if s.Y != g.set {
+			// The listener moved it: report once per change.
+			g.set = s.Y
+			return 0, true
+		}
+		return 0, false
+	}
+	if phone {
+		if s.Y != g.set {
+			// The listener took over: the offset takes what showed.
+			s.Y = max(0, min(s.Y+float32(g.rowLag(g.cur, c.Now())), s.MaxY))
+			g.on, g.set = false, s.Y
+			return 0, true
+		}
+		// The poses paint themselves; when whatever build finds them
+		// settled, the glide is over.
+		if g.settled(c.Now()) {
+			g.on = false
+		}
+		return 0, false
 	}
 	lag, v := g.at(c.Now())
 	if s.Y != g.set {
 		// The listener took over: the offset takes what showed.
 		s.Y, g.on = max(0, min(s.Y+float32(lag), s.MaxY)), false
-		return 0
+		g.set = s.Y
+		return 0, true
 	}
 	if math.Abs(lag) < 0.5 && math.Abs(v) < 20 {
 		g.on = false
-		return 0
+		return 0, false
 	}
 	c.AnimationFrame()
-	return float32(lag)
+	return float32(lag), false
+}
+
+// followQueueRow starts at the current row, then scrolls only as far as
+// needed to follow a change in playback.
+func (a *app) followQueueRow(list *ui.ListState, row int) {
+	if row >= 0 && row != a.queueAt {
+		if a.queueAt < 0 {
+			list.ScrollTo(row, ui.Start)
+		} else {
+			list.ScrollIntoView(row)
+		}
+		a.queueAt = row
+	}
 }
 
 // queuePane lists the whole queue in play order, the track playing marked
@@ -954,23 +1291,16 @@ func (g *lyricGlide) step(c *ui.Context, s *ui.ScrollState) float32 {
 func (a *app) queuePane(c *ui.Context) {
 	pl := a.pl
 	order, at := pl.PlayOrder()
-	// Opened, it shows the track playing at its top; after, it follows it
-	// as little as keeps it in view.
-	if at >= 0 && at != a.queueAt {
-		if a.queueAt < 0 {
-			a.queueList.ScrollTo(at, ui.Start)
-		} else {
-			a.queueList.ScrollIntoView(at)
-		}
-		a.queueAt = at
-	}
+	a.followQueueRow(&a.queueList, at)
 	a.queueList.Key = func(row int) any { return order[row] }
 	ui.List(c.Key("queue"), &a.queueList, len(order), func(r int) {
 		i := order[r]
 		tr := &pl.Queue()[i]
 		playing := r == at
-		row := ui.ButtonBase(c.Key(i)).Height(58).PaddingX(10).Gap(14).Radius(12).AlignItems(ui.Center).FocusRing(false).Label(tr.Name).
-			ContextMenu(a.songItems(tr, 0))
+		row := ui.ButtonBase(c.Key(i)).Height(58).PaddingX(10).Gap(14).Radius(12).AlignItems(ui.Center).FocusRing(false).Label(tr.Name)
+		if !a.phone {
+			row.ContextMenu(a.songItems(tr, 0))
+		}
 		switch {
 		case playing:
 			row.Background(white.Alpha(0.12))
@@ -986,7 +1316,11 @@ func (a *app) queuePane(c *ui.Context) {
 				ui.Text(c, tr.Name).FontSize(14).FontWeight(600).SingleLine()
 				a.artistLinks(c, tr, white.Alpha(0.55), white).FontSize(12.5).SingleLine()
 			})
-			ui.Text(c, clock(tr.Length())).FontSize(12).FontFeatures("tnum").TextColor(white.Alpha(0.4))
+			if a.phone {
+				a.phoneTrackActions(c.Key("queue-actions"), tr, 0, white.Alpha(0.7))
+			} else {
+				ui.Text(c, clock(tr.Length())).FontSize(12).FontFeatures("tnum").TextColor(white.Alpha(0.4))
+			}
 		})
 		if row.Clicked() && !playing {
 			pl.Jump(i)

@@ -11,9 +11,13 @@ import "github.com/egoist/mygo/internal/platform"
 
 func saveWindowStates() {}
 
+func clearWindowStates() error { return nil }
+
 func restoreWindowState(key string, p *platform.WindowOptions) {}
 
 func (w *Window) initState(p *platform.WindowOptions) {}
+
+func (w *Window) restoreDevWindow(p *platform.WindowOptions, native uintptr) {}
 
 func (w *Window) stateChanged() {}
 

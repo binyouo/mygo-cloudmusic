@@ -285,7 +285,7 @@ func (a *app) messagesPage(c *ui.Context) {
 	top, bottom := a.insets(c)
 	if len(ms.convs) == 0 && (ms.loading || !ms.loaded && ms.err == "") {
 		s := a.pageShimmer(c)
-		ui.Column(c).Grow(1).Padding(top+pageGap, pagePad, bottom, pagePad).Children(func() {
+		ui.Column(c).Grow(1).Padding(top+pageGap, a.pagePadding(), bottom, a.pagePadding()).Children(func() {
 			a.startMark(c)
 			a.heading(c, "私信", "网易云音乐站内私信")
 			for i := range 8 {
@@ -304,7 +304,7 @@ func (a *app) messagesPage(c *ui.Context) {
 		a.centered(c, ms.err, a.loadConversations)
 		return
 	}
-	ui.Scroll(c.Key("messages")).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, pagePad, bottom+32, pagePad).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
+	ui.Scroll(c.Key("messages")).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, a.pagePadding(), bottom+32, a.pagePadding()).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
 		a.startMark(c)
 		defer a.endMark(c)
 		a.heading(c, "私信", "网易云音乐站内私信")
@@ -371,7 +371,7 @@ func (a *app) chatPage(c *ui.Context) {
 	p := a.pal
 	top, bottom := a.insets(c)
 	ui.Column(c).Grow(1).Padding(top, 0, 0, 0).Children(func() {
-		head := ui.ButtonBase(c.Key("head")).Padding(pageGap, pagePad, 12, pagePad).Gap(12).Radius(8).AlignItems(ui.Center).FocusRing(false)
+		head := ui.ButtonBase(c.Key("head")).Padding(pageGap, a.pagePadding(), 12, a.pagePadding()).Gap(12).Radius(8).AlignItems(ui.Center).FocusRing(false)
 		name := ch.peer.Nickname
 		if name == "" {
 			name = "私信"
@@ -391,10 +391,10 @@ func (a *app) chatPage(c *ui.Context) {
 		if head.Clicked() && ch.peer.UserID != 0 {
 			a.open(route{page: pageUser, id: uid})
 		}
-		ui.Box(c).Height(0.5).Margin(0, pagePad).Background(p.hairline)
+		ui.Box(c).Height(0.5).Margin(0, a.pagePadding()).Background(p.hairline)
 		switch {
 		case !ch.loaded && ch.err == "":
-			ui.Column(c).Grow(1).Padding(12, pagePad, 0, pagePad).Gap(4).Children(func() {
+			ui.Column(c).Grow(1).Padding(12, a.pagePadding(), 0, a.pagePadding()).Gap(4).Children(func() {
 				s := a.pageShimmer(c)
 				for i := range 6 {
 					row := ui.Row(c.Key(i)).Padding(6, 0).Gap(8)
@@ -466,7 +466,7 @@ func (a *app) messageRow(c *ui.Context, ch *chatState, i int, now time.Time) {
 	p := a.pal
 	m := &ch.msgs[i]
 	mine := a.profile != nil && m.From.UserID == a.profile.UserID
-	ui.Column(c).PaddingX(pagePad).Children(func() {
+	ui.Column(c).PaddingX(a.pagePadding()).Children(func() {
 		if i == 0 || m.Time-ch.msgs[i-1].Time > chatTimeGap {
 			ui.Text(c, commentTime(time.UnixMilli(m.Time), now)).FontSize(11).TextColor(p.faint).AlignSelf(ui.Center).Padding(10, 0, 4, 0)
 		}
@@ -495,7 +495,7 @@ func (a *app) messageRow(c *ui.Context, ch *chatState, i int, now time.Time) {
 // sends.
 func (a *app) chatEditor(c *ui.Context, ch *chatState, uid int64, bottom float32) {
 	p := a.pal
-	ui.Row(c).Padding(8, pagePad, bottom+8, pagePad).Gap(10).AlignItems(ui.Center).Children(func() {
+	ui.Row(c).Padding(8, a.pagePadding(), bottom+8, a.pagePadding()).Gap(10).AlignItems(ui.Center).Children(func() {
 		field := ui.Row(c.Key("field")).Grow(1).Radius(999).AlignItems(ui.Center)
 		if c.Focused(a.chatBox) {
 			field.Background(p.bg).Shadow(0, 0, 0, 3, p.accent.Alpha(0.25)).Border(1, p.accent.Alpha(0.6))

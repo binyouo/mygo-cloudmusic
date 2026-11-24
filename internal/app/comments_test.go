@@ -14,10 +14,10 @@ import (
 // next song turns out to have none.
 func TestCommentCountHoldsWhileLoading(t *testing.T) {
 	a, tt, _ := coverApp(t)
-	a.comments = commentState{track: 2, loaded: true, total: 128}
+	a.comments = &commentState{track: 2, loaded: true, total: 128}
 	tt.Frame()
 	a.pl.Next()
-	a.comments = commentState{track: 3, loading: true}
+	a.comments = &commentState{track: 3, loading: true}
 	tt.Frame()
 	if _, ok := tt.Find("评论 128"); !ok {
 		t.Fatal("the count went as the next song's loads")
@@ -28,7 +28,7 @@ func TestCommentCountHoldsWhileLoading(t *testing.T) {
 		t.Error("the count did not change once loaded")
 	}
 	a.pl.Next()
-	a.comments = commentState{track: 1, loaded: true}
+	a.comments = &commentState{track: 1, loaded: true}
 	tt.Advance(time.Second)
 	tt.Frame()
 	if _, ok := tt.Find("评论"); !ok {
@@ -84,7 +84,7 @@ func TestLikeComment(t *testing.T) {
 	a, tt, _ := coverApp(t)
 	a.profile = &netease.Profile{UserID: 1}
 	cm := netease.Comment{ID: 9, Content: "好听", LikedCount: 41}
-	a.comments = commentState{track: 2, thread: "R_SO_4_2", loaded: true, total: 1, hot: []netease.Comment{cm}, latest: []netease.Comment{cm}}
+	a.comments = &commentState{track: 2, thread: "R_SO_4_2", loaded: true, total: 1, hot: []netease.Comment{cm}, latest: []netease.Comment{cm}}
 	a.npPane = paneComments
 	tt.Frame()
 	if err := tt.Click("赞"); err != nil {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/i18n"
+	"github.com/egoist/mygo/internal/pacing"
 	"github.com/egoist/mygo/internal/platform"
 	"github.com/egoist/mygo/internal/raster"
 	"github.com/egoist/mygo/internal/scene"
@@ -36,9 +37,9 @@ func coreView(view func(c *context)) *Content { return &Content{view: view} }
 // RegisterFont adds a TrueType or OpenType font, or collection, that text
 // can use with Font(family). An empty family keeps the font's own name.
 // The fonts registered under a family make it up, apart from other fonts
-// of their own family.
+// of their own family. A Tester's window draws them too.
 func RegisterFont(data []byte, family string) error {
-	return text.Shared().RegisterFont(data, family)
+	return text.RegisterAppFont(data, family)
 }
 
 // A FontFamily is a font family text can use, as FontFamilies lists it.
@@ -108,6 +109,9 @@ func (v *Content) AttachContent(conn *surface.Conn) {
 	h.uiFont()
 	h.textLanguage()
 	h.automate()
+	if devAttach != nil {
+		devAttach(h)
+	}
 	// Load the fonts while the window shows up.
 	go text.Shared().Preload()
 	h.requestFrame()
@@ -136,8 +140,9 @@ type windowHost struct {
 	lastFrame time.Time
 	// framing tells that the surface asked for the frame being drawn, and
 	// frameAsked that the content asked the surface for a frame that has
-	// not come yet.
-	framing, frameAsked bool
+	// not come yet; unshown that it asked for it only to show a frame built
+	// outside the surface's, as a capture's, and nothing asked since.
+	framing, frameAsked, unshown bool
 	// told is what accelerated last told the frame being painted, asked
 	// that it did.
 	told, asked bool
@@ -279,10 +284,10 @@ func (h *windowHost) waiter() displayWaiter {
 
 // refreshPresented has the paced frames following one drawn in memory
 // wait for the display's next refresh, where the surface shows it at once
-// (refreshWaiter).
+// (refreshWaiter); uncapped (MYGO_UNCAPPED), they follow it at once.
 func (h *windowHost) refreshPresented() {
 	s, ok := h.conn.Surface.(platform.RefreshSurface)
-	if !ok || h.conn.Post == nil {
+	if !ok || h.conn.Post == nil || pacing.Uncapped {
 		return
 	}
 	if h.refresh == nil {
@@ -328,6 +333,22 @@ func (h *windowHost) event(ev platform.SurfaceEvent) bool {
 		h.requestFrame()
 		return false
 	}
+	if ev.Kind >= platform.SurfaceLowMemory && ev.Kind <= platform.SurfaceStackPopped {
+		if ev.Kind == platform.SurfaceLowMemory {
+			// What the next frame makes again: the renderer's textures, its
+			// atlases and pipelines among them.
+			if h.gpu != nil {
+				h.gpu.Release()
+				h.gpu = nil
+				h.gpuTried, h.retryAt = false, time.Time{}
+			}
+			h.requestFrame()
+		}
+		if touchSystem != nil {
+			touchSystem(h.rt, ev)
+		}
+		return false
+	}
 	if ev.Kind == platform.WebViewTabOut || ev.Kind == platform.WebViewKey {
 		i := slices.IndexFunc(h.placed, func(p platform.WebViewPlacement) bool { return p.WebView == ev.WebView })
 		switch {
@@ -344,12 +365,15 @@ func (h *windowHost) event(ev platform.SurfaceEvent) bool {
 			r.Invalidate()
 		}
 	}
+	if ev.Kind == platform.SurfaceHidden || ev.Kind == platform.SurfaceShown {
+		h.tellOccluded()
+	}
 	if ev.Kind == platform.SurfaceFrame {
 		if ev.Paced && h.waitDisplay(time.Now()) {
 			return true
 		}
 		h.waiting, h.waitingOn = false, nil
-		h.frameAsked = false
+		h.frameAsked, h.unshown = false, false
 		h.framing = true
 		defer func() { h.framing = false }()
 	}
@@ -401,6 +425,11 @@ type gpuRenderer interface {
 // size, as a GtkGLArea makes its buffers anew as GTK allocates it:
 // Invalidate has the next frame draw whole.
 type invalidator interface{ Invalidate() }
+
+// occludedRenderer is a GPU renderer that gives back the memory of its
+// frames sooner while nothing of the window shows (Metal's, whose
+// drawables are each as large as the window): SetOccluded tells it.
+type occludedRenderer interface{ SetOccluded(bool) }
 
 // wideRenderer is a GPU renderer that can draw the colors of scenes outside
 // the sRGB gamut (Metal's).
@@ -466,6 +495,7 @@ func (h *windowHost) present(s *scene.Scene) {
 		// A frame built outside the surface's, for a capture, is shown by
 		// the surface's next.
 		h.requestFrame()
+		h.unshown = true
 		return
 	}
 	due := !h.retryAt.IsZero() && !time.Now().Before(h.retryAt)
@@ -579,16 +609,28 @@ func (h *windowHost) screenWide() bool {
 // render draws s with the GPU renderer and reports whether it did. One
 // that fails gives way to another made at once, in case the GPU is back
 // already, or another, or Windows' software rasterizer, can draw; when
-// that fails too, frames are drawn in memory until a later try.
+// that fails too, frames are drawn in memory until a later try. A frame
+// the GPU did not finish in time is the exception: the driver is wedged,
+// so it is drawn in memory and the GPU left alone until the wait is over.
 func (h *windowHost) render(s *scene.Scene) bool {
 	for try := 0; h.gpu != nil; try++ {
-		err := h.gpu.Render(s)
+		g := h.gpu
+		err := g.Render(s)
 		if err == nil {
 			return true
 		}
 		log.Printf("mygo: drawing without the GPU: %v", err)
-		h.gpu.Release()
+		g.Release()
 		h.gpu = nil
+		if t, ok := g.(interface{ TimedOut() bool }); ok && t.TimedOut() {
+			// A frame submitted now would wait the same timeout through,
+			// and the window would show nothing all the while.
+			if time.Since(h.gpuSince) > time.Minute {
+				h.backoff = 0
+			}
+			h.retryLater()
+			return false
+		}
 		if try > 0 {
 			h.retryLater()
 			return false
@@ -639,9 +681,18 @@ func (h *windowHost) makeGPU() {
 	}
 	h.gpu, h.gpuSince = r, time.Now()
 	h.wide = false // the renderer draws sRGB until told otherwise
+	h.tellOccluded()
 	if p, ok := r.(interface{ SetPost(func(func())) }); ok && h.conn.Post != nil {
 		// Frames waiting for the display draw through the main thread.
 		p.SetPost(h.conn.Post)
+	}
+}
+
+// tellOccluded tells the GPU renderer whether nothing of the window shows,
+// as the surface sends SurfaceHidden and SurfaceShown, and as it is made.
+func (h *windowHost) tellOccluded() {
+	if r, ok := h.gpu.(occludedRenderer); ok {
+		r.SetOccluded(h.occluded())
 	}
 }
 
@@ -682,10 +733,14 @@ func (h *windowHost) retryLater() {
 }
 
 // capture renders the last frame in memory: built now where none was yet,
-// or where one waits for the window to show (holdFrame), so that a window
-// out of sight shows what it shows now.
+// or where one waits for the window to show (holdFrame, waitsOutOfSight),
+// so that a window out of sight shows what it shows now; or where the
+// glyph atlases, which every window shares, moved or forgot the glyphs it
+// draws since it was painted, as another window making room in them does
+// (System.MakeRoom), as repaintParts tells: its text would show what took
+// their places (#1920). Within a frame, runFrame builds none.
 func (h *windowHost) capture() (int, int, []byte) {
-	if h.last == nil || h.rt.held {
+	if h.last == nil || h.rt.held || h.waitsOutOfSight() || atlasGenerations(h.last) != h.rt.atlases {
 		h.rt.runFrame()
 	}
 	s := h.last
@@ -696,6 +751,15 @@ func (h *windowHost) capture() (int, int, []byte) {
 	img.Resize(s.Width, s.Height)
 	raster.Render(&img, s)
 	return img.W, img.H, img.RGBA()
+}
+
+// waitsOutOfSight reports whether nothing of the window shows while a
+// frame waits to build: one held until some of it shows (holdFrame), or one
+// asked for, after input or a change, that has not come, which the surface
+// of a window out of sight may draw only once it shows: macOS draws none
+// for a hidden window, nor for any while the screen is locked.
+func (h *windowHost) waitsOutOfSight() bool {
+	return h.occluded() && (h.rt.held || h.frameAsked && !h.unshown)
 }
 
 // fit builds the frame that waits for the window to show, if one does,
@@ -729,13 +793,18 @@ func (h *windowHost) detach() {
 }
 
 func (h *windowHost) requestFrame() {
-	h.frameAsked = true
+	h.frameAsked, h.unshown = true, false
 	h.conn.Surface.RequestFrame()
 }
 
+// framesAtOnce reports whether the surface's frames come as soon as asked
+// for: Windows', and every desktop surface's uncapped (MYGO_UNCAPPED),
+// whose next frame comes once the last was presented rather than at the
+// display's next refresh. A drawing asking for fewer frames
+// (Painter.AnimationFrameRate) then has the repaint timer keep its pace.
 func (h *windowHost) framesAtOnce() bool {
 	_, ok := h.conn.Surface.(platform.ImmediateFrameSurface)
-	return ok
+	return ok || pacing.Uncapped
 }
 
 func (h *windowHost) setFrameRate(fps float32) {
@@ -791,13 +860,17 @@ func (h *windowHost) post(fn func()) {
 // know them.
 func (h *windowHost) uiFont() {
 	if h.conn.UIFont != nil {
-		text.Shared().SetUIFamily(h.conn.UIFont())
+		h.textSystem().SetUIFamily(h.conn.UIFont())
 	}
 	if h.conn.FontRendering != nil {
 		r := h.conn.FontRendering()
-		text.Shared().SetFontRendering(r.Antialias, r.Hinting, r.Subpixels)
+		h.textSystem().SetFontRendering(r.Antialias, r.Hinting, r.Subpixels)
 	}
 }
+
+// textSystem returns the window's text system: the process's shared one,
+// which the app's windows shape and paint in together.
+func (h *windowHost) textSystem() *text.System { return text.Shared() }
 
 func (h *windowHost) setCursor(c Cursor) { h.conn.Surface.SetCursor(platform.Cursor(c)) }
 
@@ -835,7 +908,7 @@ func (h *windowHost) writeClipboardThen(s string, done func(error)) {
 	}
 	err := errNoClipboard
 	if c != nil {
-		err = c.WriteData(transfer.TextData(s), nil)
+		err = c.WriteData(transfer.TextData(s), false, nil)
 	}
 	h.post(func() { done(err) })
 }
@@ -857,7 +930,7 @@ func (h *windowHost) readClipboardData(formats []transfer.Format) transfer.Data 
 
 func (h *windowHost) writeClipboardData(d transfer.Data) {
 	if h.conn.Clipboard != nil {
-		h.conn.Clipboard.WriteData(d, nil)
+		h.conn.Clipboard.WriteData(d, false, nil)
 	}
 }
 
@@ -922,7 +995,15 @@ func (h *windowHost) region() i18n.Region {
 // textLanguage makes the language the app shows that of the text the
 // text engine lays out without one, as Painter.Shape does.
 func (h *windowHost) textLanguage() {
-	text.Shared().SetLanguage(h.locale())
+	h.textSystem().SetLanguage(h.locale())
+}
+
+// insets are those the surface tells, as a phone's.
+func (h *windowHost) insets() platform.Insets {
+	if s, ok := h.conn.Surface.(platform.InsetSurface); ok {
+		return s.Insets()
+	}
+	return platform.Insets{}
 }
 
 func (h *windowHost) titleBar() TitleBar {
@@ -930,7 +1011,7 @@ func (h *windowHost) titleBar() TitleBar {
 		return TitleBar{}
 	}
 	t := h.conn.TitleBar()
-	return TitleBar{Height: float32(t.Height), Left: float32(t.Left), Right: float32(t.Right)}
+	return TitleBar{Height: float32(t.Height), Left: float32(t.Left), Right: float32(t.Right), Bottom: float32(t.Bottom)}
 }
 
 func (h *windowHost) vibrancy() bool {
@@ -990,7 +1071,7 @@ func (h *windowHost) placeWebViews(views []placedWebView) {
 	}
 	if slices.EqualFunc(list, h.placed, func(a, b platform.WebViewPlacement) bool {
 		return a.WebView == b.WebView && a.Frame == b.Frame && a.Clip == b.Clip && a.Width == b.Width && a.Height == b.Height &&
-			a.Radii == b.Radii && slices.Equal(a.Covers, b.Covers)
+			a.Radii == b.Radii && a.Opacity == b.Opacity && slices.Equal(a.Covers, b.Covers)
 	}) {
 		return
 	}
@@ -1010,6 +1091,16 @@ func (h *windowHost) tabIntoWebView(v NativeWebView, back bool) {
 	if n := v.SurfaceWebView(h.conn); n != nil {
 		n.TabInto(back)
 	}
+}
+
+func (h *windowHost) touchSurface() platform.TouchSurface {
+	s, _ := h.conn.Surface.(platform.TouchSurface)
+	return s
+}
+
+func (h *windowHost) stackSurface() platform.StackSurface {
+	s, _ := h.conn.Surface.(platform.StackSurface)
+	return s
 }
 
 func (h *windowHost) popupMenu(m *platform.Menu, x, y float32, chosen func(int)) {

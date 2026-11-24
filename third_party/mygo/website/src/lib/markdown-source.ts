@@ -6,6 +6,8 @@ export interface LinkOptions {
   docsDir: string
   repoDir: string
   repoUrl: string
+  /** Where the docs are published: "/docs", or "/zh/docs" in Chinese. */
+  basePath?: string
 }
 
 /** README.md is the directory's page; other files keep their path. */
@@ -39,7 +41,7 @@ export function rewriteHref(href: string, file: string, links: LinkOptions, mark
   const rel = path.relative(links.docsDir, abs)
   if (abs.endsWith(".md") && !rel.startsWith("..") && !path.isAbsolute(rel)) {
     const slug = slugOf(rel)
-    return (slug ? `/docs/${slug}` : "/docs") + (markdown ? ".md" : "") + suffix
+    return (links.basePath ?? "/docs") + (slug ? `/${slug}` : "") + (markdown ? ".md" : "") + suffix
   }
   const repoPath = path.relative(links.repoDir, abs).split(path.sep).join("/")
   return `${links.repoUrl}/${path.extname(abs) ? "blob" : "tree"}/main/${repoPath}${suffix}`

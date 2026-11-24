@@ -83,6 +83,10 @@ const swipeRest = 140 * time.Millisecond
 // npCover shows the cover of tr, size across, which the pointer tilts,
 // drags and flings.
 func (a *app) npCover(c *ui.Context, tr *netease.Track, art *artwork, size float32) {
+	if a.phone {
+		a.phoneCover(c, tr, art, size)
+		return
+	}
 	cs, pl := &a.npCoverState, a.pl
 	track := tr.ID    // Exit layers retain their own song, including an empty cover.
 	far := size * 1.5 // where a cover flies off to
@@ -92,7 +96,7 @@ func (a *app) npCover(c *ui.Context, tr *netease.Track, art *artwork, size float
 	}
 	// A song owns its pointer gesture; changing the key cancels an unfinished
 	// drag. Without an exit transition, the artwork alone dissolves in place.
-	wrap := ui.Box(c.Key(coverKey{tr.ID, cs.gen})).Size(size, size).AlignSelf(ui.Start).Label("专辑封面")
+	wrap := ui.Box(c.Key(coverKey{tr.ID, cs.gen})).Label("专辑封面").Size(size, size).AlignSelf(ui.Start)
 	entering := cs.enter != 0
 	if entering {
 		// A new cover's first frame: it shows where it comes in from.
@@ -178,13 +182,17 @@ func (a *app) npCover(c *ui.Context, tr *netease.Track, art *artwork, size float
 	tilt := ui.Animation{Spring: ui.SpringOptions{Duration: 500 * time.Millisecond, Bounce: 0.2}}
 	ry := wrap.AnimateTo("ry", tx*7+swing, tilt)
 	rx := wrap.AnimateTo("rx", -ty*7, tilt)
-	shine := float32(0)
+	var shine, gx, gy float32
 	if over {
 		shine = 1
 	}
 	shine = wrap.AnimateTo("shine", shine, ui.Animation{Duration: 300 * time.Millisecond})
-	gx := wrap.AnimateTo("gx", px, tilt)
-	gy := wrap.AnimateTo("gy", py, tilt)
+	// The pointer's local position changes as its parent moves, even
+	// off the cover. Sample it only while the glare is visible.
+	if shine > 0.01 {
+		gx = wrap.AnimateTo("gx", px, tilt)
+		gy = wrap.AnimateTo("gy", py, tilt)
+	}
 	if over || wrap.Dragging() {
 		wrap.Cursor(ui.CursorGrab)
 	}
@@ -224,13 +232,9 @@ func (a *app) npCover(c *ui.Context, tr *netease.Track, art *artwork, size float
 			box.RotateX(rx).RotateY(ry).Perspective(900)
 		}
 		a.npBreathe(box, scale)
-		if a.npVisual.current == nil || a.npVisual.initial {
-			box.Background(white.Alpha(0.08))
-		}
+		a.coverPlaceholder(box)
 		box.Children(func() {
-			ui.Box(c).Fill().Draw(func(p *ui.Painter, r ui.Rect) {
-				p.Clip(r, radius, func() { a.paintPlayingArtwork(p, r, track, art) })
-			})
+			a.coverArtwork(c, track, art, radius)
 			if shine > 0.01 {
 				ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
 					glareShader().Draw(p, r, shader.Options{Radius: radius, Uniforms: map[string]any{
@@ -239,6 +243,69 @@ func (a *app) npCover(c *ui.Context, tr *netease.Track, art *artwork, size float
 				})
 			}
 		})
+	})
+}
+
+func (a *app) phoneCover(c *ui.Context, tr *netease.Track, art *artwork, size float32) {
+	wrap := ui.ButtonBase(c.Key(tr.ID)).Size(size, size).AlignSelf(ui.Start).FocusRing(false).Label("专辑封面")
+	wrap.OnClick(func() {
+		if a.phoneSheetAxis != 0 || a.phoneSheetAte || tr.ProgramID != 0 && !a.captionsShown() {
+			// A press the sheet read as a pull or a track swipe is no
+			// tap on the cover.
+			a.phoneSheetAte = false
+			return
+		}
+		a.phoneDetails = true
+		a.phonePaneAnim = true
+		if tr.ProgramID != 0 {
+			a.npPane = paneCaptions
+		} else {
+			a.npPane = a.lyricsPaneChosen()
+		}
+	})
+	a.phonePartDrag(c, "cover", wrap, size)
+	// A track swipe slides the artwork a little with it; a pull down on
+	// it is the sheet's own pull, which phonePartDrag writes to.
+	offAnim := coverSwing
+	if a.phoneSheetHeld == "cover" && a.phoneSheetAxis == phoneAxisX {
+		offAnim = ui.Animation{Duration: time.Nanosecond}
+	}
+	wrap.AnimatePose(ui.Pose{X: a.phoneCoverOff}, offAnim)
+	wrap.Children(func() {
+		if style := a.settings.PlayerStyle; style != "" {
+			tint := ui.RGB(120, 120, 130)
+			if art != nil && !art.failed {
+				tint = art.tint
+			}
+			a.retroPlayer(c, style, tr, art, size, tint)
+			return
+		}
+		box, radius := a.phoneArtworkSurface(c, size)
+		box.Children(func() { a.coverArtwork(c, tr.ID, art, radius) })
+	})
+}
+
+func (a *app) phoneArtworkSurface(c *ui.Context, size float32) (ui.Element, float32) {
+	radius := min(18, size*0.057)
+	box := ui.Box(c).Fill().Radius(radius).Shadow(0, 20, 42, -12, ui.RGBA(0, 0, 0, 0.52))
+	scale := float32(1)
+	if !a.pl.Playing() {
+		scale = 0.9
+	}
+	box.AnimatePose(ui.Pose{Scale: scale}, ui.Animation{Spring: npSpring})
+	a.coverPlaceholder(box)
+	return box, radius
+}
+
+func (a *app) coverPlaceholder(box ui.Element) {
+	if a.npVisual.current == nil || a.npVisual.initial {
+		box.Background(white.Alpha(0.08))
+	}
+}
+
+func (a *app) coverArtwork(c *ui.Context, track int64, art *artwork, radius float32) {
+	ui.Box(c).Fill().Draw(func(p *ui.Painter, r ui.Rect) {
+		p.Clip(r, radius, func() { a.paintPlayingArtwork(p, r, track, art) })
 	})
 }
 

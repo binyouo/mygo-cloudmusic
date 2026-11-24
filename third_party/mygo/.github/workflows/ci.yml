@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+# The Zig that builds native libraries in both jobs, which the key of the
+# SQLite plugin's native module in the Actions cache names too.
+env:
+  ZIG_VERSION: 0.16.0
+
 # A push supersedes the runs before it on a pull request: the newest commit's
 # run covers theirs. On main a run that started finishes, so that main has a
 # history to tell whether a test that fails on a pull request fails without
@@ -30,7 +35,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      LINUX_PACKAGES: libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xauth dbus-x11 libgl1-mesa-dri libglx-mesa0 libegl-mesa0
+      # GStreamer's plugins play the videos of ui/video's tests.
+      LINUX_PACKAGES: libwebkit2gtk-4.1-0 libayatana-appindicator3-1 xvfb xauth dbus-x11 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +49,12 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # setup-bun keeps a pinned Bun in the Actions cache, and downloads the
+      # latest from GitHub's releases, which answer 504 now and then, on
+      # every job.
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
       # Ubuntu's mirrors are slow now and then (9 minutes for these packages
       # once), so the packages are kept in the Actions cache, under a key of
       # the files apt would download for them.
@@ -51,6 +62,14 @@ jobs:
         if: runner.os == 'Linux'
         id: apt
         run: |
+          # The runners' resolver has failed to find Ubuntu's mirrors for
+          # hours (November 2026), while other hosts resolved: then they are
+          # looked up over DNS over HTTPS.
+          for h in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com; do
+            getent hosts "$h" > /dev/null && continue
+            ip=$(curl -fsS --retry 3 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$h&type=A" | jq -r '[.Answer[]? | select(.type == 1) | .data][0] // empty' || true)
+            if [ -n "$ip" ]; then echo "$ip $h" | sudo tee -a /etc/hosts; fi
+          done
           sudo apt-get update
           debs=$(apt-get install --print-uris -qq -y --no-install-recommends $LINUX_PACKAGES | awk '{print $2}' | sort | sha256sum | cut -c1-16)
           echo "prefix=apt-$ImageOS-${{ runner.arch }}-" >> "$GITHUB_OUTPUT"
@@ -90,6 +109,14 @@ jobs:
             # Production builds leave the inspector of native UI out.
             GOOS=$os go vet -tags mygo_noinspector ./...
           done
+          # Native-UI-only Windows apps can leave WebView2 out, with the
+          # strings antivirus heuristics flag.
+          GOOS=windows go vet -tags mygo_nowebview ./...
+          GOOS=windows go build -tags mygo_nowebview -o "$RUNNER_TEMP/nowebview.exe" ./examples/counter-native
+          if grep -qaE 'WebView2Loader\.dll|msedgewebview2\.exe|CreateCoreWebView2EnvironmentWithOptions|WEBVIEW2_USER_DATA_FOLDER|internal/webview2' "$RUNNER_TEMP/nowebview.exe"; then
+            echo "a mygo_nowebview build still links WebView2" >&2
+            exit 1
+          fi
           GOOS=freebsd go build ./...
           # 32-bit Windows and Linux have no backend, but compile.
           GOOS=windows GOARCH=386 go build ./...
@@ -99,6 +126,17 @@ jobs:
           go build $(go list -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v /cmd/mygo)
           go vet $(go list ./... | grep -v /cmd/mygo)
           go test -exec "$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./internal/web ./internal/gpu/gl
+          # The canvas engine's line breaking, with a canvas of its test's.
+          go test -exec "$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run 'TestCanvas|TestKeepWords' ./internal/text
+      # Phones link with their own toolchains (cgo): Xcode's clang for iOS,
+      # the NDK's for Android, which the macOS runners have.
+      - name: Vet iOS and Android
+        if: runner.os == 'macOS'
+        run: |
+          sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+          GOOS=ios GOARCH=arm64 CGO_ENABLED=1 CC="$(xcrun --sdk iphoneos --find clang) -isysroot $sdk -arch arm64 -miphoneos-version-min=16.0" go vet ./...
+          ndk=$(ls -d "$ANDROID_NDK_LATEST_HOME"/toolchains/llvm/prebuilt/*/bin)
+          GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=$ndk/aarch64-linux-android26-clang go vet ./...
       # The plugins' tests load the native libraries their mygo-plugin.json
       # pins, and on Windows the installer tests run the NSIS that
       # internal/nsis pins, all of which they download into the user's cache
@@ -123,10 +161,87 @@ jobs:
             ${{ runner.os == 'Windows' && '~/AppData/Local' || runner.os == 'macOS' && '~/Library/Caches' || '~/.cache' }}/mygo/natives
             ${{ runner.os == 'Windows' && '~/AppData/Local' || runner.os == 'macOS' && '~/Library/Caches' || '~/.cache' }}/mygo/nsis-*
           key: ${{ steps.downloads.outputs.cache-primary-key }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The SQLite plugin's native module, from its Zig and the SQLite its
+      # build.zig.zon pins, which the plugin's tests and the end-to-end
+      # tests load: built here, so that they test these sources. The build
+      # takes minutes, and the emulated Zig of the Windows ARM64 job runs
+      # past that job's limit now and then, so the library it builds into
+      # .mygo/native is kept in the Actions cache, under a key of all the
+      # build reads: the module's files, Zig's version, and the CLI code
+      # that generates the module's Go and Zig and builds them. A hit skips
+      # the build; any change to these misses, and builds.
+      - name: Find where the SQLite plugin's native module goes
+        id: sqlitecore
+        shell: bash
+        run: |
+          case $RUNNER_OS in Windows) lib=Sqlitecore.dll ;; macOS) lib=libSqlitecore.dylib ;; *) lib=libSqlitecore.so ;; esac
+          echo "path=.mygo/native/$(go env GOOS)-$(go env GOARCH)/$lib" >> "$GITHUB_OUTPUT"
+      - name: Restore the SQLite plugin's native module
+        id: sqlitecore-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.sqlitecore.outputs.path }}
+          key: sqlitecore-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('plugins/sqlite/internal/sqlitecore/**', 'internal/nativegen/**', 'internal/nativelib/**', 'cmd/mygo/native*.go', 'go.mod') }}
+      - name: Build the SQLite plugin's native module
+        id: sqlitecore-build
+        if: steps.sqlitecore-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          go run ./cmd/mygo native build -target host plugins/sqlite/internal/sqlitecore
+          # The build regenerates the module's Go and Zig first, which a
+          # hit does not: only a build of the files as committed is kept.
+          if [ -z "$(git status --porcelain -- plugins/sqlite/internal/sqlitecore)" ]; then echo "committed=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Save the SQLite plugin's native module
+        if: steps.sqlitecore-cache.outputs.cache-hit != 'true' && steps.sqlitecore-build.outputs.committed == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.sqlitecore.outputs.path }}
+          key: ${{ steps.sqlitecore-cache.outputs.cache-primary-key }}
+      # The module loads a build in .mygo/native only if it is newer than
+      # its sources, and the cache restores the time it was built, before
+      # this checkout.
+      - name: Date the restored module after its sources
+        if: steps.sqlitecore-cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: touch "${{ steps.sqlitecore.outputs.path }}"
       # cmd/mygo builds and packages apps, which takes the macOS runners
       # about six minutes and, on a slow one beside the other packages,
       # past go test's ten: the same tests, more time.
       - run: go test -timeout ${{ runner.os == 'macOS' && '20m' || '10m' }} ./...
+      # A Rust crate that the CLI builds and package ffi binds, with the
+      # cargo of the runners' images, which go test ./... skips unbuilt.
+      - name: Test a native library built from its sources
+        env:
+          MYGO_NATIVE_TESTS: 1
+        run: |
+          go run ./cmd/mygo native build -target host examples/rust-native
+          go test -count=1 ./examples/rust-native/...
+      # A native module's three implementations, built with the runners'
+      # own Swift (Xcode's, and that of Ubuntu's image) and cargo, and Zig:
+      # every kind of value both ways, which go test ./... skips unbuilt. On
+      # macOS, the examples too, whose Swift uses Apple's frameworks.
+      - name: Test a native module built from its Swift
+        if: runner.os != 'Windows'
+        run: |
+          go run ./cmd/mygo native build -target host -lang swift native/internal/roundtrip/uses  # and roundtrip, which it uses
+          go test -count=1 ./native/internal/roundtrip/...
+      - name: Test a native module built from its Rust, and from its Zig
+        shell: bash
+        run: |
+          go test -count=1 -run TestScaffoldBuildsRustZig ./internal/nativegen
+          for lang in rust zig; do
+            go run ./cmd/mygo native build -target host -lang $lang native/internal/roundtrip
+            out=$(go test -count=1 -v ./native/internal/roundtrip) || { echo "$out"; exit 1; }
+            if grep -- '--- SKIP' <<<"$out"; then exit 1; fi  # as when the library did not load
+            echo "$lang: $(grep -c -- '--- PASS' <<<"$out") tests passed"
+          done
+      - name: Build the example's native modules
+        if: runner.os == 'macOS'
+        working-directory: examples/native-module
+        run: for m in language motion places; do go run ../../cmd/mygo native check modules/$m; done
       - name: Test without the inspector, as production builds
         if: runner.os == 'Linux'
         run: go test -tags mygo_noinspector ./ui .
@@ -185,6 +300,50 @@ jobs:
             ${{ runner.os == 'Windows' && '~/AppData/Local' || runner.os == 'macOS' && '~/Library/Caches' || '~/.cache' }}/mygo/natives
             ${{ runner.os == 'Windows' && '~/AppData/Local' || runner.os == 'macOS' && '~/Library/Caches' || '~/.cache' }}/mygo/nsis-*
           key: ${{ steps.downloads.outputs.cache-primary-key }}
+      # Zig 0.16's aarch64 Windows build crashes running zig build (the
+      # build runner segfaults at once), so this job uses its x86_64
+      # build, which Windows runs emulated and which cross-compiles the
+      # arm64 library just the same.
+      - name: Install Zig (x86_64)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://ziglang.org/download/$env:ZIG_VERSION/zig-x86_64-windows-$env:ZIG_VERSION.zip" -OutFile "$env:RUNNER_TEMP\zig.zip"
+          Expand-Archive "$env:RUNNER_TEMP\zig.zip" -DestinationPath "$env:RUNNER_TEMP"
+          "$env:RUNNER_TEMP\zig-x86_64-windows-$env:ZIG_VERSION" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      # As in the job above. The emulated build takes five or six minutes,
+      # and twice it ran past 25, until the job's limit canceled it: one
+      # that runs past 15 fails then, naming this step, rather than
+      # leaving the job's limit to cancel it.
+      - name: Find where the SQLite plugin's native module goes
+        id: sqlitecore
+        shell: bash
+        run: |
+          case $RUNNER_OS in Windows) lib=Sqlitecore.dll ;; macOS) lib=libSqlitecore.dylib ;; *) lib=libSqlitecore.so ;; esac
+          echo "path=.mygo/native/$(go env GOOS)-$(go env GOARCH)/$lib" >> "$GITHUB_OUTPUT"
+      - name: Restore the SQLite plugin's native module
+        id: sqlitecore-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.sqlitecore.outputs.path }}
+          key: sqlitecore-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('plugins/sqlite/internal/sqlitecore/**', 'internal/nativegen/**', 'internal/nativelib/**', 'cmd/mygo/native*.go', 'go.mod') }}
+      - name: Build the SQLite plugin's native module
+        id: sqlitecore-build
+        if: steps.sqlitecore-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          go run ./cmd/mygo native build -target host plugins/sqlite/internal/sqlitecore
+          if [ -z "$(git status --porcelain -- plugins/sqlite/internal/sqlitecore)" ]; then echo "committed=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Save the SQLite plugin's native module
+        if: steps.sqlitecore-cache.outputs.cache-hit != 'true' && steps.sqlitecore-build.outputs.committed == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.sqlitecore.outputs.path }}
+          key: ${{ steps.sqlitecore-cache.outputs.cache-primary-key }}
+      - name: Date the restored module after its sources
+        if: steps.sqlitecore-cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: touch "${{ steps.sqlitecore.outputs.path }}"
       - run: go test ./...
       - name: Test without the inspector, as production builds
         if: runner.os == 'Linux'
@@ -193,3 +352,101 @@ jobs:
         env:
           MYGO_E2E: 1
         run: go test -run 'TestContentWindow' ./internal/e2e
+
+  # The hosts of phones are in Swift and Kotlin, which go vet does not read:
+  # building an app compiles them, with the Go code linked in. One target of
+  # each is enough, as the host's source is the same for the others.
+  mobile:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: iOS app, os: macos-latest, platform: ios/simulator }
+          - { name: Android app, os: ubuntu-latest, platform: android/arm64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v6
+        if: runner.os == 'Linux'
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+        if: runner.os == 'Linux'
+        with:
+          packages: platform-tools platforms;android-36 ndk;27.1.12297006 cmake;3.22.1
+      - name: Build the app
+        run: go run ./cmd/mygo build -platform ${{ matrix.platform }} examples/counter-native
+
+  # Native modules on phones, which go test does not reach: the round trip
+  # of every kind of value through a module's Swift on the iOS simulator
+  # and its Kotlin on Android's emulator, in an app that runs the checks
+  # of its tests (native/internal/roundtrip/app) and logs how they went.
+  phone-modules:
+    name: Native modules on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: iOS, os: macos-latest }
+          - { name: Android, os: ubuntu-latest }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v6
+        if: runner.os == 'Linux'
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+        if: runner.os == 'Linux'
+        with:
+          packages: platform-tools platforms;android-36 ndk;27.1.12297006 cmake;3.22.1
+      - name: Run on the iOS simulator
+        if: runner.os == 'macOS'
+        run: |
+          go run ./cmd/mygo build -platform ios/simulator native/internal/roundtrip/app
+          udid=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in d.items() if "iOS" in k for x in v if x["name"].startswith("iPhone")))')
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" native/internal/roundtrip/app/dist/ios-simulator/Roundtrip.app
+          start=$(date '+%Y-%m-%d %H:%M:%S')
+          xcrun simctl launch "$udid" dev.mygo.roundtrip
+          for i in $(seq 120); do
+            xcrun simctl spawn "$udid" log show --start "$start" --style compact --predicate 'eventMessage CONTAINS "roundtrip:"' > log.txt 2>/dev/null || true
+            if grep -qE 'roundtrip: (PASS|FAIL)$' log.txt; then break; fi
+            sleep 2
+          done
+          grep 'roundtrip:' log.txt || true
+          grep -q 'roundtrip: PASS$' log.txt
+      - name: Enable KVM
+        if: runner.os == 'Linux'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Build for Android
+        if: runner.os == 'Linux'
+        run: go run ./cmd/mygo build -platform android/amd64 native/internal/roundtrip/app
+      - name: Run on Android's emulator
+        if: runner.os == 'Linux'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            adb install -r native/internal/roundtrip/app/dist/android/roundtrip-0.1.0.apk
+            adb logcat -c
+            adb shell monkey -p dev.mygo.roundtrip -c android.intent.category.LAUNCHER 1
+            for i in $(seq 120); do adb logcat -d -s mygo:* > log.txt; if grep -qE 'roundtrip: (PASS|FAIL)' log.txt; then break; fi; sleep 2; done; grep 'roundtrip:' log.txt || true; grep -q 'roundtrip: PASS' log.txt

@@ -54,6 +54,94 @@ func TestPlaylistSearchPlaysOriginalQueue(t *testing.T) {
 	}
 }
 
+// The phone search stays reachable deep in a playlist and a filtered tap plays from the complete queue.
+func TestPhonePlaylistSearchFromScrolledList(t *testing.T) {
+	a, p := playlistSearchApp(220)
+	a.phone, a.phoneTab = true, pageLibrary
+	a.history = []route{{page: pageLibrary}}
+	p.Tracks[177].Name, p.Tracks[177].Alias = "宝船", []string{"Treasure"}
+	tt := ui.NewTester(a.view, 320, 670)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tt.Frame()
+	a.trackList.ScrollTo(160, ui.Start)
+	tt.Frame()
+	tapPhone(t, tt, "在歌单内搜索")
+	if !tt.Focused("搜索歌单内歌曲") {
+		t.Fatal("the fixed search action did not start editing")
+	}
+	insets, hasInsets := any(tt).(interface {
+		SetInsets(float32, float32, float32, float32)
+	})
+	if hasInsets {
+		insets.SetInsets(28, 0, 280, 0)
+	}
+	tt.Type("歌手")
+	tapPhone(t, tt, "清除歌曲搜索")
+	tt.Type("Treasure")
+	if a.playlistFilter.query != "Treasure" || !tt.Focused("搜索歌单内歌曲") {
+		t.Fatalf("query %q, focus = %t", a.playlistFilter.query, tt.Focused("搜索歌单内歌曲"))
+	}
+	tt.Key(0, ui.KeyEnter)
+	if tt.Focused("搜索歌单内歌曲") || a.playlistFilter.query != "Treasure" {
+		t.Fatal("submitting the filter kept the keyboard or discarded the query")
+	}
+	tapPhone(t, tt, "宝船")
+	order, at := a.pl.PlayOrder()
+	if a.pl.Current().ID != 178 || len(order) != len(p.Tracks) || at != 177 || a.pl.Queue()[order[at+1]].ID != 179 {
+		t.Fatalf("selected %v, play order has %d tracks at %d", a.pl.Current(), len(order), at)
+	}
+	tapPhone(t, tt, "取消歌单搜索")
+	if a.phonePlaylistSearch || a.playlistFilter.rows(p) != nil || a.pl.Current().ID != 178 {
+		t.Fatal("canceling did not clear the filter or changed playback")
+	}
+}
+
+// A song picked from a partial search can retry its missing batch and cancel the deferred play without losing those songs.
+func TestPhonePlaylistSearchCancelsDeferredPlay(t *testing.T) {
+	a, p := playlistSearchApp(1)
+	a.phone, a.phoneTab = true, pageLibrary
+	a.pl.Cue([]netease.Track{{ID: 99, Name: "当前歌曲"}})
+	p.TrackOffset = 1
+	for _, id := range []int64{1, 2} {
+		p.TrackIDs = append(p.TrackIDs, struct {
+			ID int64 `json:"id"`
+		}{id})
+	}
+	d := a.remainingPlaylist(p)
+	requests := make(chan []int64, 3)
+	fetch := playlistSongs
+	defer func() { playlistSongs = fetch }()
+	playlistSongs = func(ids []int64) ([]netease.Track, error) {
+		requests <- slices.Clone(ids)
+		return nil, nil
+	}
+
+	tt := ui.NewTester(a.view, 390, 780)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tt.Frame()
+	ids := wait(t, requests, "remaining song")
+	tapPhone(t, tt, "在歌单内搜索")
+	tt.Type("0001")
+	tapPhone(t, tt, p.Tracks[0].Name)
+	if d.play == nil || a.pl.Current().ID != 99 {
+		t.Fatal("tapping the filtered result started an incomplete queue")
+	}
+	a.playlistSongsLoaded(d, 2, nil, errors.New("offline"))
+	tt.Frame()
+	tapPhone(t, tt, "重试加载歌单")
+	if retry := wait(t, requests, "retry from the search results"); !slices.Equal(retry, ids) {
+		t.Fatalf("retry fetched %v instead of %v", retry, ids)
+	}
+	tapPhone(t, tt, "取消等待播放")
+	a.playlistSongsLoaded(d, 2, []netease.Track{{ID: 2, Name: "下一首"}}, nil)
+	if len(p.Tracks) != 2 || p.TrackOffset != 2 || d.play != nil {
+		t.Fatalf("cancel left %d playlist songs at offset %d, waiting = %t", len(p.Tracks), p.TrackOffset, d.play != nil)
+	}
+	if a.pl.Current().ID != 99 || len(a.pl.Queue()) != 1 {
+		t.Fatal("canceling the deferred play changed the current queue")
+	}
+}
+
 // Typing Space into the playlist's song search must edit the query, never toggle playback.
 func TestPlaylistSearchSpaceAndShortcut(t *testing.T) {
 	a, p := playlistSearchApp(5)

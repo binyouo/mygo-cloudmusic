@@ -146,18 +146,28 @@ func (a *app) playlistCardsSkeleton(c *ui.Context, s shimmer, n int, min float32
 // trackSkeleton is trackRows while its tracks load: rows of blocks under
 // the header, which may hold blocks of its own.
 func (a *app) trackSkeleton(c *ui.Context, s shimmer, covers bool, header func(c *ui.Context)) {
-	w, h := c.Size()
-	wide := w-sidebarWidth > 820
+	_, h := c.Size()
+	wide := !a.phone && a.contentWidth(c) > 820
 	top, bottom := a.insets(c)
 	a.underTop, a.underBottom = false, true
-	ui.Column(c.Key("skeleton")).Grow(1).Padding(top+pageGap, pagePad-12, bottom+32, pagePad-12).Children(func() {
+	rows := ui.Column(c.Key("skeleton")).Grow(1).Padding(top+pageGap, a.pagePadding()-12, bottom+32, a.pagePadding()-12)
+	if a.phone {
+		rows.MinHeight(0).Clip()
+	}
+	rows.Children(func() {
 		a.startMark(c)
 		header(c)
-		for i := range max(8, int(h/54)) {
-			ui.Row(c.Key(i)).Height(54).Shrink(0).PaddingX(12).Gap(14).AlignItems(ui.Center).Children(func() {
-				ui.Box(c).Width(26).Center().Children(func() { s.text(c, 13, 1.3).Width(12) })
+		rowH, numWidth, coverSize, coverRadius := float32(54), float32(26), float32(38), float32(6)
+		if a.phone {
+			rowH, numWidth, coverSize, coverRadius = 60, 32, 44, 8
+		}
+		for i := range max(8, int(h/rowH)) {
+			ui.Row(c.Key(i)).Height(rowH).Shrink(0).PaddingX(12).Gap(14).AlignItems(ui.Center).Children(func() {
+				if !a.phone || !covers {
+					ui.Box(c).Width(numWidth).Center().Children(func() { s.text(c, 13, 1.3).Width(12) })
+				}
 				if covers {
-					s.bone(c, 6).Size(38, 38)
+					s.bone(c, coverRadius).Size(coverSize, coverSize)
 				}
 				ui.Column(c).Grow(3).Basis(0).MinWidth(0).Gap(3).Children(func() {
 					s.text(c, 14, 1.3).WidthPercent(boneWidth(i) * 0.8)
@@ -177,7 +187,7 @@ func (a *app) trackSkeleton(c *ui.Context, s shimmer, covers bool, header func(c
 
 // playlistHeaderSkeleton is playlistHeader while the playlist loads.
 func (a *app) playlistHeaderSkeleton(c *ui.Context, s shimmer) {
-	ui.Row(c).Gap(28).AlignItems(ui.End).Padding(0, 0, 26, 0).Children(func() {
+	a.detailHeader(c).Padding(0, 0, 26, 0).Children(func() {
 		s.bone(c, 14).Size(212, 212)
 		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(8).Children(func() {
 			s.text(c, 12, 1.3).Width(36)

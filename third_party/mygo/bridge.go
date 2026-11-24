@@ -303,6 +303,7 @@ func (w *Window) handleMessage(msg string) {
 		Y  float64 `json:"y"`
 		C  int64   `json:"c"` // channels
 		K  string  `json:"k"`
+		ID int64   `json:"id"` // the call of a cancel
 		N  int64   `json:"n"`
 		V  string  `json:"v"` // theme-color
 		W  float64 `json:"w"` // content-size
@@ -318,10 +319,14 @@ func (w *Window) handleMessage(msg string) {
 		S  string `json:"s"`
 		E  bool   `json:"e"`
 	}
-	if err := json.Unmarshal(stringBytes(msg), &m); err != nil {
+	if err := json.Unmarshal(stringBytes(msg), &m, decodeOptions); err != nil {
 		return
 	}
 	switch m.T {
+	case "cancel":
+		// The page gave up a call: the method's context is canceled, and
+		// the reply is of no use to it.
+		w.cancelCall(m.ID, m.K)
 	case "dom-ready":
 		w.outMu.Lock()
 		w.domReady = true

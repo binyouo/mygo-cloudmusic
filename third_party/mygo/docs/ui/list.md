@@ -70,7 +70,17 @@ behaves and to move it:
   does; scrolling back to the end follows it again. `FollowAnimation`
   makes it glide there, as a spring (`&ui.Smooth`) or a curve, rather
   than show the end at once: what is added comes up from below, as the
-  chat apps scroll, and the user scrolling stops it.
+  chat apps scroll, and the user scrolling stops it. Each layout reads
+  `FollowEnd` as it is then, and `HoldPlace` keeps the list where it is
+  for the next layout alone: call it in the frame a click opens a fold in
+  the last message, and the line clicked stays under the pointer rather
+  than following the end as the row grows.
+- `MoveAnimation`, with a `Key`, makes the rows glide to their places as
+  rows come, go or move around them, rather than jump there: the rows
+  below a row that went close its gap, those below rows that came open
+  theirs, and rows a `ScrollTo` in the same frame brings into view come
+  in with them, as new items sliding in at the top of a feed. Scrolling
+  moves the rows at once, as does a desktop asking for less motion.
 - `Header` names the rows heading sections: the header of the section at
   the top stays pinned there while its rows scroll under it, until the next
   header pushes it away. Give headers a background.
@@ -86,7 +96,12 @@ building the list.
 - `Selected` lets a click, or Up, Down, Home and End while the list has the
   keyboard focus (and Page Up and Page Down on Linux and Windows), choose a
   row, which shows in the accent color; the list's `Changed` reports a new
-  choice, and `Submitted` a double click or Enter.
+  choice, and `Submitted` a double click or Enter. `-1` is no row chosen.
+  With a `Key`, the choice follows its item as rows are added, removed or
+  sorted, and becomes `-1` when its item leaves the rows. The list writes
+  that as it builds, in the same pass, so what you build after the list
+  (a detail panel reading the chosen row) must take `-1` as none. Without
+  a `Key`, the choice stays at its index.
 - `Selection` lets the user choose several rows, held in a
   `ui.Selection[K]` by the keys of their items (`Key`), or by their indices
   without one: a click chooses one, Cmd-click (Ctrl-click on Linux and
@@ -95,6 +110,23 @@ building the list.
   Linux and Windows, Ctrl with the keys moves without choosing, and
   Ctrl+Space adds the row there or takes it out. `Selected`, set as well, is
   the row last chosen.
+
+A table and the editor of its chosen row below it:
+
+```go
+app.list.Key = func(i int) any { return app.cols[i].Name }
+app.list.Selected = &app.colRow
+ui.List(c, &app.list, len(app.cols), func(i int) {
+	ui.Text(c, app.cols[i].Name).Padding(6, 12)
+}).Grow(1)
+if app.colRow >= 0 { // -1 once another table's columns replaced the chosen one
+	columnEditor(c, &app.cols[app.colRow])
+}
+```
+
+When the same list shows another set of rows, as another table's, start
+its state afresh (`app.list = ui.ListState{}`) so that it forgets the item
+chosen before and the place it scrolled to.
 
 Files to choose several of, by their paths:
 
@@ -131,6 +163,11 @@ acts on the row it was opened on; on a chosen row it leaves the choice as it
 is. `MenuKeepsSelection` turns this off: the menu opens on the row clicked,
 whose builder knows its row, and the choice stays. A list with `Selected`
 alone never chooses on a right-click.
+
+The menu key and Shift+F10 open the context menu of the row chosen, below
+the row, while the list has the focus: the outermost element with a
+`ContextMenu` in the row, or the list's own when no row is chosen or the
+row has none.
 
 ```go
 app.files.Selection = &app.chosen
@@ -173,14 +210,64 @@ ui.List(c, &app.list, len(app.files), func(i int) {
 })
 ```
 
+`RowClicked` reports a single click the same way, for rows that act on one,
+as a file list opening a file or a sidebar its page, with no button inside
+the row taking the click: the row takes it, so its `Label` names what takes
+the click, for typing its first letters, screen readers and `Tester.Click`
+alike. It reports each click of the primary button without modifiers, on the
+row already chosen too, where `Changed` reports nothing new. The keys moving
+the choice report none, nor does a Shift- or Cmd-click extending it. A double
+click reports its first click with `RowClicked` and its second with
+`RowDoubleClicked`, as the systems' lists do. Assistive technology pressing
+the row reports it to the first element of the row asking, and in a list
+that does not choose its rows, asking makes the row take the click.
+
+```go
+ui.List(c, &app.sidebar, len(app.pages), func(i int) {
+	if ui.Text(c, app.pages[i].Title).Padding(6, 12).FillWidth().RowClicked() {
+		app.show(i)
+	}
+})
+```
+
+Rows that draw their own hover and press, as a chat list's, ask the row
+built with `Rows` rather than an element of their own: `ListRow`'s
+`Hovered`, `Pressed` and `PointerPosition` report the row's, as the
+row's element would. `Pressed` or `Hovered` on an element inside the row
+would make that element take the press, and the row would not choose,
+nor would `Tester.Click` on the row's `Label` reach it. A press starts a
+ripple where the pointer went down:
+
+```go
+ui.List(c, &app.chats, len(app.items)).Grow(1).Rows(func(row ui.ListRow) {
+	bg := ui.Transparent
+	switch {
+	case row.Pressed():
+		bg = row.Context.Theme().SurfacePressed
+		if app.ripple.Row != row.Index {
+			x, y, _ := row.PointerPosition()
+			app.ripple = Ripple{Row: row.Index, X: x, Y: y, At: time.Now()}
+		}
+	case row.Hovered():
+		bg = row.Context.Theme().SurfaceHover
+	}
+	ui.Box(row.Context).Background(bg).Padding(8, 12).Children(func() {
+		ui.Text(row.Context, app.items[row.Index].Title)
+	})
+})
+```
+
+In a list that chooses no rows, `Pressed` makes the row take the press.
+
 ## Scrolling
 
 `ScrollTo(row, align)` shows a row at the `ui.Start`, `ui.Center` or
 `ui.End` of the list, `ScrollIntoView(row)` scrolls as little as shows it,
 and `ScrollToEnd` scrolls to the end, rows not built yet included: the list
 scrolls as the frame is laid out, to where the row is once measured.
-`Visible` returns the first and last rows in view and `AtEnd` whether the
-end shows, to load more as the list nears the end of what was loaded.
+`Visible` returns the first and last rows in view in the last frame and
+`AtEnd` whether the end showed, for what the view shows, as a button to jump
+to the latest message.
 
 A chat:
 
@@ -198,6 +285,41 @@ ui.List(c, &app.chat, len(app.messages), func(i int) {
 	message(c, app.messages[i])
 }).Grow(1).Justify(ui.End)
 ```
+
+## Loading more
+
+A list paging in a long collection, from a database or the network, as the
+user nears the end of what was loaded, loads the next page in
+`EndReached`, rather than reading `Visible` as it builds: the list calls it
+once a frame is laid out in which the user's scrolling (the wheel, a
+touchpad, the scroll bar, the keys, a drag) brought the rows in view within
+`NearEnd` rows of the end (0 for the last row alone), with the last row in
+view. Start the load there, off the UI thread: the frame goes on with the
+rows it has, and those loaded show in the frames after.
+
+```go
+app.list.Key = func(i int) any { return app.chats[i].ID }
+app.list.NearEnd = 20
+app.list.EndReached = func(last int) {
+	if app.more && !app.loading {
+		app.loading = true
+		go app.loadPage(len(app.chats)) // appends the page on the UI thread
+	}
+}
+ui.List(c, &app.list, len(app.chats), func(i int) {
+	chatRow(c, app.chats[i])
+}).Grow(1)
+```
+
+It is called as the rows in view come near the end, not in every frame while
+they stay there. Once they left it, or the rows changed in number, as when a
+page was added, the user's next scroll near the end calls it again: a page
+arriving does not call it by itself, so a list never loads page after page
+on its own. Only the user's scrolling calls it: `ScrollTo`,
+`ScrollIntoView` and `ScrollToEnd` (a notification opening a message far
+down, say), the list showing first, being resized or built at another
+height, and rows sorted again do not. A list whose first page does not fill
+it cannot be scrolled, so load a first page taller than the list.
 
 ## Reordering
 
@@ -263,7 +385,8 @@ Call `app.list.Handle.Focus()` on the UI thread to request focus, or
 list and `FocusWithin(c)` includes its descendants. A handle's shortcut
 action runs after construction only if its enabled control is present.
 
-`ListRow` supplies the current Context, row index, selection and list focus.
+`ListRow` supplies the current Context, row index, selection and list focus,
+and the row's hover and press (see [choosing rows](#choosing-rows)).
 `ListState.Selected` or `Selection` enables selection. `ItemKey` gives each
 item a stable key. Configure them before calling Rows.
 

@@ -48,8 +48,7 @@ func (a *app) dailyCard(c *ui.Context, now time.Time) {
 	if len(songs) == 0 {
 		return
 	}
-	w, _ := c.Size()
-	inner := w - sidebarWidth - 2*pagePad
+	inner := a.contentWidth(c) - 2*a.pagePadding()
 	still := c.Preferences().ReduceMotion
 	art := a.art.get(netease.Sized(songs[0].Album.PicURL, 600), true)
 	card := ui.ButtonBase(c.Key("daily")).Height(dailyHeight).Radius(dailyRadius).FocusRing(false).Label("每日推荐").TextColor(white)
@@ -486,6 +485,25 @@ func (a *app) dailyPage(c *ui.Context) {
 	s := a.pageShimmer(c)
 	header := func(c *ui.Context) {
 		p := a.pal
+		if a.phone {
+			d := phoneDetail{
+				title: "每日推荐",
+				count: len(songs),
+				play: func() {
+					if a.pl.Shuffle() {
+						a.pl.ToggleShuffle()
+					}
+					a.pl.PlayQueue(songs, 0)
+				},
+				shuffle: func() { a.pl.PlayShuffled(songs) },
+			}
+			if len(songs) > 0 {
+				d.cover = songs[0].Album.PicURL
+				d.meta = fmt.Sprintf("%d月%d日", now.Month(), now.Day())
+			}
+			a.phoneDetailHeader(c, d)
+			return
+		}
 		ui.Row(c).Gap(28).AlignItems(ui.End).Padding(0, 0, 26, 0).Children(func() {
 			a.dailyArt(c, now, 212)
 			ui.Column(c).Gap(8).Children(func() {

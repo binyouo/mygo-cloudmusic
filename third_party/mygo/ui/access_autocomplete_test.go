@@ -9,11 +9,12 @@ import (
 // TestAccessAutoComplete reads what the suggestions of fields complete
 // (aria-autocomplete) as assistive technology gets it: what a combobox of
 // one's own tells, AutoCompleteList for the widgets whose options match
-// what was typed, and none for a field without suggestions or one taken
-// back.
+// what was typed, a token field whose app suggests for its Query among
+// them while it has no suggestions yet, and none for a field without
+// suggestions or one taken back.
 func TestAccessAutoComplete(t *testing.T) {
-	var query, city, font string
-	var tags, labels []string
+	var query, city, font, recipient string
+	var tags, labels, to []string
 	kind := ui.AutoCompleteList
 	tt := ui.NewTester(func(c *ui.Context) {
 		ui.Column(c).Children(func() {
@@ -22,6 +23,7 @@ func TestAccessAutoComplete(t *testing.T) {
 			ui.Combobox(c, &font, []string{"Helvetica", "Courier"}).Label("Font")
 			ui.TokenField(c, &tags, []string{"go", "zig"}).Label("Tags")
 			ui.TokenField(c, &labels, nil).Label("Labels")
+			ui.TokenField(c, &to, nil).Label("To").Query(&recipient)
 			ui.TextInput(c, &query).Label("Note")
 		})
 	}, 400, 400)
@@ -36,6 +38,7 @@ func TestAccessAutoComplete(t *testing.T) {
 		{ui.RoleComboBox, "Font", ui.AutoCompleteList},
 		{ui.RoleComboBox, "Tags", ui.AutoCompleteList},
 		{ui.RoleTextField, "Labels", ui.AutoCompleteNone},
+		{ui.RoleComboBox, "To", ui.AutoCompleteList},
 		{ui.RoleTextField, "Note", ui.AutoCompleteNone},
 	} {
 		if a := accessOf(t, tt, want.role, want.name); a.AutoComplete != want.kind {

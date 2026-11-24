@@ -36,7 +36,7 @@ func planMix(a, b *pcmTrack) (selected *mixPlan) {
 			selected.outAnalysis, selected.inAnalysis = aa, bb
 		}
 	}()
-	if aa.neural != nil && bb.neural != nil {
+	if (aa.neural != nil && bb.neural != nil) || (aa.deviceTiming != nil && bb.deviceTiming != nil) {
 		// A worker runs MA's complete candidate planner. Reserve the earliest
 		// possible tail start now; the returned audio owns its actual overlap.
 		return &mixPlan{exit: a.dec.Len(), tempo: 1, sourceStart: aa.tail.from, smart: true, full: true}
@@ -98,11 +98,18 @@ func planMix(a, b *pcmTrack) (selected *mixPlan) {
 // planBeatMix follows Smart Fades' separation of planning and rendering:
 // choose a musical source window, reach B's tempo BEFORE the overlap, then
 // leave B untouched. The renderer reconciles the actual stretched PCM length.
-// We assume four-beat phrases here; this is not a learned downbeat detector.
 func planBeatMix(a, b *pcmTrack, aa, bb *trackAnalysis) *mixPlan {
 	out, in := &aa.tail, &bb.head
 	if out.beat <= 0 || in.beat <= 0 || out.confidence < .65 || in.confidence < .65 {
 		return nil
+	}
+	beatsPerBar, alignment := int64(4), out.beat
+	if out.meter > 0 && in.meter > 0 {
+		if out.meter != in.meter {
+			return nil
+		}
+		beatsPerBar = int64(out.meter)
+		alignment = out.beat * beatsPerBar
 	}
 	tempo := float64(out.beat) / float64(in.beat)
 	if !finiteMixNumber(tempo) || math.Abs(tempo-1) > .08 {
@@ -128,13 +135,16 @@ func planBeatMix(a, b *pcmTrack, aa, bb *trackAnalysis) *mixPlan {
 	if outKnown && inKnown {
 		bars = []int64{8, 4, 2, 1}
 	}
+	if keysClash(aa.key, bb.key) {
+		bars = []int64{1}
+	}
 	for _, count := range bars {
-		overlap := count * 4 * out.beat
+		overlap := count * beatsPerBar * out.beat
 		// At the final speed, A's source clock advances tempo frames for each
 		// output frame. Align B's own grid by shifting A's overlap start;
 		// unlike a cue seek, this does not discard B's opening.
 		start := exit - overlap
-		nearest := out.phase + int64(math.Round((float64(start-out.phase)+float64(in.phase)*tempo)/float64(out.beat)))*out.beat
+		nearest := out.phase + int64(math.Round((float64(start-out.phase)+float64(in.phase)*tempo)/float64(alignment)))*alignment
 		aligned := nearest - int64(math.Round(float64(in.phase)*tempo))
 		overlap = exit - aligned
 		if overlap < out.beat*2 || overlap > maxOverlap {
@@ -142,9 +152,9 @@ func planBeatMix(a, b *pcmTrack, aa, bb *trackAnalysis) *mixPlan {
 		}
 		ramp := int64(0)
 		if tempo != 1 {
-			beats := int64(4)
+			beats := beatsPerBar
 			if math.Abs(tempo-1) > .03 {
-				beats = 8
+				beats *= 2
 			}
 			ramp = min(beats*out.beat, 10*outputRate, sourceBudget-overlap)
 			if ramp < out.beat*2 {
@@ -169,9 +179,20 @@ func planBeatMix(a, b *pcmTrack, aa, bb *trackAnalysis) *mixPlan {
 	return nil
 }
 
+func vocalWindowDuty(windows []mixVocalWindow, start, end int64) float64 {
+	var total int64
+	for _, w := range windows {
+		total += max(0, min(w.end, end)-max(w.start, start))
+	}
+	return float64(total) / float64(max(1, end-start))
+}
+
 func finiteMixNumber(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func mixVocalWindows(p *pcmTrack, a *trackAnalysis) ([]mixVocalWindow, bool) {
+	if a.vocalsKnown {
+		return a.vocals, true
+	}
 	if hints := p.vocals.Load(); hints != nil && (hints.known || len(hints.windows) > 0) {
 		return hints.windows, hints.known
 	}

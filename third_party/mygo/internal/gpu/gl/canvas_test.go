@@ -1,4 +1,4 @@
-//go:build linux && (amd64 || arm64)
+//go:build linux && !android && (amd64 || arm64)
 
 package gl
 
@@ -33,6 +33,33 @@ func TestCanvases(t *testing.T) {
 			}
 			if len(r.canvases) != 3 {
 				t.Errorf("%d canvas textures, want 3", len(r.canvases))
+			}
+		})
+	}
+}
+
+// A canvas that keeps the bitmaps of its glyphs (scene.Scene.Own) draws
+// them from its own atlases, not from the frame's, which hold others, in
+// the frame that draws it, in one that only shows it and in one that
+// draws it anew; so does one with a mask atlas of its own alone.
+func TestOwnedCanvas(t *testing.T) {
+	for _, api := range apis {
+		t.Run(api.name, func(t *testing.T) {
+			scenes := []*scene.Scene{gputest.OwnedCanvasScene(true), gputest.OwnedCanvasScene(false)}
+			read := offscreen(t, api.es, scenes[0].Width, scenes[0].Height)
+			r, err := New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Release()
+			for _, s := range scenes {
+				for frame := range gputest.OwnedCanvasFrames {
+					if err := r.Render(s); err != nil {
+						t.Fatal(err)
+					}
+					gputest.Compare(t, "gl-owned-canvas", read(), s.Width*4, s)
+					gputest.OwnedCanvasNext(s, frame)
+				}
 			}
 		})
 	}

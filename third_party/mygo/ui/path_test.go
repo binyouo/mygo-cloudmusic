@@ -264,6 +264,9 @@ func TestCrowdedPathsDrawAsTilesForAWhile(t *testing.T) {
 		r.Render(s)
 		return r.Image.RGBA()
 	}
+	if long, short := masks(); long != 1 || short != 1 {
+		t.Fatalf("before crowding, the long wire draws from %d masks, the short one from %d", long, short)
+	}
 	whole := pixels()
 	tt.rt.paths.crowded = tt.rt.paints + pathCrowdedPaints
 	tt.Frame()

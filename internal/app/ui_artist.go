@@ -303,7 +303,7 @@ func (a *app) artistPage(c *ui.Context) {
 				a.artistHeader(c, d)
 				ui.Column(c).Padding(40, 0).Gap(12).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, d.latestErr).TextColor(a.pal.muted).FontSize(13)
-					if ui.Button(c.Key("retry"), "重试").Clicked() {
+					if a.settingButton(c, "retry", "重试", false).Clicked() {
 						a.loadLatest(d.profile.ID)
 					}
 				})
@@ -317,7 +317,13 @@ func (a *app) artistPage(c *ui.Context) {
 // a tab of a page that lists tracks puts its header in the same place.
 func (a *app) scrollPage(c *ui.Context, content func()) {
 	top, bottom := a.insets(c)
-	ui.Scroll(c.Key(a.route)).TrackScroll(&a.pageScroll).Grow(1).Padding(top+pageGap, pagePad-12, bottom+32, pagePad-12).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
+	// On the phone, where track rows take the same padding, the page's
+	// text starts at the padding; desktop pages keep their rows' overhang.
+	pad := a.pagePadding() - 12
+	if a.phone {
+		pad = a.pagePadding()
+	}
+	ui.Scroll(c.Key(a.route)).TrackScroll(a.ps()).Grow(1).Padding(top+pageGap, pad, bottom+32, pad).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
 		a.startMark(c)
 		defer a.endMark(c)
 		content()
@@ -340,55 +346,67 @@ func (a *app) artistHeader(c *ui.Context, d *artistData) {
 	if a.artistTab == artistLatest && d.latest != nil {
 		songs = d.latest
 	}
-	ui.Row(c).Gap(28).AlignItems(ui.End).Padding(0, 0, 8, 0).Children(func() {
-		photo := ar.Avatar
-		if photo == "" {
-			photo = ar.PicURL
-		}
-		ui.Box(c).Size(artistPhotoSize, artistPhotoSize).Radius(artistPhotoSize/2).Shadow(0, 18, 40, -10, p.cardShade).Children(func() {
-			a.coverFill(c, photo, 600, artistPhotoSize/2)
-		})
-		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(8).Children(func() {
-			ui.Text(c, "歌手").FontSize(12).FontWeight(600).TextColor(p.accent)
-			ui.Text(c, ar.Name).FontSize(30).FontWeight(800).LetterSpacing(-0.6).MaxLines(2).LineHeight(1.2)
-			var meta []string
-			if aka := distinct(append([]string{ar.Trans}, ar.Alias...)); len(aka) > 0 {
-				meta = append(meta, strings.Join(aka, " / "))
+	if a.phone {
+		a.artistPhoneHeader(c, ar, songs)
+	} else {
+		a.detailHeader(c).Padding(0, 0, 8, 0).Children(func() {
+			photo := ar.Avatar
+			if photo == "" {
+				photo = ar.PicURL
 			}
-			if ar.MusicSize > 0 {
-				meta = append(meta, fmt.Sprintf("%d 首歌曲", ar.MusicSize))
-			}
-			if ar.AlbumSize > 0 {
-				meta = append(meta, fmt.Sprintf("%d 张专辑", ar.AlbumSize))
-			}
-			ui.Text(c, strings.Join(meta, " · ")).FontSize(13).TextColor(p.muted)
-			if d := strings.TrimSpace(ar.BriefDesc); d != "" {
-				ui.Text(c, strings.ReplaceAll(d, "\n", " ")).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
-			}
-			ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
-				if pillButton(c.Key("play"), iconPlay, "播放", p.accent, p.onAccent).Clicked() {
-					if a.pl.Shuffle() {
-						a.pl.ToggleShuffle()
+			ui.Box(c).Size(artistPhotoSize, artistPhotoSize).Radius(artistPhotoSize/2).Shadow(0, 18, 40, -10, p.cardShade).Children(func() {
+				a.coverFill(c, photo, 600, artistPhotoSize/2)
+			})
+			ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(8).Children(func() {
+				ui.Text(c, "歌手").FontSize(12).FontWeight(600).TextColor(p.accent)
+				ui.Text(c, ar.Name).FontSize(30).FontWeight(800).LetterSpacing(-0.6).MaxLines(2).LineHeight(1.2)
+				var meta []string
+				if aka := distinct(append([]string{ar.Trans}, ar.Alias...)); len(aka) > 0 {
+					meta = append(meta, strings.Join(aka, " / "))
+				}
+				if ar.MusicSize > 0 {
+					meta = append(meta, fmt.Sprintf("%d 首歌曲", ar.MusicSize))
+				}
+				if ar.AlbumSize > 0 {
+					meta = append(meta, fmt.Sprintf("%d 张专辑", ar.AlbumSize))
+				}
+				ui.Text(c, strings.Join(meta, " · ")).FontSize(13).TextColor(p.muted)
+				if d := strings.TrimSpace(ar.BriefDesc); d != "" {
+					ui.Text(c, strings.ReplaceAll(d, "\n", " ")).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
+				}
+				ui.Row(c).Wrap().Gap(10).Margin(10, 0, 0, 0).Children(func() {
+					if pillButton(c.Key("play"), iconPlay, "播放", p.accent, p.onAccent).Clicked() {
+						if a.pl.Shuffle() {
+							a.pl.ToggleShuffle()
+						}
+						a.pl.PlayQueue(songs, 0)
 					}
-					a.pl.PlayQueue(songs, 0)
-				}
-				if pillButton(c.Key("shuffle"), iconShuffle, "随机播放", p.hover.Over(p.bg), p.text).Clicked() {
-					a.pl.PlayShuffled(songs)
-				}
-				icon, label := iconPlus, "关注"
-				if ar.Followed {
-					icon, label = iconCheck, "已关注"
-				}
-				if pillButton(c.Key("follow"), icon, label, p.hover.Over(p.bg), p.text).Clicked() {
-					a.toggleFollow(ar.ID)
-				}
-				// An artist with an account of their own has a user page too.
-				if ar.AccountID != 0 && pillButton(c.Key("user"), iconUser, "用户主页", p.hover.Over(p.bg), p.text).Clicked() {
-					a.openPage(route{page: pageUser, id: ar.AccountID})
-				}
+					if pillButton(c.Key("shuffle"), iconShuffle, "随机播放", p.hover.Over(p.bg), p.text).Clicked() {
+						a.pl.PlayShuffled(songs)
+					}
+					icon, label := iconPlus, "关注"
+					if ar.Followed {
+						icon, label = iconCheck, "已关注"
+					}
+					if pillButton(c.Key("follow"), icon, label, p.hover.Over(p.bg), p.text).Clicked() {
+						a.toggleFollow(ar.ID)
+					}
+					// An artist with an account of their own has a user page too.
+					if ar.AccountID != 0 && pillButton(c.Key("user"), iconUser, "用户主页", p.hover.Over(p.bg), p.text).Clicked() {
+						a.openPage(route{page: pageUser, id: ar.AccountID})
+					}
+				})
 			})
 		})
-	})
+	}
+	if a.phone {
+		ui.Box(c).Margin(20, 0, 12, 0).Children(func() {
+			if a.phoneTabs(c, &a.artistTab, "热门", "最新", "专辑", "动态") {
+				a.loadArtist(ar.ID)
+			}
+		})
+		return
+	}
 	ui.Row(c).AlignItems(ui.Center).Margin(34, 0, 14, 0).Children(func() {
 		ui.Text(c, artistTabTitles[a.artistTab]).FontSize(19).FontWeight(700).LetterSpacing(-0.3)
 		ui.Spacer(c)

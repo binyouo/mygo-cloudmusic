@@ -125,7 +125,7 @@ func TestStandbySurfaceVariants(t *testing.T) {
 	b.settings = defaultSettings()
 	b.pl.Cue([]netease.Track{{ID: -1, Name: "测试", Duration: 200000}})
 	b.pl.SetLyrics(nil)
-	b.comments = commentState{track: -1, loaded: true}
+	b.comments = &commentState{track: -1, loaded: true}
 	b.toggleWallpaper()
 	b.wallpaper.revealed = true
 	bt := ui.NewTester(b.wallpaperView, 1440, 900)

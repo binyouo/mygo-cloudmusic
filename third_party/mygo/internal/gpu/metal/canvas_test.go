@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && !ios
 
 package metal
 
@@ -31,6 +31,29 @@ func TestCanvases(t *testing.T) {
 	}
 	if len(r.canvases) != 3 {
 		t.Errorf("%d canvas textures, want 3", len(r.canvases))
+	}
+}
+
+// A canvas that keeps the bitmaps of its glyphs (scene.Scene.Own) draws
+// them from its own atlases, not from the frame's, which hold others, in
+// the frame that draws it, in one that only shows it and in one that
+// draws it anew; so does one with a mask atlas of its own alone.
+func TestOwnedCanvas(t *testing.T) {
+	r, err := newRenderer()
+	if err != nil {
+		t.Skip("no Metal:", err)
+	}
+	defer r.Release()
+	for _, color := range []bool{true, false} {
+		s := gputest.OwnedCanvasScene(color)
+		for frame := range gputest.OwnedCanvasFrames {
+			pix, err := r.renderOffscreen(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gputest.Compare(t, "metal-owned-canvas", pix, s.Width*4, s)
+			gputest.OwnedCanvasNext(s, frame)
+		}
 	}
 }
 

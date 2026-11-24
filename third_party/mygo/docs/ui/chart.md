@@ -47,6 +47,20 @@ resizes; `Draw` functions get the plot's box, and `chart.X(r, f)` and
   to its value, and `Invert(f)` the value at a fraction, as under the
   pointer. `Clamp` keeps values outside the domain at its ends;
   `chart.Extent(values...)` returns the smallest and the largest.
+- `chart.NewLog(lo, hi)` gives equal ratios equal distances: 1, 10 and
+  100 are equally spaced. Both ends must be positive or both negative;
+  reversed domains work too. `Base` defaults to 10 (2 and `math.E` work
+  too); it changes ticks and `Nice()`, not the positions. `Nice()` extends
+  to whole powers of the base. `Ticks(n)` is a density hint: short domains
+  with integer bases include minor multiples, whose labels are omitted
+  when crowded. `Format` labels every tick when set. Constant domains get
+  one tick at their value, including noninteger bases.
+- `chart.NewSymLog(lo, hi)` includes negative values and zero, using
+  `sign(v) * log1p(abs(v)/c)`. `Constant` is c, 1 when zero: the size of the
+  nearly linear region around zero; larger magnitudes are logarithmic.
+  `Ticks(n)` and `Nice(n)` choose round numbers in the original units,
+  placed nonlinearly. A nonpositive count, or a nice request that does not
+  settle on a stable domain, leaves the original domain unchanged.
 - `chart.NewBand(labels...)` gives each label a band, as the bars of a bar
   chart: `Band(i)` is the i-th's stretch, `At(i)` its middle, `Width()`
   their width, and `Index(f)` the band at a fraction. `Padding(inner,
@@ -60,6 +74,36 @@ resizes; `Draw` functions get the plot's box, and `chart.X(r, f)` and
 
 Ticks are `chart.Tick` values, `At` a fraction, `Value` and `Label`: make
 your own for axes a scale does not mark.
+
+### Wide ranges and signed data
+
+```go
+latency := chart.NewLog(0.01, 1000) // milliseconds, five orders of magnitude
+position := latency.At(0.1)       // 0.2 of the plot
+value := latency.Invert(0.5)      // about 3.162 ms
+
+changes := chart.NewSymLog(-1000, 1000)
+changes.Constant = 10
+baseline := changes.At(0)        // 0.5; zero is valid
+bar := changes.Span(0, -100)     // a signed bar around that baseline
+```
+
+Both scales have `At`, `Invert`, `Span`, `Clamp` and `Format`, as `Linear`
+does. Keep the domain in data units; apply `At` to each sample, then use
+normal marks and paths. A logarithmic bar needs a nonzero baseline: use
+`SymLog` for bars around zero. NaN samples propagate as missing values,
+which line and area paths leave as gaps. Without clamping, values of the
+wrong sign give NaN on a log scale and zero maps to infinity off its plot.
+With `Clamp`, out-of-domain values, including zero, stay at the ends.
+
+Domains must be finite. A log domain cannot touch or cross zero, its
+nonzero base must be finite and greater than 1, and a symlog scale's
+nonzero constant must be finite and positive. Invalid scales give NaN
+positions and no ticks; `Nice` leaves them unchanged. At the float64
+limits, log `Nice` retains an edge if the next power is unrepresentable.
+The scales are values with no mutable caches or timers; they add no
+runtime dependency. The gallery's Charts page compares linear and log
+latencies, and lets you change the symlog linear region.
 
 ## The plot and its axes
 
@@ -248,6 +292,59 @@ For the points of a band scale, `xs` are their middles; `chart.Nearest`
 finds the point nearest a fraction for selections of your own, and a
 band's `Index` the band.
 
+## Repeated queries of growing data
+
+`MinMax` is stateless and takes plot fractions. For large histories that
+mostly stay unchanged, keep a `MinMaxIndex` per series instead. `Update`
+borrows the full raw X and Y slices and indexes only their appended suffix;
+`Query` maps X to fractions for the requested viewport and leaves Y unchanged:
+
+```go
+var index chart.MinMaxIndex
+var dx, dy []float32
+// After appending samples to rawX and rawY:
+index.Update(rawX, rawY)
+// In the plot's Draw callback, with finite float32 viewport bounds lo < hi:
+dx, dy = index.Query(dx, dy, lo, hi, int(math.Ceil(float64(r.W*p.Scale()))))
+p.StrokePath(chart.LineInto(&path, r, dx, dy, chart.CurveLinear), 2, color)
+```
+
+Declare `path` as a retained `ui.Path`. `StrokePolyline` can use these same
+fractions after converting them with `chart.X` and `chart.Y`. Keep the raw
+samples for precise cursor readings; reduced points are drawing geometry.
+
+X must be nondecreasing within each finite run. NaN and infinity in either
+input break the line. Query uses float32 `(x-lo)/(hi-lo)`, including its
+rounding, before assigning pixel columns, and preserves MinMax's first
+equal extremum, time order and boundary neighbors. Invalid bounds, an
+overflowing span, or a nonpositive pixel width return empty output.
+
+Do not modify existing samples while indexed. Reallocation from appending
+is fine, but replacing data, editing it or removing its prefix requires
+`Reset` followed by `Update` of the retained history. Reset releases all
+borrowed slices and index memory. Bound your own history and rebuild
+periodically for a sliding window, as `examples/chart-streaming` does.
+Do not copy a populated index or access it concurrently; output must not alias input.
+Pan, zoom and DPI changes need only another query, without a rebuild.
+
+The index stores two original sample positions per completed 16-sample
+block and per completed pair of blocks above it. Construction is O(N),
+append amortizes to O(K) for K new samples, and storage is O(N/16 + R),
+where R is the finite-run count. On 64-bit systems the completed hierarchy
+uses about two bytes per sample before slice capacity slack, plus run
+bounds. Queries binary-search each run, skip whole blocks inside a pixel
+column, and scan blocks crossing a column boundary. Dense-query work is
+O(R log N + P log N + 16P), bounded by a full scan, for P occupied columns;
+highly fragmented input can still require visiting every run. A reusable
+normalization buffer handles low-density visible ranges with MinMax.
+
+For small data, a single query, frequently edited samples, or very many
+gaps, prefer `MinMax`: building an index may cost more than it saves. For
+a tiny visible fraction of sorted finite X, binary-searching the visible
+slice and calling MinMax may already suffice; retain one neighbor on each
+side and preserve gap markers. Index construction, capacity growth and
+explicit rebuilds allocate; warmed queries reuse their buffers.
+
 ## Accessibility
 
 Name the plot with `Label` and say what it shows with `Description`.
@@ -256,5 +353,5 @@ bar's month and value. `Select` tells it about the chosen point: what
 `describe` returns is the area's value, which screen readers read out as
 the arrows come to a point.
 
-What the package leaves out: logarithmic scales, zooming and panning,
+What the package leaves out: zooming and panning,
 legends (rows of your own, as above) and labels that avoid each other.

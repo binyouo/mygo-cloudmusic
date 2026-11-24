@@ -142,6 +142,16 @@
   }
 }
 
+/* Chinese, set in its own fonts, and without the tracking and capitals of
+   Latin text: tracking would pull its characters together. */
+html:lang(zh) {
+  font-family: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+}
+html:lang(zh) * {
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 /* The column of every page, between two hairlines. */
 @utility frame {
   @apply mx-auto w-full max-w-6xl border-x;
@@ -361,6 +371,17 @@
 
   .dark & {
     color-scheme: dark;
+  }
+}
+
+/* The language of a code block, at its top right, where the copy button
+   takes its place on hover. */
+.code-lang {
+  @apply pointer-events-none absolute top-2.5 right-3 text-xs font-medium text-muted-foreground transition-opacity select-none;
+
+  .code-block:hover &,
+  .code-block:has(.copy-button:focus-visible) & {
+    @apply opacity-0;
   }
 }
 

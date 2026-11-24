@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -90,12 +91,20 @@ const (
 type Inlay struct {
 	Offset int
 	Text   string
+	// Trailing marks text at the end of a line, such as a diagnostic or
+	// a blame: the caret stays before it and a selection to the end of
+	// the line does not cover it, as for a suggestion.
+	Trailing bool
+	// Ellipsis shortens trailing text to the room left on its last display
+	// row rather than wrapping it onto another row. Empty disables elision.
+	Ellipsis string
 }
 
 // completions is the list of completions the editor shows.
 type completions struct {
 	shown    bool
 	at       int // where the word being completed starts
+	caret    int // where the caret after it is
 	items    []Completion
 	filtered []int
 	scores   []int
@@ -123,6 +132,19 @@ func (cc *completions) step(d int) {
 
 func (cc *completions) moved(cs []change) {
 	cc.at = mapOffset(cc.at, cs, biasLeft)
+	cc.caret = mapOffset(cc.caret, cs, biasRight)
+}
+
+// completing reports whether the completions are open, closing those
+// whose caret went elsewhere than by typing, as one a command adds on
+// another line: the word they complete is before it no more, and
+// accepting one would replace the text from the word to the caret.
+func (ed *editor) completing() bool {
+	cc := &ed.complete
+	if p := ed.primary(); cc.shown && (!p.empty() || p.head != cc.caret) {
+		cc.close()
+	}
+	return cc.open()
 }
 
 // wordStartBefore returns where the word before off starts.
@@ -156,6 +178,7 @@ func (ed *editor) requestCompletions(explicit bool) bool {
 		ed.complete.close()
 	}
 	if ed.complete.shown && ed.complete.at == start && len(ed.complete.items) > 0 {
+		ed.complete.caret = p.head
 		ed.complete.filter(prefix)
 		if len(ed.complete.filtered) > 0 || !explicit {
 			if len(ed.complete.filtered) == 0 {
@@ -164,7 +187,7 @@ func (ed *editor) requestCompletions(explicit bool) bool {
 			return true
 		}
 	}
-	ed.complete.at = start
+	ed.complete.at, ed.complete.caret = start, p.head
 	ed.complete.request = true
 	ed.complete.version = ed.view.version
 	ed.o.onCompletion(CompletionRequest{Offset: p.head, Prefix: prefix, Version: ed.view.version, Explicit: explicit})
@@ -183,7 +206,7 @@ func (ed *editor) showCompletions(at int, items []Completion) {
 	if at >= 0 && at <= p.head {
 		start = at
 	}
-	cc.shown, cc.at, cc.items, cc.request = true, start, items, false
+	cc.shown, cc.at, cc.caret, cc.items, cc.request = true, start, p.head, items, false
 	cc.filter(ed.slice(start, p.head))
 	if len(cc.filtered) == 0 {
 		cc.shown = false
@@ -426,6 +449,7 @@ func (ed *editor) dropSuggestion() {
 
 // setSuggestion shows text at off, which Tab inserts.
 func (ed *editor) setSuggestion(off int, text string) {
+	old := ed.view.keepInlays()
 	ed.view.inlays = slices.DeleteFunc(ed.view.inlays, func(in inlay) bool { return in.kind == 1 })
 	ed.suggestion = text
 	if text != "" {
@@ -436,19 +460,63 @@ func (ed *editor) setSuggestion(off int, text string) {
 		ed.view.inlays = append(ed.view.inlays, inlay{at: off, text: first, kind: 1})
 		sortInlays(ed.view.inlays)
 	}
+	ed.view.inlaysChanged(old)
 	ed.view.lines.m = nil
+	ed.view.invalidateStyledLines()
 }
 
 func sortInlays(in []inlay) {
 	slices.SortStableFunc(in, func(a, b inlay) int { return a.at - b.at })
 }
 
+// keepInlays returns a copy of the inlays, for inlaysChanged to compare
+// with once they are set.
+func (v *view) keepInlays() []inlay {
+	v.inlayScratch = append(v.inlayScratch[:0], v.inlays...)
+	return v.inlayScratch
+}
+
+// inlaysChanged forgets the widths of the lines whose inlays differ from
+// old's, both sorted by offset: an app may set the same inlays every
+// frame, which leaves the widths of lines out of view as they are.
+func (v *view) inlaysChanged(old []inlay) {
+	a, b := old, v.inlays
+	for len(a) > 0 || len(b) > 0 {
+		at := math.MaxInt
+		if len(a) > 0 {
+			at = a[0].at
+		}
+		if len(b) > 0 {
+			at = min(at, b[0].at)
+		}
+		i, j := 0, 0
+		for i < len(a) && a[i].at == at {
+			i++
+		}
+		for j < len(b) && b[j].at == at {
+			j++
+		}
+		if !slices.Equal(a[:i], b[:j]) {
+			line := v.text.LineOf(at)
+			v.measured.forget(line, line)
+		}
+		a, b = a[i:], b[j:]
+	}
+}
+
 // setInlays shows the inlay hints.
 func (ed *editor) setInlays(hints []Inlay) {
-	ed.view.inlays = slices.DeleteFunc(ed.view.inlays, func(in inlay) bool { return in.kind == 0 })
+	old := ed.view.keepInlays()
+	ed.view.inlays = slices.DeleteFunc(ed.view.inlays, func(in inlay) bool { return in.kind == 0 || in.kind == inlayTrailing })
 	for _, h := range hints {
-		ed.view.inlays = append(ed.view.inlays, inlay{at: h.Offset, text: h.Text})
+		kind := 0
+		if h.Trailing {
+			kind = inlayTrailing
+		}
+		ed.view.inlays = append(ed.view.inlays, inlay{at: h.Offset, text: h.Text, kind: kind, ellipsis: h.Ellipsis})
 	}
 	sortInlays(ed.view.inlays)
+	ed.view.inlaysChanged(old)
 	ed.view.lines.m = nil
+	ed.view.invalidateStyledLines()
 }

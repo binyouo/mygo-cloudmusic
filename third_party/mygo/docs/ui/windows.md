@@ -37,8 +37,34 @@ ui.Row(c).Height(max(bar.Height, 32)).Padding(0, bar.Right+12, 0, bar.Left+12).D
 })
 ```
 
+`bar.Bottom` is where the controls end, from the top edge: the bottom of
+the traffic lights on macOS, which `TrafficLightPosition` moves, and
+`bar.Height` on Linux and Windows. A sidebar that runs to the top of the
+window, with the traffic lights over it, starts its items below them:
+
+```go
+ui.Column(c).Width(220).Padding(bar.Bottom+8, 8, 8, 8).DragWindow().Children(func() {
+	ui.Text(c, "Inbox")
+})
+```
+
 In a `Frameless` window, `DragWindow` makes an element move the window, and
 a double click on it maximizes the window.
+
+A handle that means something else when double-clicked, as the empty part
+of a sidebar starting something new, takes the double click with
+`WindowDoubleClicked`, and still moves the window:
+
+```go
+side := ui.Scroll(c.Key("sidebar")).Grow(1).DragWindow()
+if side.WindowDoubleClicked() {
+	app.newItem()
+}
+```
+
+On Windows a finger on a touchscreen moves the window from a handle too,
+as the mouse does, but scrolls a handle that can scroll, as that sidebar
+once its items overflow it, or one inside a scroll container that can.
 
 To draw the window controls too, where the view wants them, add
 `HideWindowButtons: true` to the hidden title bar: the system's controls go,
@@ -230,6 +256,16 @@ on another space or covered by other windows; browsers as the tab or
 the window is out of sight; Linux (on X11) and Windows as it is
 minimized. `Tester.SetWindowHidden` hides and shows it in tests.
 
+`Window.IsVisible` answers another question: whether `Show` showed the
+window and `Hide` did not hide it since, so a minimized window is still
+visible. Work outside the view, as a goroutine that polls, learns that
+the window went out of sight from the view, which builds again as it
+does:
+
+```go
+paused.Store(c.WindowHidden()) // an atomic.Bool the goroutine reads
+```
+
 ## Closing
 
 A view can close its own window, from a button's click or its callback.
@@ -253,3 +289,21 @@ if ui.Button(c, "Done").Clicked() {
 
 An app whose windows all show native UI needs no webview: on Linux it needs
 GTK 3 alone, not WebKitGTK, and on Windows no WebView2 Runtime.
+
+On Windows its executable still has the code that would load WebView2,
+and that code's strings: `WebView2Loader.dll`, `msedgewebview2.exe`,
+`CreateCoreWebView2EnvironmentWithOptions`, `WEBVIEW2_USER_DATA_FOLDER`.
+For an unsigned executable, antivirus heuristics may take those for a
+signal. The build tag `mygo_nowebview` leaves WebView2 out of the Windows
+backend, and some 500 KB with it:
+
+```sh
+GOFLAGS=-tags=mygo_nowebview go tool mygo build -platform windows/amd64
+GOOS=windows go build -tags mygo_nowebview .
+```
+
+`mygo build` adds the tags of `GOFLAGS` to its own. Built with the tag, the
+app shows native UI only: `NewWindow` panics for a window that shows a page
+(one without `Content`), `Window.NewWebView` returns an error,
+`WebViewAvailable` reports false, and cookie calls fail. Other platforms
+ignore the tag.

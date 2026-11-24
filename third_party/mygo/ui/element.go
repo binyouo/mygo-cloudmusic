@@ -3,8 +3,8 @@ package ui
 import (
 	"math"
 	"strings"
-	"sync"
 
+	"github.com/egoist/mygo/internal/imagesrc"
 	"github.com/egoist/mygo/internal/platform"
 	"github.com/egoist/mygo/internal/scene"
 	"github.com/egoist/mygo/internal/text"
@@ -193,6 +193,15 @@ const (
 	flagClip = flagClipX | flagClipY
 )
 
+// builtStyle is what a styleFn or a Transition may change of an element
+// as it paints: its colors, opacity and shadows.
+type builtStyle struct {
+	bg, border, text Color
+	opacity          float32
+	opacitySet       bool
+	shadows          []shadow
+}
+
 type shadow struct {
 	x, y, blur, spread float32
 	color              Color
@@ -277,47 +286,76 @@ const (
 // into the comparison there; TestLayoutInputs keeps node's other fields
 // out of layout.
 type layoutStyle struct {
-	// First, as what changes most, so that comparing finds it soonest.
-	text string
-
+	// First, as what changes most, so that comparing finds it soonest, and
+	// as what a walk reads: the text of a text element, its kind and its
+	// own alignment, then how it lays its own children out — a container
+	// reads those of itself as it lays out, and every container is a child
+	// of another, so they stand with the text in the element's second line
+	// rather than down in its cold end.
+	text                 string
 	kind                 kind
-	row                  bool
-	wrap                 bool
+	self                 Align
+	row, wrap            bool
 	reverse, wrapReverse bool
-	// dir is the element's direction (dirRTL, dirSet), and logical which
-	// of its horizontal edges were set by their start or end
-	// (direction.go).
-	dir, logical           uint8
-	justify, align, self   Align
-	alignContent           Align
-	gapX, gapY             float32
+	// dir is the element's direction (dirRTL, dirSet) (direction.go).
+	dir            uint8
+	justify, align Align
+	alignContent   Align
+	grid           bool
+	gapX, gapY     float32
+
+	// What the layout reads of every child a container walks, in the lines it
+	// reads them in: a container of a hundred thousand children reads all of
+	// these of each of them, so they come next, packed into the second,
+	// third and fourth cache lines of the element, under the tree links, the
+	// flags and the box that the first holds.
+	margin                 [4]float32 // Auto for auto margins
 	pad                    [4]float32 // top, right, bottom, left
 	border                 [4]float32 // top, right, bottom, left
-	margin                 [4]float32 // Auto for auto margins
 	width, height          length
 	minW, minH, maxW, maxH bound
 	grow, shrink           float32
 	basis                  length
-	inset                  [4]length
 	aspect                 float32
-	grid                   bool
-	justifyItems           Align // of a grid
-	cell                   gridCell
-	justifySelf            Align
+
+	// What no walk of a container's children reads comes last, in an order
+	// that leaves no padding in it: what is eight bytes wide first, where it
+	// needs none to stand, then what is one.
+	maxLines int
+	// cell is the element's place in its container's grid (gridCell), which
+	// only that container's own layout reads.
+	cell gridCell
+	// ellipsis is what ends a line of text that did not fit (Ellipsis).
+	ellipsis string
+	// inset is how far out of the flow the element sits (Absolute, Attach),
+	// from each edge of its container.
+	inset [4]length
+	// logical says which of its horizontal edges were set by their start or
+	// end (direction.go): the view sets it, the layout reads none of it.
+	logical uint8
+
+	justifyItems Align // of a grid
+	justifySelf  Align
 	// sticky holds the element in its scroll container by its insets
 	// (Sticky), which then do not move it as relative positioning does.
 	sticky bool
 	// baselines is set on the row of a field in a form, which lines up
 	// the first lines of its label and control.
 	baselines bool
+	// absoluteChild is set on a container with a child out of its flow
+	// (Absolute, Attach), which layoutAbsolute places: without one it has
+	// no walk to make. It is set as the child is added or taken out of the
+	// flow, and left set: taking a child out of the flow again only costs
+	// the walk.
+	absoluteChild bool
 
-	maxLines   int
 	single     bool
 	noWrap     bool
 	balance    bool
 	pretty     bool
 	keepSpaces bool
-	ellipsis   string
+	middle     bool
+	cutStart   bool
 }
 
 // Element is a node of a frame's user interface. The functions that create
@@ -332,25 +370,73 @@ type layoutStyle struct {
 // Common input queries return false or zero for nil or cleared elements;
 // this does not make references to reused storage safe.
 type node struct {
+	// What the layout reads and writes of an element, in the lines it
+	// touches: a tree of a hundred thousand elements is walked again and
+	// again a frame, and each of them is read in as few lines as it can
+	// be.
+	c     *context
+	flags uint32
+	// special tells that the element lays out by more than what it is
+	// built with: a list, a toolbar, a form or a table's columns. The
+	// layout looks for those on every element it lays out, and this tells
+	// it that there are none to look for.
+	special bool
+	// lay says what the layout cache may do with the element
+	// (layOwner, layReuse), and laid when layoutBox last laid it out, in
+	// engine.laySeq.
+	lay uint8
+	// hidden takes it and the elements inside it out of the frame, as
+	// CSS's display: none does (Hidden): the layout gives it no room, and
+	// it paints, takes input and reads to assistive technology as an
+	// invisible element does, while what is inside it keeps its state.
+	// The layout reads it of every child it walks, next to the flags it
+	// reads there too, so that the walk reads one cache line.
+	hidden bool
+	// insetSet says the element has insets, which move it out of the flow
+	// of its container: the layout reads this of every child it places,
+	// in the line it writes the box in, and not in the line the insets
+	// are in.
+	insetSet bool
+	laid     uint64
+
+	parent *node
+	first  *node
+	next   *node
+
+	// The layout's results, in DIPs relative to the window. They are here,
+	// between the tree links and the style, so that a walk of a container's
+	// children reads the box it gives each of them in the lines it reads
+	// what it lays them out by, and not in a line of its own.
+	x, y, w, h float32
+
+	st   *state
+	last *node
+	// hold is the element's entry in the engine's holds (0 for none):
+	// what a measuring pass resolved for its in-flow children, which a
+	// commit pass at the same size uses instead of building them again.
+	hold int32
+
+	// layoutStyle holds what lays the element out. What the layout reads of
+	// every child a container walks comes first in it — the text, the kind
+	// and the alignment, then how a container lays its own children out and
+	// the sizes it lays the child out by — so that a walk of a container's
+	// children reads them next to the tree links, the flags and the box
+	// above, in the lines after them.
+	layoutStyle
+
+	// measured is what was measured of the element: its max-content and
+	// min-content widths, and its heights at widths.
+	measured
+
 	epoch      uint64
 	key        any
 	valueInput func(*node)
-	c          *context
 	id         uint64
-	flags      uint32
-	parent     *node
-	first      *node
-	last       *node
-	next       *node
 	nchild     int
 	depth      int
-	st         *state
 	// track is the ScrollState of a scroll container (TrackScroll).
 	track *ScrollState
-
-	// layoutStyle holds what lays the element out, and cols and rows
-	// the tracks of a grid.
-	layoutStyle
+	// cols and rows are the tracks of a grid.
 	cols, rows []Track
 
 	// Visual geometry, composed after layout.
@@ -384,15 +470,13 @@ type node struct {
 	// backface hides it while its 3D transform turns its back to the
 	// viewer (BackfaceHidden).
 	backface bool
-	// hidden takes it and the elements inside it out of the frame, as
-	// CSS's display: none does (Hidden): the layout gives it no room, and
-	// it paints, takes input and reads to assistive technology as an
-	// invisible element does, while what is inside it keeps its state.
-	hidden bool
 	// ignoreInput lets the pointer and the keyboard pass it and the
 	// elements inside it by, which still show and read to assistive
 	// technology (IgnoreInput).
 	ignoreInput bool
+	// handleDoubleClick marks a DragWindow handle whose double click the
+	// view takes (WindowDoubleClicked) rather than the window.
+	handleDoubleClick bool
 	// accessHidden leaves it and the elements inside it out of what
 	// assistive technology reads, while they still show and take input
 	// (AccessHidden).
@@ -401,6 +485,9 @@ type node struct {
 	// inside it are unavailable, while they keep the focus, the pointer
 	// and their look (AccessDisabled).
 	accessDisabled bool
+	// stateRead tells that the build read or bound the element's state or
+	// identity before Key ran.
+	stateRead bool
 
 	// Painting.
 	bg          Color
@@ -440,6 +527,11 @@ type node struct {
 	// can skip it.
 	styleFn      func(e *node)
 	paintAfterFn func(p *Painter, r Rect)
+	// faces are the backgrounds a button's styleFn (styleButtonFace)
+	// picks from as it paints: as built, hovered and pressed. They are
+	// the element's, not captured by a closure, so that building a button
+	// allocates nothing.
+	faces [3]Color
 
 	// Input the element takes itself (HandleInput), and where the caret of
 	// the text it takes is (TextCaret).
@@ -468,7 +560,8 @@ type node struct {
 	// in place of the window's (Themed).
 	themed  *Theme
 	image   *Bitmap
-	svg     *SVG // of an Icon, or an Image in its own colors
+	texture imagesrc.Frames // of an Image showing a native.Texture
+	svg     *SVG            // of an Icon, or an Image in its own colors
 	webView NativeWebView
 	// maximizeButton marks the window's maximize button (MaximizeButton).
 	maximizeButton bool
@@ -523,6 +616,9 @@ type node struct {
 	// accFill describes the element to assistive technology further, as
 	// a code editor its text and selection.
 	accFill func(n *platform.AccessNode)
+	// accChildren adds nodes of its own inside the element's, as a diff
+	// viewer the lines it shows (AccessChildren).
+	accChildren func(parent *platform.AccessNode, add func(platform.AccessNode))
 	// accStep is how far the keys move the value of a range.
 	accStep float64
 	// keyShortcuts are the keys that press or focus the element, as the
@@ -534,13 +630,13 @@ type node struct {
 	accGrid [4]int32
 	accSet  [2]int32
 
-	// Layout results, in DIPs relative to the window.
-	x, y, w, h float32
 	// contentW and contentH are the size of a scroll container's content.
 	contentW, contentH float64
 	// barInset moves a scroll container's scroll bars in from its edges
-	// (ScrollbarInsets): top, right, bottom, left.
+	// (ScrollbarInsets): top, right, bottom, left. barStyle is how they
+	// look (ScrollbarStyle), its zero fields following the theme's.
 	barInset [4]float32
+	barStyle *ScrollbarStyle
 	// scrollBase is the offset of a List's content that its rows were
 	// placed at: placing moves them by how far the offset moved since.
 	scrollBase float64
@@ -548,18 +644,18 @@ type node struct {
 	// listRow is set on the elements holding its rows, rowIndex their row.
 	// rowsOf is the list whose rows the element holds for assistive
 	// technology, and takes the keys for: the list, or its Table.
-	// popover is the anchor of the panel of a popover. hideScrollbars and
-	// keepScrollbars are the element's Scrollbars and KeepScrollbars, and
-	// barsFrom the element whose they are instead, as a table's for the
-	// list of its rows.
+	// popover is the anchor of the panel of a popover. barsFrom supplies
+	// the scroll bar settings, as a table does for the list of its rows.
 	popover        *node
 	list           *listFrame
 	listRow        bool
-	hideScrollbars bool
 	keepScrollbars bool
-	barsFrom       *node
-	rowIndex       int
-	rowsOf         *listFrame
+	// hiddenScrollbars holds the axes hidden by ScrollbarAxes and the
+	// independent Scrollbars(false) override.
+	hiddenScrollbars uint32
+	barsFrom         *node
+	rowIndex         int
+	rowsOf           *listFrame
 	// snap is how the element, a scroll container, snaps (ScrollSnap), and
 	// snapAlign how the element lines up with the container around it
 	// that does (SnapAlign): Start, Center or End plus one, horizontally
@@ -605,10 +701,13 @@ type node struct {
 	// Invalid). describedBy are the elements whose text describes it too
 	// (DescribedBy), and errorMessage those holding its error, read while
 	// it is invalid (ErrorMessage).
-	description  string
-	invalid      bool
-	describedBy  []*node
-	errorMessage []*node
+	description string
+	invalid     bool
+	// readOnly and multiline are what a text box with no editor of
+	// MyGo's reports (ReadOnly, Multiline).
+	readOnly, multiline bool
+	describedBy         []*node
+	errorMessage        []*node
 	// field is set on a Field, form on a Form, whose layout makes its
 	// labels as wide as the widest.
 	field *fieldParts
@@ -634,17 +733,14 @@ type node struct {
 	gridFit    *gridFit
 	// roleDescription names the element's role to assistive technology
 	// (RoleDescription), controls are the elements it controls
-	// (Controls), and hasPopup the kind of popup it opens (HasPopup).
+	// (Controls), and hasPopup the kind of popup it opens (HasPopup),
+	// which popupSet marks the app as having said, over a menu button's
+	// PopupMenu.
 	roleDescription string
 	controls        []*node
 	hasPopup        Popup
+	popupSet        bool
 	tl              *text.Layout
-	measured
-	// lay says what the layout cache may do with the element
-	// (layOwner, layReuse), and laid when layoutBox last laid it out, in
-	// engine.laySeq.
-	lay  uint8
-	laid uint64
 	// leaving marks a copy of an element gone, which its exit transition
 	// animates (1 if it was in its parent's flow, 2 if absolute), and
 	// ghosts an element holding such copies; lift one flying with a
@@ -672,6 +768,13 @@ type node struct {
 	// serial is the order the pass made the element in: of overlays, the
 	// one made last shows on top.
 	serial int32
+	// The engine allocates elements from chunks of 32 (context.go), strided
+	// by the element's size, so that size is a whole number of cache lines:
+	// each element of a chunk then begins on one, and a walk of a
+	// container's children reads a child's box and style in the same lines
+	// whichever child it is on, rather than in one more line of most of
+	// them.
+	_ [2]uint32
 }
 
 // measure is the height of an element at a width (naturalHeight).
@@ -875,12 +978,14 @@ func (e *node) Children(fn func()) *node {
 // Key identifies the element among its siblings by k instead of by its
 // position, so that its state (focus, scrolling, text being edited, …)
 // follows it when the siblings before it change. Call it right after
-// creating the element. Widgets that handle their input as they are
-// created (Checkbox, Radio, Switch, Slider, Select, Link, List, TextInput
-// and TextArea) cannot take a key, and Key panics: give it to an element
-// around them instead, as Row(c).Key(k).Children(...) does. Siblings need
-// keys of their own: two elements with one key share one state, which
-// MyGo logs, and a Tester panics for.
+// creating the element, before reading its state, or pass it with
+// Context.Key before construction. Widgets that handle their input as they
+// are created (Checkbox, Radio, Switch, Slider, Select, Link, List,
+// TextInput and TextArea) cannot take a key, and Key panics: use
+// Context.Key before construction instead. Calling Key after the
+// element's state was read logs a warning in apps and panics in Tester.
+// Siblings need keys of their own: two elements with one key share one
+// state, which MyGo logs, and a Tester panics for.
 func (e *node) Key(k any) *node {
 	if e.widget != "" {
 		panic("ui: Key on a " + e.widget + ", whose state was initialized: use Context.Key before construction")
@@ -980,32 +1085,68 @@ func (e *node) MarginY(v float32) *node { e.margin[0], e.margin[2] = v, v; retur
 //	ui.Scroll(c).Fill().Padding(64, 16, 16).ScrollbarInsets(64, 0, 0)
 func (e *node) ScrollbarInsets(v ...float32) *node { e.barInset = edges(v); return e }
 
+// ScrollbarStyle styles this scroll container's scroll bars, as a theme's
+// ScrollbarStyle does every scroll bar: their track and thumb colors, the
+// widths of their bars and thumbs, their corners and shortest thumb. Its
+// zero fields follow the theme's, so leaving it out draws as the theme
+// does; it applies to Scroll, ScrollHorizontal, ScrollBoth, List and Table,
+// and is not inherited.
+//
+//	// As VS Code's editor: a 14 DIP square thumb in a 14 DIP bar, flush
+//	// with its ends.
+//	ui.Scroll(c).ScrollbarStyle(ui.ScrollbarStyle{
+//		TrackWidth: 14, ThumbWidth: 14, Square: true, Flush: true, MinLength: 20,
+//		Thumb: ui.RGBA(121, 121, 121, 0.4),
+//		Hover: ui.RGBA(100, 100, 100, 0.7),
+//		Active: ui.RGBA(191, 191, 191, 0.4),
+//	})
+func (e *node) ScrollbarStyle(s ScrollbarStyle) *node { e.barStyle = &s; return e }
+
 // Scrollbars controls the overlay indicators and their pointer hit targets on
 // this scroll container. They show on hover by default. With false, scrolling
 // by wheel, TrackScroll, keyboard focus and accessibility remains available.
 // It applies to Scroll, ScrollHorizontal, ScrollBoth, List and Table, not the
 // internal indicators of custom controls such as a code editor (whose State
 // has NoScrollbars), and is not inherited.
-func (e *node) Scrollbars(visible bool) *node { e.hideScrollbars = !visible; return e }
+func (e *node) Scrollbars(visible bool) *node {
+	if visible {
+		e.hiddenScrollbars &^= hideAllScrollbars
+	} else {
+		e.hiddenScrollbars |= hideAllScrollbars
+	}
+	return e
+}
+
+// This bit is separate from flagScrollX and flagScrollY in hiddenScrollbars.
+const hideAllScrollbars = 1
+
+// ScrollbarAxes controls the horizontal and vertical indicators and their
+// pointer hit targets independently. Both are enabled by default, showing
+// while the container overflows and is hovered, or as KeepScrollbars says.
+// Hiding the axis being dragged ends that drag. Wheel, TrackScroll, keyboard
+// focus and accessibility still scroll both axes.
+// Scrollbars(false) hides both regardless of call order; Scrollbars(true)
+// preserves the axis settings. It applies where Scrollbars does and is not
+// inherited. Omitting it in the next build enables both axes again.
+func (e *node) ScrollbarAxes(horizontal, vertical bool) *node {
+	e.hiddenScrollbars &= hideAllScrollbars
+	if !horizontal {
+		e.hiddenScrollbars |= flagScrollX
+	}
+	if !vertical {
+		e.hiddenScrollbars |= flagScrollY
+	}
+	return e
+}
 
 // KeepScrollbars keeps this scroll container's scroll bars showing while its
 // content overflows it, with the pointer over it or not, rather than only
 // while it is hovered or a bar is dragged: a view whose place in its content
 // matters, as a long diff filling a window, shows how far down it is. The
-// bars look and take presses as they do on hover; Scrollbars(false) hides
-// them still. It applies where Scrollbars does (a code editor's State has
-// KeepScrollbars), and is not inherited.
+// bars look and take presses as they do on hover; Scrollbars(false) and
+// ScrollbarAxes still hide them. It applies where Scrollbars does (a code
+// editor's State has KeepScrollbars), and is not inherited.
 func (e *node) KeepScrollbars(keep bool) *node { e.keepScrollbars = keep; return e }
-
-// scrollbars returns whether the element hides its scroll bars
-// (Scrollbars(false)) and whether it keeps them showing (KeepScrollbars),
-// as it says or the element it takes them from does (barsFrom).
-func (e *node) scrollbars() (hide, keep bool) {
-	if e.barsFrom != nil {
-		e = e.barsFrom
-	}
-	return e.hideScrollbars, e.keepScrollbars
-}
 
 // Width sets the width in DIPs.
 func (e *node) Width(v float32) *node { e.width = px(v); return e }
@@ -1095,23 +1236,57 @@ func (e *node) Center() *node { e.justify, e.align = Center, Center; return e }
 // its siblings. As in CSS, that box is inside the parent's border but holds
 // its padding: Top(0) puts the element just below the border, whatever the
 // padding.
-func (e *node) Absolute() *node { e.flags |= flagAbsolute; return e }
+func (e *node) Absolute() *node { e.markAbsolute(); return e }
+
+// markAbsolute takes the element out of its parent's layout and tells the
+// parent, which then walks its children for the ones to place.
+func (e *node) markAbsolute() {
+	e.flags |= flagAbsolute
+	if p := e.parent; p != nil && !p.absoluteChild {
+		// The parent's own: it walks its children for the ones out of the
+		// flow, and it does so from now on. A toolbar collapsing its
+		// controls and a list pinning a row take a child out of the flow
+		// after the build.
+		journalKeep(e.c.rt, &p.absoluteChild)
+		p.absoluteChild = true
+	}
+}
 
 // Top, Right, Bottom and Left place an Absolute element. On an element in
 // its parent's layout, they move it from where the layout put it, as CSS's
 // relative positioning does, without moving its siblings.
-func (e *node) Top(v float32) *node    { e.inset[0] = px(v); return e }
-func (e *node) Right(v float32) *node  { e.inset[1] = px(v); e.unlog(1, logInset); return e }
-func (e *node) Bottom(v float32) *node { e.inset[2] = px(v); return e }
-func (e *node) Left(v float32) *node   { e.inset[3] = px(v); e.unlog(3, logInset); return e }
+func (e *node) Top(v float32) *node { e.inset[0] = px(v); e.insetSet = true; return e }
+func (e *node) Right(v float32) *node {
+	e.inset[1] = px(v)
+	e.insetSet = true
+	e.unlog(1, logInset)
+	return e
+}
+func (e *node) Bottom(v float32) *node { e.inset[2] = px(v); e.insetSet = true; return e }
+func (e *node) Left(v float32) *node {
+	e.inset[3] = px(v)
+	e.insetSet = true
+	e.unlog(3, logInset)
+	return e
+}
 
 // TopPercent, RightPercent, BottomPercent and LeftPercent place the
 // element as Top, Right, Bottom and Left do, by a percentage of the
 // parent's height or width.
-func (e *node) TopPercent(p float32) *node    { e.inset[0] = percent(p); return e }
-func (e *node) RightPercent(p float32) *node  { e.inset[1] = percent(p); e.unlog(1, logInset); return e }
-func (e *node) BottomPercent(p float32) *node { e.inset[2] = percent(p); return e }
-func (e *node) LeftPercent(p float32) *node   { e.inset[3] = percent(p); e.unlog(3, logInset); return e }
+func (e *node) TopPercent(p float32) *node { e.inset[0] = percent(p); e.insetSet = true; return e }
+func (e *node) RightPercent(p float32) *node {
+	e.inset[1] = percent(p)
+	e.insetSet = true
+	e.unlog(1, logInset)
+	return e
+}
+func (e *node) BottomPercent(p float32) *node { e.inset[2] = percent(p); e.insetSet = true; return e }
+func (e *node) LeftPercent(p float32) *node {
+	e.inset[3] = percent(p)
+	e.insetSet = true
+	e.unlog(3, logInset)
+	return e
+}
 
 // Anchor is a point of a box: a corner, the middle of a side, or the
 // center.
@@ -1206,7 +1381,7 @@ func (a Anchor) downFlipped() Anchor {
 // Right, Bottom and Left then move it from there; the element keeps its
 // own size.
 func (e *node) Attach(at, self Anchor) *node {
-	e.flags |= flagAbsolute
+	e.markAbsolute()
 	e.attach = attachment(1 + min(at, AnchorBottomEnd)*15 + min(self, AnchorBottomEnd))
 	return e
 }
@@ -1230,7 +1405,7 @@ func (e *node) AttachTo(target *node, at, self Anchor) *node {
 	if target == nil {
 		return e
 	}
-	e.flags |= flagAbsolute
+	e.markAbsolute()
 	e.attach = attachment(1 + min(at, AnchorBottomEnd)*15 + min(self, AnchorBottomEnd))
 	e.popover = target
 	if e.dir&dirSet == 0 {
@@ -1301,8 +1476,23 @@ func (e *node) KeepFocus() *node { e.flags |= flagKeepFocus; return e }
 // as it builds the element's node, only while assistive technology reads
 // the window: what costs too much to give every frame, as the text of a
 // large document. The node is a type internal to this module, so only
-// its packages describe elements so, as package ui/editor does.
+// its packages describe elements so, as package ui/editor does. The
+// elements inside a text field described so show to assistive technology
+// too, as those of other text fields do not.
 func (e *node) Access(fn func(n *platform.AccessNode)) *node { e.accFill = fn; return e }
+
+// AccessChildren has fn add nodes of its own inside the element's, after
+// Access's fn described it and before the elements inside it, only while
+// assistive technology reads the window: what stands for parts of the
+// element that are no elements, as the lines a diff viewer shows, each
+// read as added or deleted. fn reads the element's node, parent, and adds
+// each node with add, whose Parent it sets; their IDs must be no
+// element's, and the same for the same part from frame to frame. Actions
+// on them do nothing. As Access, it takes the module's internal type.
+func (e *node) AccessChildren(fn func(parent *platform.AccessNode, add func(platform.AccessNode))) *node {
+	e.accChildren = fn
+	return e
+}
 
 // AspectRatio makes the height the width divided by r.
 func (e *node) AspectRatio(r float32) *node { e.aspect = r; return e }
@@ -1780,16 +1970,12 @@ func (e *node) TextShadow(x, y, blur float32, c Color) *node {
 // sets them, which differs between systems.
 func (e *node) TabSize(n float32) *node {
 	if n > 0 {
-		linkTabs.Do(text.Shared().UseTabSize)
+		e.c.rt.text.UseTabSize()
 	}
 	e.ts.tabSize = max(n, 0)
 	e.ts.set |= setTabSize
 	return e
 }
-
-// linkTabs lets the text system set tab stops once an element sets a tab
-// size, so that apps that never do not link it.
-var linkTabs sync.Once
 
 // Strikethrough strikes text through.
 func (e *node) Strikethrough() *node { e.ts.strike = true; e.ts.set |= setStrike; return e }
@@ -1825,8 +2011,12 @@ func (e *node) FontFeatures(features ...string) *node {
 //
 //	ui.Text(c, "直").Lang("ja")
 //
-// "" takes the language of the elements around it. Browsers draw text in
-// the page's language whatever the element's.
+// Korean text ("ko", "ko-KR") breaks its lines between words, at spaces
+// and after punctuation, as Korean is written and as CSS's word-break:
+// keep-all has it, rather than between any two syllables; a word longer
+// than a line still breaks within it. "" takes the language of the
+// elements around it. Browsers draw text in the page's language whatever
+// the element's.
 func (e *node) Lang(tag string) *node {
 	e.ts.lang = tag
 	e.ts.set |= setLang
@@ -1863,14 +2053,10 @@ func (e *node) Balance() *node { e.balance = true; return e }
 // paragraph of body text then ends on more than one word, at no cost to
 // the rest of its lines; Balance balances them all instead.
 func (e *node) Pretty() *node {
-	linkPretty.Do(text.Shared().UsePretty)
+	e.c.rt.text.UsePretty()
 	e.pretty = true
 	return e
 }
-
-// linkPretty lets the text system wrap text pretty once an element or a
-// TextShape asks for it, so that apps that never do not link it.
-var linkPretty sync.Once
 
 // PreserveSpaces keeps the spaces the element's text ends its lines with,
 // and a text of only spaces, with their advance, as CSS's white-space:
@@ -1882,6 +2068,30 @@ func (e *node) PreserveSpaces() *node { e.keepSpaces = true; return e }
 // Ellipsis sets what ends text that MaxLines or SingleLine cuts, "…" by
 // default.
 func (e *node) Ellipsis(s string) *node { e.ellipsis = s; return e }
+
+// TruncateMiddle puts the ellipsis of text that SingleLine or MaxLines
+// cuts in the middle of its last line rather than at its end, so that it
+// keeps both its start and its end, about as wide each, in the room
+// layout gives it: a list of files shows "src/components/…/picker.go",
+// whose folder and file's name both show. TruncateStart, with it, cuts
+// the start instead.
+func (e *node) TruncateMiddle() *node {
+	e.c.rt.text.UseTruncateMiddle()
+	e.middle = true
+	return e
+}
+
+// TruncateStart puts the ellipsis of text that SingleLine or MaxLines
+// cuts at the start of its last line rather than at its end, so that it
+// keeps as much of its end as fits the room layout gives it: a list of
+// files shows "…/theme/picker.go", whose file's name and nearest folders
+// show where its start does not matter. With TruncateMiddle too, the
+// start is cut.
+func (e *node) TruncateStart() *node {
+	e.c.rt.text.UseTruncateStart()
+	e.cutStart = true
+	return e
+}
 
 // Label names the element for assistive technology and for finding it in
 // tests, when its text does not.
@@ -1931,6 +2141,15 @@ func (e *node) hasState() bool {
 	return e != nil && e.c != nil && e.c.rt != nil && e.st != nil && !e.c.rt.closed
 }
 
+// markStateRead records that the build read or bound the element's state
+// or identity, so a later Key reports it. Reads during painting or
+// journaling leave stateRead unset.
+func (e *node) markStateRead() {
+	if e != nil && e.c != nil && e.c.rt != nil && !e.c.rt.journal.on && !e.c.rt.painting {
+		e.stateRead = true
+	}
+}
+
 // Focusable lets the element take the keyboard focus, by a click or Tab.
 func (e *node) Focusable() *node { e.flags |= flagFocusable; return e }
 
@@ -1955,6 +2174,22 @@ func (e *node) TabStop(stop bool) *node {
 // title bar of a frameless window. A double click on it maximizes the
 // window, as on a title bar.
 func (e *node) DragWindow() *node { e.flags |= flagDragWindow; return e }
+
+// WindowDoubleClicked reports a double click on a DragWindow handle,
+// which then no longer maximizes the window: the view does what a double
+// click there means to it, as a sidebar starting something new. The
+// handle still moves the window, which DoubleClicked would stop.
+func (e *node) WindowDoubleClicked() bool {
+	if !e.hasState() {
+		return false
+	}
+	e.handleDoubleClick = true
+	if e.disabled() || e.st.doubleClicks == 0 {
+		return false
+	}
+	e.c.rt.consumed = true
+	return true
+}
 
 // MaximizeButton marks the element as the window's maximize button, which
 // the view draws in a window with a hidden title bar without the system's
@@ -2077,7 +2312,14 @@ func (e *node) add(child *node) {
 	e.forgetIntrinsic()
 	child.parent = e
 	child.depth = e.depth + 1
+	if child.flags&flagAbsolute != 0 && !e.absoluteChild {
+		// Taken out of the flow before it was added, as an overlay's is,
+		// which the frame adds to the root as it lays out.
+		journalKeep(e.c.rt, &e.absoluteChild)
+		e.absoluteChild = true
+	}
 	if child.zIndex != 0 {
+		journalKeep(e.c.rt, &e.zOrder)
 		e.zOrder = true // set before it was added, as on a copy leaving (ghostOf)
 	}
 	if e.last == nil {

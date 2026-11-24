@@ -1,0 +1,11 @@
+{
+  "mobile": {
+    "id": "cloudmusic_playback",
+    "ios": {
+      "sources": ["ios/*.swift"],
+      "class": "CloudMusicPlaybackPlugin",
+      "frameworks": ["AVFoundation", "MediaPlayer"],
+      "infoPlist": {"UIBackgroundModes": ["audio"]}
+    }
+  }
+}

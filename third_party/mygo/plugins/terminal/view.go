@@ -171,6 +171,17 @@ type view struct {
 	scrollbar vt.Scrollbar
 	lines     []rowCache
 	shaped    lru
+	// spare holds the rows of the frame before, whose slices the next
+	// frame's rows take (updateRows); taken marks the rows of the last
+	// frame the next has taken, and key, keyStyles and graphemes hold a
+	// row's key as it is written (rowKey).
+	spare     []rowCache
+	taken     []bool
+	key       []byte
+	keyStyles []uint16
+	graphemes []rune
+	// shapeKey holds the key of text to shape as it is written (shape).
+	shapeKey []byte
 	// images are the placements of images that show, and bitmaps their
 	// images' (readImages).
 	images  []shownImage
@@ -203,7 +214,10 @@ type view struct {
 	// the bar, as of its last move, and barHover as of the last build;
 	// inView that the pointer was over the terminal, which shows the bar.
 	barHeld, overBar, barHover, inView bool
-	barGrab                            float32
+	// barStyle is how the scroll bar looks, the theme's as of the last
+	// paint.
+	barStyle ui.ScrollbarStyle
+	barGrab  float32
 	// hover is the link Command is held over, which a click opens and
 	// which shows underlined, hoverLink what it opens and hoverPath
 	// whether that is a file path (HoveredLink); linkPress: the primary
@@ -268,7 +282,9 @@ type pendingKey struct {
 func (v *view) build(c *ui.Context, e ui.Element) {
 	t := v.t
 	if files := e.DroppedFiles(); len(files) > 0 {
-		t.dropFiles(files)
+		if on := t.opts.OnDrop; on == nil || !on(files) {
+			t.dropFiles(files)
+		}
 	}
 	v.lang = c.Locale()
 	dark := c.Theme().Dark
@@ -907,6 +923,9 @@ func (v *view) encodeKey(k vt.KeyEvent, press bool) bool {
 	v.keys.Sync(t.term, t.opts.OptionAsAlt)
 	b := v.keys.Encode(k)
 	if len(b) == 0 {
+		b = controlKey(k)
+	}
+	if len(b) == 0 {
 		return false
 	}
 	t.in.push(append([]byte(nil), b...))
@@ -915,6 +934,25 @@ func (v *view) encodeKey(k vt.KeyEvent, press bool) bool {
 		t.term.SetSelection(nil)
 	}
 	return true
+}
+
+// controlKeys are the Control keys Ghostty's legacy encoding leaves to
+// fixterms' CSI u, which it makes of a key's text only: these keys come
+// without text, as Control keys do, and it sends nothing for them. xterm
+// and most terminals send their C0 controls, which shells and editors
+// read: Ctrl+I is Tab, Ctrl+M Enter and Ctrl+[ Esc.
+var controlKeys = map[vt.Key]string{vt.KeyI: "\t", vt.KeyM: "\r", vt.KeyBracketLeft: "\x1b"}
+
+// controlKey returns the C0 control of a Control key the encoder sent
+// nothing for, as other Control keys send theirs (Ctrl+C is ^C). The
+// Kitty keyboard protocol encodes these keys itself, so they never come
+// here with it.
+func controlKey(k vt.KeyEvent) []byte {
+	c, ok := controlKeys[k.Key]
+	if !ok || k.Action == vt.KeyRelease || k.Mods != vt.ModCtrl || k.Text != "" {
+		return nil
+	}
+	return []byte(c)
 }
 
 // sendText sends text that is no key, as of an input method.
@@ -1153,16 +1191,46 @@ func (v *view) pointerEvent(ev ui.InputEvent) bool {
 	return false
 }
 
-// linkSpan is the cells of a link in a row of the viewport, columns x0 up
-// to x1; the zero span is no link.
-type linkSpan struct{ row, x0, x1 int }
+// linkSpan is the cells of a link in the viewport: from column x0 of row
+// up to column x1 of row last, over the rows between in full, as a link
+// soft-wraps from one row onto the next; the zero span is no link.
+type linkSpan struct{ row, x0, x1, last int }
 
-func (s linkSpan) on() bool { return s.x1 > s.x0 }
+func (s linkSpan) on() bool { return s.last > s.row || s.x1 > s.x0 }
+
+// cells returns the columns of the span on row r, a up to b.
+func (s linkSpan) cells(r, cols int) (a, b int) {
+	a, b = 0, cols
+	if r == s.row {
+		a = s.x0
+	}
+	if r == s.last {
+		b = s.x1
+	}
+	return a, b
+}
+
+// spanOf is the span of the cells a up to b, counted across the viewport
+// row after row.
+func (v *view) spanOf(a, b int) linkSpan {
+	return linkSpan{row: a / v.cols, x0: a % v.cols, x1: (b-1)%v.cols + 1, last: (b - 1) / v.cols}
+}
+
+// wraps reports whether row r of the viewport soft-wraps into the next;
+// t.mu is held.
+func (v *view) wraps(r int) bool {
+	if r < 0 || r >= v.rows-1 {
+		return false
+	}
+	_, wrap := v.t.term.Row(r)
+	return wrap
+}
 
 // HoveredLink returns the link Command (Control elsewhere) is held over
 // in the view, which a click opens and which shows underlined, as
 // Options.OpenLink takes it; whether it is a file path; and the rectangle
-// of its cells in DIPs, relative to the view. It returns "" over no link,
+// of its cells in DIPs, relative to the view: around the rows it wraps
+// over, for one that does. It returns "" over no link,
 // or while no view shows the terminal. An app shows a preview of a link
 // with it, over the view: read it in the view function, after View.
 func (t *Terminal) HoveredLink() (link string, path bool, at ui.Rect) {
@@ -1174,11 +1242,15 @@ func (t *Terminal) HoveredLink() (link string, path bool, at ui.Rect) {
 	}
 	cw, ch := float32(v.cellW)/v.scale, float32(v.cellH)/v.scale
 	h := v.hover
+	x0, x1 := h.x0, h.x1
+	if h.last > h.row {
+		x0, x1 = 0, v.cols // around the rows it wraps over
+	}
 	return v.hoverLink, v.hoverPath, ui.Rect{
-		X: float32(v.ox)/v.scale + float32(h.x0)*cw,
+		X: float32(v.ox)/v.scale + float32(x0)*cw,
 		Y: float32(v.oy)/v.scale + float32(h.row)*ch,
-		W: float32(h.x1-h.x0) * cw,
-		H: ch,
+		W: float32(x1-x0) * cw,
+		H: float32(h.last-h.row+1) * ch,
 	}
 }
 
@@ -1203,8 +1275,12 @@ func (v *view) overScrollbar(x, y float32) bool {
 	if v.barHeld {
 		return true
 	}
+	width := v.barStyle.TrackWidth
+	if width <= 0 {
+		width = scrollbarStrip
+	}
 	w, h := v.size[0], v.size[1]
-	if x < w-scrollbarStrip || x >= w || y < 0 || y >= h {
+	if x < w-width || x >= w || y < 0 || y >= h {
 		return false
 	}
 	sb := v.t.term.Scrollbar()
@@ -1227,7 +1303,9 @@ func (v *view) scrollbarEvent(ev ui.InputEvent) bool {
 	case v.barHeld:
 		v.dragScrollbar(ev.Y)
 	case v.overBar && ev.Kind == ui.InputPointerDown && ev.Button == 0:
-		y, h := bar(v.t.term.Scrollbar(), ui.Rect{H: v.size[1]}).Thumb()
+		b := bar(v.t.term.Scrollbar(), ui.Rect{H: v.size[1]})
+		b.Style = v.barStyle
+		y, h := b.Thumb()
 		v.barGrab = h / 2
 		if ev.Y >= y && ev.Y < y+h {
 			v.barGrab = ev.Y - y
@@ -1248,7 +1326,9 @@ func (v *view) dragScrollbar(y float32) {
 	if sb.Total <= sb.Len {
 		return
 	}
-	to := int(math.Round(float64(bar(sb, ui.Rect{H: v.size[1]}).OffsetAt(y - v.barGrab))))
+	b := bar(sb, ui.Rect{H: v.size[1]})
+	b.Style = v.barStyle
+	to := int(math.Round(float64(b.OffsetAt(y - v.barGrab))))
 	if d := to - int(sb.Offset); d != 0 {
 		term.ScrollBy(d)
 		v.services.Invalidate()
@@ -1256,27 +1336,53 @@ func (v *view) dragScrollbar(y float32) {
 }
 
 // linkAt is the link at the cell: a hyperlink (OSC 8), a URL printed as
-// text, or with Options.OpenLink a file path, or ""; t.mu is held.
+// text, or with Options.OpenLink a file path, or ""; one that soft-wraps
+// onto the next rows, as a long URL does, is the link as a whole. t.mu is
+// held.
 func (v *view) linkAt(col, row int) (link string, path bool, at linkSpan) {
 	t := v.t
-	if url := v.hyperlinkAt(col, row); url != "" {
-		// The hyperlink's cells are those around the cell with its URL.
-		x0, x1 := col, col+1
-		for x0 > 0 && v.hyperlinkAt(x0-1, row) == url {
-			x0--
-		}
-		for x1 < v.cols && v.hyperlinkAt(x1, row) == url {
-			x1++
-		}
-		return url, false, linkSpan{row, x0, x1}
+	if v.cols == 0 {
+		return "", false, linkSpan{}
 	}
-	text, cols := t.term.RowText(row)
-	if url, x0, x1 := urlAt(text, cols, col); url != "" {
-		return url, false, linkSpan{row, x0, x1}
+	if url := v.hyperlinkAt(col, row); url != "" {
+		// The hyperlink's cells are those around the cell with its URL,
+		// counted across the rows it wraps over.
+		// A row's edge is crossed only where it wraps.
+		at := func(i int) bool { return v.hyperlinkAt(i%v.cols, i/v.cols) == url }
+		a, b := row*v.cols+col, row*v.cols+col+1
+		for a > 0 && (a%v.cols != 0 || v.wraps(a/v.cols-1)) && at(a-1) {
+			a--
+		}
+		for b < v.rows*v.cols && (b%v.cols != 0 || v.wraps(b/v.cols-1)) && at(b) {
+			b++
+		}
+		return url, false, v.spanOf(a, b)
+	}
+	// The text of the rows the cell's row wraps with, each rune at its
+	// cell counted across the viewport.
+	top, bottom := row, row
+	for top > 0 && v.wraps(top-1) {
+		top--
+	}
+	for v.wraps(bottom) {
+		bottom++
+	}
+	var text []rune
+	var cols []int
+	for r := top; r <= bottom; r++ {
+		rt, rc := t.term.RowText(r)
+		text = append(text, rt...)
+		for _, c := range rc {
+			cols = append(cols, r*v.cols+c)
+		}
+	}
+	i := row*v.cols + col
+	if url, a, b := urlAt(text, cols, i); url != "" {
+		return url, false, v.spanOf(a, b)
 	}
 	if t.opts.OpenLink != nil {
-		if p, x0, x1 := pathAt(text, cols, col); p != "" {
-			return p, true, linkSpan{row, x0, x1}
+		if p, a, b := pathAt(text, cols, i); p != "" {
+			return p, true, v.spanOf(a, b)
 		}
 	}
 	return "", false, linkSpan{}

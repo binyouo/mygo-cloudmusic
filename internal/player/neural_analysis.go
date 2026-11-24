@@ -43,6 +43,10 @@ type neuralAnalysis struct {
 
 var neuralSlots = make(chan struct{}, 1)
 
+// The phone preview sets this at link time to keep its analysis cache beside
+// its other data. The desktop app continues to share its existing cache.
+var neuralCacheBase string
+
 func neuralRuntimePaths() (python, runner string) {
 	if exe, err := os.Executable(); err == nil {
 		home := filepath.Join(filepath.Dir(exe), "..", "Resources", "smart-fades")
@@ -177,11 +181,15 @@ func analyzeNeuralTrack(ctx context.Context, dl *download, ms int64) (*neuralAna
 	if dec.Len() < 8*outputRate || dec.Len() > 1200*outputRate {
 		return nil, errors.New("player: neural analysis duration out of bounds")
 	}
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return nil, err
+	base := neuralCacheBase
+	if base == "" {
+		base, err = os.UserCacheDir()
+		if err != nil {
+			return nil, err
+		}
+		base = filepath.Join(base, "mygo-cloudmusic")
 	}
-	dir := filepath.Join(base, "mygo-cloudmusic", "smart-fades-v1")
+	dir := filepath.Join(base, "smart-fades-v1")
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}

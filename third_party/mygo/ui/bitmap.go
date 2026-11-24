@@ -13,12 +13,14 @@ import (
 	_ "golang.org/x/image/bmp"  // DecodeBitmap
 	_ "golang.org/x/image/webp" // DecodeBitmap
 
+	"github.com/egoist/mygo/internal/media"
 	"github.com/egoist/mygo/internal/scene"
 )
 
 // Bitmap is an image to show with Image. Create it once: converting an
 // image is not free.
 type Bitmap struct {
+	imageMark
 	img  *scene.Image
 	w, h int
 	// levels are the bitmap halved again and again, made as it shows
@@ -46,6 +48,11 @@ type Bitmap struct {
 	// nothing, for ReleasePixels to convert it again from (#1281). nil for
 	// an image of a type of its own, and other bitmaps.
 	source func() image.Image
+	// videoPix are the pixels a frame of video was converted into, for
+	// the next (showPicture), and chroma the chroma of an I420 frame,
+	// interleaved as NV12's (UpdateYUV).
+	videoPix []byte
+	chroma   []byte
 }
 
 // Pixelated draws the bitmap's pixels as squares of their colors where it
@@ -126,6 +133,54 @@ func DecodeBitmap(data []byte) (*Bitmap, error) {
 	return &Bitmap{img: s, w: s.W, h: s.H, remake: func() (*scene.Image, error) { return decodeImage(data) }}, nil
 }
 
+// DecodeBitmapScaled decodes as DecodeBitmap, to a bitmap no longer on either
+// side than maxSide pixels: a list of thumbnails of photos holds the memory of
+// its thumbnails, not of its photos. It doesn't enlarge. Unlike DecodeBitmap it
+// doesn't keep data, so that its bitmap holds only its pixels, and
+// ReleasePixels leaves them.
+func DecodeBitmapScaled(data []byte, maxSide int) (*Bitmap, error) {
+	s, err := decodeImage(data)
+	if err != nil {
+		return nil, err
+	}
+	s = shrinkImage(s, maxSide)
+	return &Bitmap{img: s, w: s.W, h: s.H}, nil
+}
+
+// shrinkImage averages each pixel of the result over the pixels it covers.
+func shrinkImage(s *scene.Image, maxSide int) *scene.Image {
+	if maxSide <= 0 || (s.W <= maxSide && s.H <= maxSide) {
+		return s
+	}
+	w, h := maxSide, maxSide
+	if s.W > s.H {
+		h = max(s.H*maxSide/s.W, 1)
+	} else {
+		w = max(s.W*maxSide/s.H, 1)
+	}
+	out := make([]byte, 4*w*h)
+	for y := range h {
+		y0, y1 := y*s.H/h, max((y+1)*s.H/h, y*s.H/h+1)
+		for x := range w {
+			x0, x1 := x*s.W/w, max((x+1)*s.W/w, x*s.W/w+1)
+			var sum [4]int
+			for sy := y0; sy < y1; sy++ {
+				row := s.Pix[sy*s.W*4:]
+				for sx := x0; sx < x1; sx++ {
+					for k := range 4 {
+						sum[k] += int(row[sx*4+k])
+					}
+				}
+			}
+			n := (x1 - x0) * (y1 - y0)
+			for k := range 4 {
+				out[(y*w+x)*4+k] = byte((sum[k] + n/2) / n)
+			}
+		}
+	}
+	return scene.NewImageRGBA(w, h, out)
+}
+
 // decodeImage decodes the bytes to a premultiplied RGBA bitmap, upright
 // as a JPEG's EXIF orientation says.
 func decodeImage(data []byte) (*scene.Image, error) {
@@ -147,7 +202,8 @@ func decodeImage(data []byte) (*scene.Image, error) {
 // origin, as image.NewRGBA makes, is taken as it is, without a copy:
 // don't change its pixels until the next Update. Call it on the main
 // thread, in the view or through Window.Update, which redraws the window
-// to show it.
+// to show it. UpdateYUV shows frames in Y′CbCr, as decoders give them,
+// without converting them.
 func (b *Bitmap) Update(img image.Image) {
 	if b.img.Scene != nil {
 		return // a canvas's: Canvas.Draw draws it
@@ -164,7 +220,7 @@ func (b *Bitmap) Update(img image.Image) {
 		}
 	}
 	s := scene.NewImage(img)
-	if s.W == b.img.W && s.H == b.img.H {
+	if s.W == b.img.W && s.H == b.img.H && b.img.Surface == nil {
 		b.img.Pix = s.Pix
 		b.img.Changed()
 	} else {
@@ -172,6 +228,34 @@ func (b *Bitmap) Update(img image.Image) {
 		b.w, b.h = s.W, s.H
 		b.levels = nil
 	}
+	b.fresh = 0
+}
+
+// showPicture shows a frame of video where a system's decoder left it, in
+// place of the bitmap's picture: renderers sample its surface, and those
+// that need pixels convert it (Picture.RGBA), into a buffer the bitmap
+// keeps for the next frame.
+func (b *Bitmap) showPicture(pic media.Picture) {
+	b.remake, b.source, b.released = nil, nil, false
+	img := b.img
+	if img.W != pic.W || img.H != pic.H || img.Surface == nil {
+		img = scene.NewImageRGBA(pic.W, pic.H, nil)
+		b.img, b.w, b.h, b.levels = img, pic.W, pic.H, nil
+	}
+	img.Surface = pic.Surface
+	if img.Pix != nil {
+		b.videoPix = img.Pix
+	}
+	img.Pix, img.Dropped = nil, nil
+	convert := pic.RGBA
+	img.Restore = func() []byte {
+		if convert == nil {
+			return nil
+		}
+		b.videoPix = convert(b.videoPix)
+		return b.videoPix
+	}
+	img.Changed()
 	b.fresh = 0
 }
 
@@ -256,6 +340,9 @@ func (b *Bitmap) imageSize() (float32, float32) {
 func (b *Bitmap) smaller(shrink float32) *scene.Image {
 	if b.img.Scene != nil {
 		return b.img // a canvas, whose pixels the GPU keeps
+	}
+	if b.img.Surface != nil {
+		return b.img // a frame of video, where its decoder left it
 	}
 	if shrink < 2 {
 		return b.img

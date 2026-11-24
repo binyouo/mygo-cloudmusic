@@ -13,10 +13,7 @@ import (
 // scrubState is a progress bar's own: the value dragged, while it is, and
 // the levels of the music its smoke follows.
 type scrubState struct {
-	v float64
-	// held is set while the pointer pressed on the bar is down, wherever
-	// it has gone since: Pressed is false off the bar, which is thin.
-	held   bool
+	v      float64
 	active bool // dragged since the last frame, to seek once let go
 	level  barState
 }
@@ -31,34 +28,27 @@ func secs(s float64) time.Duration { return time.Duration(s * float64(time.Secon
 func (a *app) scrubber(c *ui.Context, st *scrubState, track, fill ui.Color, height float32, smoke ui.Color) ui.Element {
 	pl := a.pl
 	dur := pl.Duration().Seconds()
-	if !st.active && !st.held {
+	if !st.active {
 		st.v = pl.Position().Seconds()
 	}
 	s := ui.SliderBase(c, &st.v, 0, max(dur, 1)).Height(height).FocusRing(false).Label("播放进度").Cursor(ui.CursorPointer)
-	// The press and its release come to the bar wherever the pointer is,
-	// and go on to the slider, which follows the pointer.
-	s.HandleInput(func(ev ui.InputEvent) bool {
-		switch ev.Kind {
-		case ui.InputPointerDown:
-			st.held = ev.Button == 0
-		case ui.InputPointerUp:
-			st.held = false
-		}
-		return false
-	})
-	pressed := st.held
+	_, _, held := s.Dragged()
+	_, _, released := s.DragEnded()
+	seek := false
 	switch {
-	case pressed:
+	case held:
 		st.active = true
 	case st.active:
-		// Let go: there, but not right at the end, which would end the
-		// song as it begins to play.
 		st.active = false
-		pl.Seek(secs(min(st.v, max(0, dur-1))))
+		// A canceled press gives neither a click nor a completed drag.
+		seek = released || s.Clicked() || s.DoubleClicked()
 	case s.Changed():
-		pl.Seek(secs(min(st.v, max(0, dur-1))))
+		seek = true
 	}
-	hot := s.Hovered() || pressed
+	if seek {
+		a.seekFromScrubber(st.v, a.phone && st == &a.npScrub)
+	}
+	hot := s.Hovered() || held
 	thick := float32(4)
 	if hot {
 		thick = 6
@@ -69,12 +59,7 @@ func (a *app) scrubber(c *ui.Context, st *scrubState, track, fill ui.Color, heig
 		knob = 1
 	}
 	knob = s.AnimateTo("knob", knob, ui.Snappy)
-	// The smoke settles away as the music pauses, and while dragging.
-	smoking := float32(0)
-	if smoke.A > 0 && a.settings.Smoke && pl.Playing() && !pl.Loading() && !st.active {
-		smoking = 1
-	}
-	smoking = s.AnimateTo("smoke", smoking, ui.Animation{Duration: 600 * time.Millisecond})
+	smoking := a.scrubSmoke(c, s, smoke.A > 0, st.active)
 	s.Draw(func(p *ui.Painter, r ui.Rect) {
 		at := st.v
 		if !st.active {
@@ -85,7 +70,7 @@ func (a *app) scrubber(c *ui.Context, st *scrubState, track, fill ui.Color, heig
 			frac = float32(min(1, max(0, at/dur)))
 		}
 		y := r.Y + (r.H-thick)/2
-		head, cy := r.X+r.W*frac, r.Y+r.H/2
+		head := r.X + r.W*frac
 		p.Fill(ui.Rect{X: r.X, Y: y, W: r.W, H: thick}, track, thick/2)
 		// What has downloaded, a shade lighter.
 		if got, ok := pl.Downloaded(); ok && float32(got) < 1 {
@@ -93,18 +78,7 @@ func (a *app) scrubber(c *ui.Context, st *scrubState, track, fill ui.Color, heig
 		}
 		played := ui.Rect{X: r.X, Y: y, W: max(thick, head-r.X), H: thick}
 		if smoking > 0.01 {
-			// A streak of light, brightest at the head.
-			p.FillGradient(played, ui.LinearGradient{Angle: 90, Oklab: true,
-				From: fill.Mix(smoke, smoking).Alpha(0.3), To: fill.Mix(smoke, 0.8*smoking)}, thick/2)
-			lv, live := pl.Levels()
-			st.level.step(p.Now(), lv, live)
-			bass := st.level.group(0, 6)
-			drawSmoke(p, head, cy, p.Now(), bass, smoke, smoking)
-			// The glow of the head, swelling with the bass, and its core.
-			glow := 9 + 8*bass
-			p.Shadow(ui.Rect{X: head, Y: cy}, 0, 0, 0, glow, 2.5+2.5*bass, smoke.Alpha(0.95*smoking))
-			core := thick * (1 + 0.25*bass)
-			p.Fill(ui.Rect{X: head - core/2, Y: cy - core/2, W: core, H: core}, white.Mix(smoke, 0.15).Alpha(smoking), core/2)
+			a.paintScrubSmoke(p, played, head, fill, smoke, smoking, &st.level)
 		} else {
 			p.Fill(played, fill, thick/2)
 		}
@@ -127,6 +101,43 @@ func (a *app) scrubber(c *ui.Context, st *scrubState, track, fill ui.Color, heig
 		}
 	})
 	return s
+}
+
+func (a *app) seekFromScrubber(at float64, phonePlayer bool) {
+	if phonePlayer && a.seeking {
+		a.seeking, a.lyricAt = false, -2
+	}
+	a.pl.Seek(secs(min(at, max(0, a.pl.Duration().Seconds()-1))))
+}
+
+func (a *app) scrubSmoke(c *ui.Context, s ui.Element, enabled, held bool) float32 {
+	// The smoke settles away as the music pauses, and while dragging — and
+	// while the sheet slides away: a sliding page keeps its frames cheap.
+	smoking := float32(0)
+	movingPlayer := a.phonePlayerMoving
+	if enabled && a.settings.Smoke && a.pl.Playing() && !a.pl.Loading() && !held && !c.Preferences().ReduceMotion && !movingPlayer {
+		smoking = 1
+	}
+	if movingPlayer {
+		s.Jump("smoke", 0)
+	}
+	return s.AnimateTo("smoke", smoking, ui.Animation{Duration: 600 * time.Millisecond})
+}
+
+func (a *app) paintScrubSmoke(p *ui.Painter, played ui.Rect, head float32, fill, smoke ui.Color, smoking float32, level *barState) {
+	cy := played.Y + played.H/2
+	// A streak of light, brightest at the head.
+	p.FillGradient(played, ui.LinearGradient{Angle: 90, Oklab: true,
+		From: fill.Mix(smoke, smoking).Alpha(0.3), To: fill.Mix(smoke, 0.8*smoking)}, played.H/2)
+	lv, live := a.pl.Levels()
+	level.step(p.Now(), lv, live)
+	bass := level.group(0, 6)
+	drawSmoke(p, head, cy, p.Now(), bass, smoke, smoking)
+	// The glow of the head, swelling with the bass, and its core.
+	glow := 9 + 8*bass
+	p.Shadow(ui.Rect{X: head, Y: cy}, 0, 0, 0, glow, 2.5+2.5*bass, smoke.Alpha(0.95*smoking))
+	core := played.H * (1 + 0.25*bass)
+	p.Fill(ui.Rect{X: head - core/2, Y: cy - core/2, W: core, H: core}, white.Mix(smoke, 0.15).Alpha(smoking), core/2)
 }
 
 // Smoke from the playhead: wisps shed one after another, each drifting
@@ -333,21 +344,26 @@ func (a *app) volumeSlider(c *ui.Context, color, track ui.Color, width float32) 
 // transport is the row of controls: shuffle, previous, play, next, repeat.
 func (a *app) transport(c *ui.Context, color, dim, on ui.Color, size float32) {
 	pl := a.pl
-	ui.Row(c).Gap(size * 0.5).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+	gap, hitSize := size*0.5, float32(0)
+	if a.phone {
+		gap, hitSize = 0, 44
+	}
+	target := func(b ui.Element) ui.Element { return b.MinWidth(hitSize).MinHeight(hitSize) }
+	ui.Row(c).Gap(gap).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
 		shuffle := dim
 		if pl.Shuffle() {
 			shuffle = on
 		}
-		if iconButton(c.Key("shuffle"), iconShuffle, size*0.62, shuffle, "随机播放").Clicked() {
+		if target(iconButton(c.Key("shuffle"), iconShuffle, size*0.62, shuffle, "随机播放")).Clicked() {
 			pl.ToggleShuffle()
 		}
-		if iconButton(c.Key("prev"), iconPrev, size*0.85, color, "上一首").Clicked() {
+		if target(iconButton(c.Key("prev"), iconPrev, size*0.85, color, "上一首")).Clicked() {
 			pl.Prev()
 		}
-		if playButton(c.Key("play"), pl.Playing(), size*1.25, color).Clicked() {
+		if target(playButton(c.Key("play"), pl.Playing(), size*1.25, color)).Clicked() {
 			pl.TogglePlay()
 		}
-		if iconButton(c.Key("next"), iconNext, size*0.85, color, "下一首").Clicked() {
+		if target(iconButton(c.Key("next"), iconNext, size*0.85, color, "下一首")).Clicked() {
 			pl.Next()
 		}
 		repeat, ricon := dim, iconRepeat
@@ -357,7 +373,7 @@ func (a *app) transport(c *ui.Context, color, dim, on ui.Color, size float32) {
 		case player.RepeatOne:
 			repeat, ricon = on, iconRepeat1
 		}
-		if iconButton(c.Key("repeat"), ricon, size*0.62, repeat, "循环").Clicked() {
+		if target(iconButton(c.Key("repeat"), ricon, size*0.62, repeat, "循环")).Clicked() {
 			pl.CycleRepeat()
 		}
 	})
@@ -370,10 +386,7 @@ func (a *app) playerBar(c *ui.Context) {
 	pl := a.pl
 	tr := pl.Current()
 	a.tickTimes(c)
-	if a.picked.id != 0 && (tr == nil || tr.ID != a.picked.id || pl.Playing()) {
-		// Played, or gone: it says what it is again.
-		a.picked = pickedUp{}
-	}
+	heard := a.pickupHint(tr)
 	// Over the foot of the page: while content is under it, its edge frosts
 	// it, with a hairline along the top.
 	edge := ui.Box(c.Key("bottom-edge")).Absolute().Left(0).Right(0).Bottom(0).Height(playerBarHeight).
@@ -420,8 +433,8 @@ func (a *app) playerBar(c *ui.Context) {
 					var sub string
 					color := p.muted
 					switch {
-					case a.picked.id == tr.ID:
-						sub = a.picked.heard
+					case heard != "":
+						sub = heard
 					case pl.Loading():
 						sub = "正在缓冲…"
 					case pl.Err() != "":

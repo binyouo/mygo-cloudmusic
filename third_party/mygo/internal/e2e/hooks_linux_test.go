@@ -1,4 +1,4 @@
-//go:build linux && (amd64 || arm64)
+//go:build linux && !android && (amd64 || arm64) && !android
 
 package e2e
 
@@ -334,9 +334,15 @@ func observe(*mygo.Window) (func(), bool) { return nil, false }
 // composition the test makes up does not show.
 func pressKey(*mygo.Window, uint16, string) bool { return false }
 
+func pressKeyComposing(*mygo.Window, uint16, string, string, string) bool { return false }
+
 // X routes a drag to the window under the pointer, which
 // dropFiles, dropping on the content's, skips.
 func dragFiles(*mygo.Window, float64, float64, []string) (bool, bool) { return false, false }
+
+func dropFilesFrom(*mygo.Window, float64, float64, float64, float64, []string) (bool, bool, bool) {
+	return false, false, false
+}
 
 // pressTab presses Tab, with Shift when back, as the keyboard does.
 func pressTab(_ *mygo.Window, back bool) bool {

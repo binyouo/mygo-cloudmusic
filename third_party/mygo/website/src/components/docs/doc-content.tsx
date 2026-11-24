@@ -1,10 +1,14 @@
 import { useNavigate } from "@tanstack/react-router"
 import * as React from "react"
 
+import { useLanguage } from "@/lib/i18n"
+import { localePath } from "@/lib/locale"
+
 /** A page rendered from markdown: its links navigate within the site, and its code blocks copy. */
 export function DocContent({ html }: { html: string }) {
   const ref = React.useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
+  const lang = useLanguage()
 
   React.useEffect(() => {
     const el = ref.current
@@ -25,11 +29,11 @@ export function DocContent({ html }: { html: string }) {
       const url = new URL(a.href)
       if (url.origin !== location.origin || a.target) return
       e.preventDefault()
-      void navigate({ href: url.pathname + url.search + url.hash })
+      void navigate({ href: localePath(lang, url.pathname) + url.search + url.hash })
     }
     el.addEventListener("click", onClick)
     return () => el.removeEventListener("click", onClick)
-  }, [navigate])
+  }, [navigate, lang])
 
   return <div ref={ref} className="prose-docs" dangerouslySetInnerHTML={{ __html: html }} />
 }

@@ -1,4 +1,6 @@
 /build/
+/resources/automix/
+/internal/player/soxr_source_*.c
 /.mygo/
 mygo_windows_*.syso
 /netease-music-mygo

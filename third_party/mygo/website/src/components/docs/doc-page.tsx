@@ -8,16 +8,18 @@ import { DocsNav } from "@/components/docs/docs-nav"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { bookOf, getDoc, type Doc, type Navs } from "@/lib/docs"
+import { useT } from "@/lib/i18n"
+import type { Language } from "@/lib/locale"
 
 /**
  * The loader of a page: null, before anything is fetched, for a slug without
  * a page, which the docs show as not found. (Rather than throwing notFound():
  * the router renders routes as the prerendered 404.html does, not errors.)
  */
-export async function loadDocPage(slug: string, parent: Promise<{ loaderData?: Navs }>) {
+export async function loadDocPage(slug: string, lang: Language, parent: Promise<{ loaderData?: Navs }>) {
   const nav = (await parent).loaderData?.[bookOf(slug)]
   if (!nav?.some((s) => s.items.some((i) => i.slug === slug))) return null
-  return getDoc({ data: slug })
+  return getDoc({ data: { slug, lang } })
 }
 
 export function docHead(doc: Doc | null | undefined) {
@@ -31,15 +33,16 @@ export function docHead(doc: Doc | null | undefined) {
       { property: "og:description", content: doc.description },
     ],
     links: [
-      { rel: "alternate", type: "text/markdown", href: (doc.slug ? `/docs/${doc.slug}` : "/docs") + ".md" },
+      { rel: "alternate", type: "text/markdown", href: doc.markdown },
       { rel: "describedby", href: "/llms.txt" },
     ],
   }
 }
 
-const docsRoute = getRouteApi("/docs")
+const docsRoute = getRouteApi("/{-$lang}/docs")
 
 export function DocPage({ doc }: { doc: Doc }) {
+  const t = useT()
   const book = bookOf(doc.slug)
   const nav = docsRoute.useLoaderData()[book]
   const [menuOpen, setMenuOpen] = React.useState(false)
@@ -49,11 +52,11 @@ export function DocPage({ doc }: { doc: Doc }) {
       <div className="sticky top-14 z-30 flex h-11 items-center gap-1 border-b bg-background/85 px-2 backdrop-blur-xl lg:hidden">
         <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
           <SheetTrigger render={<Button variant="ghost" size="sm" />}>
-            <MenuIcon /> Menu
+            <MenuIcon /> {t("Menu")}
           </SheetTrigger>
           <SheetContent side="left" className="w-72 overflow-y-auto">
             <SheetHeader>
-              <SheetTitle>{book === "ui" ? "Native UI" : "Documentation"}</SheetTitle>
+              <SheetTitle>{book === "ui" ? t("Native UI") : t("Documentation")}</SheetTitle>
             </SheetHeader>
             <div className="px-2 pb-8">
               <DocsNav sections={nav} page={doc} onNavigate={() => setMenuOpen(false)} />
@@ -66,7 +69,7 @@ export function DocPage({ doc }: { doc: Doc }) {
 
       <article className="max-w-[52rem] px-4 pt-10 pb-20 sm:px-10 lg:pt-14">
         <header>
-          {doc.section && <p className="label">{doc.section}</p>}
+          {doc.section && <p className="label">{t(doc.section)}</p>}
           <h1 className="mt-3 text-3xl font-semibold tracking-[-0.03em] sm:text-4xl">{doc.title}</h1>
           {doc.summary && <p className="mt-3 text-lg leading-8 text-muted-foreground">{doc.summary}</p>}
         </header>
@@ -80,9 +83,9 @@ export function DocPage({ doc }: { doc: Doc }) {
             {doc.prev ? (
               <DocLink slug={doc.prev.slug} className="flex flex-col gap-1 bg-background p-4 transition-colors hover:bg-code">
                 <span className="label flex items-center gap-1.5">
-                  <ArrowLeftIcon className="size-3" /> Previous
+                  <ArrowLeftIcon className="size-3" /> {t("Previous")}
                 </span>
-                <span className="font-medium">{doc.prev.title}</span>
+                <span className="font-medium">{t(doc.prev.title)}</span>
               </DocLink>
             ) : (
               <span className="hidden bg-background sm:block" />
@@ -90,14 +93,14 @@ export function DocPage({ doc }: { doc: Doc }) {
             {doc.next && (
               <DocLink slug={doc.next.slug} className="flex flex-col items-end gap-1 bg-background p-4 text-right transition-colors hover:bg-code">
                 <span className="label flex items-center gap-1.5">
-                  Next <ArrowRightIcon className="size-3" />
+                  {t("Next")} <ArrowRightIcon className="size-3" />
                 </span>
-                <span className="font-medium">{doc.next.title}</span>
+                <span className="font-medium">{t(doc.next.title)}</span>
               </DocLink>
             )}
           </nav>
           <a href={doc.editUrl} className="mt-6 inline-block text-sm text-muted-foreground hover:text-foreground">
-            Edit this page on GitHub
+            {t("Edit this page on GitHub")}
           </a>
         </footer>
       </article>

@@ -157,7 +157,7 @@ func TestContentTransitionAcrossFontFlush(t *testing.T) {
 			Text(c, "Title").FontSize(12 + float32(frame)*0.01)
 		})
 	}, 400, 200)
-	gen := textSystem().Generation()
+	gen := tt.rt.text.Generation()
 	flushed, fadedAfter := 0, 0
 	for flushed == 0 || frame < flushed+12 {
 		if frame > 1000 {
@@ -166,7 +166,7 @@ func TestContentTransitionAcrossFontFlush(t *testing.T) {
 		frame++
 		tt.Frame()
 		tt.Advance(16 * time.Millisecond)
-		if flushed == 0 && textSystem().Generation() != gen {
+		if flushed == 0 && tt.rt.text.Generation() != gen {
 			flushed = frame
 		}
 		if _, faded := paintedGlyphs(tt); flushed > 0 && faded > 0 {

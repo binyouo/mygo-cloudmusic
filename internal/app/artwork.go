@@ -44,16 +44,17 @@ type artCache struct {
 	// gone are the covers dropped, for as long as something else holds
 	// them: Now Playing keeps the cover it shows, which comes back as it
 	// was rather than loading again.
-	gone    map[string]weak.Pointer[artwork]
-	busy    map[string]bool
-	sem     chan struct{}
-	pending []artRequest
-	fetch   func(string) ([]byte, error)
-	after   func(time.Duration, func())
-	post    func(func())
-	now     func() time.Time
-	size    int // the bytes the covers in art keep
-	limit   int
+	gone          map[string]weak.Pointer[artwork]
+	busy          map[string]bool
+	sem           chan struct{}
+	pending       []artRequest
+	fetch         func(string) ([]byte, error)
+	after         func(time.Duration, func())
+	post          func(func())
+	now           func() time.Time
+	size          int // the bytes the covers in art keep
+	limit         int
+	thumbnailTint bool // the macOS notch's meters take their thumbnail's tint
 }
 
 // artLimit is how many bytes of covers the cache keeps. A cover keeps its
@@ -173,7 +174,11 @@ func (c *artCache) load(request artRequest, fetch func(string) ([]byte, error)) 
 	var bmp *ui.Bitmap
 	var img image.Image
 	if err == nil {
-		bmp, img, err = decodeArt(data)
+		if backdrop || c.thumbnailTint {
+			bmp, img, err = decodeArt(data)
+		} else {
+			bmp, err = ui.DecodeBitmap(stillCover(data))
+		}
 	}
 	size := len(data)
 	var animation *coverAnimation
@@ -183,10 +188,10 @@ func (c *artCache) load(request artRequest, fetch func(string) ([]byte, error)) 
 	var blurred *image.RGBA
 	var tint ui.Color
 	var palette [4]ui.Color
-	if err == nil {
+	if err == nil && img != nil {
 		tint = dominantColor(img)
-		palette = albumPalette(img)
 		if backdrop {
+			palette = albumPalette(img)
 			blurred = blurImage(img)
 		}
 	}

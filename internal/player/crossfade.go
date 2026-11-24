@@ -75,14 +75,21 @@ func (p *Player) ApplyTransitions() {
 		s.plan = nil
 		s.cancelSmartRender()
 		s.adaptive = p.AutoMix != nil && p.AutoMix()
-		if s.adaptive {
-			for _, part := range s.parts {
-				startMixAnalysis(part.track)
-			}
-			if s.next != nil {
-				startMixAnalysis(s.next)
-			}
-		}
+		s.prepareMix()
 		s.mu.Unlock()
 	}
+}
+
+// prepareMix starts analysis only for the boundary the decoder can mix.
+// The caller holds s.mu.
+func (s *sequence) prepareMix() {
+	if !s.adaptive || s.next == nil {
+		return
+	}
+	part := s.parts[len(s.parts)-1]
+	if part.noMix || keepBoundary(part.track, s.next) || part.track.dec.Len() < 8*outputRate || s.next.dec.Len() < 8*outputRate {
+		return
+	}
+	startMixAnalysis(part.track)
+	startMixAnalysis(s.next)
 }

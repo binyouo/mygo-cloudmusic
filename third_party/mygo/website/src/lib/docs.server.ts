@@ -1,5 +1,6 @@
-// The docs of the repository (../docs), read and rendered on the server. The
-// site is prerendered, so this runs at build time only.
+// The docs of the repository (../docs), and their Chinese (../docs-zh), read
+// and rendered on the server. The site is prerendered, so this runs at build
+// time only. A page without a Chinese translation is shown in English.
 
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -9,12 +10,20 @@ import remarkParse from "remark-parse"
 import { unified } from "unified"
 
 import { bookOf, type Book, type Doc, type Navs, type NavItem, type NavSection, type SearchEntry } from "@/lib/docs"
+import type { Language } from "@/lib/locale"
 import { renderMarkdown, slugOf, type RenderedMarkdown } from "@/lib/markdown.server"
 import { site } from "@/lib/site"
 
 // Vite runs in website/, next to the repository's docs.
 const repoDir = path.resolve(process.cwd(), "..")
 const docsDir = path.join(repoDir, "docs")
+const docsZhDir = path.join(repoDir, "docs-zh")
+
+/** The directory of a language's docs: ../docs, or ../docs-zh, whose pages are the same. */
+const treeOf = (lang: Language) => {
+  const dir = lang === "zh" ? docsZhDir : docsDir
+  return { dir, name: path.basename(dir), basePath: lang === "zh" ? "/zh/docs" : "/docs" }
+}
 
 /** The files a page may be: x.md, else x/README.md, as ui/README.md is /docs/ui. */
 function filesOf(slug: string) {
@@ -23,10 +32,16 @@ function filesOf(slug: string) {
   return [`${slug}.md`, `${slug}/README.md`]
 }
 
-/** The file of a page, relative to the docs, or undefined for none. */
-async function fileOf(slug: string) {
-  for (const file of filesOf(slug)) {
-    if (await fs.stat(path.join(docsDir, file)).then((s) => s.isFile(), () => false)) return file
+/**
+ * The file of a page in a language. Chinese reads ../docs-zh first, then the
+ * English page for a page not translated yet.
+ */
+async function fileOf(slug: string, lang: Language) {
+  const trees = lang === "zh" ? [treeOf("zh"), treeOf("en")] : [treeOf("en")]
+  for (const tree of trees) {
+    for (const file of filesOf(slug)) {
+      if (await fs.stat(path.join(tree.dir, file)).then((s) => s.isFile(), () => false)) return { ...tree, file }
+    }
   }
   return undefined
 }
@@ -34,18 +49,25 @@ async function fileOf(slug: string) {
 // Pages are rendered once per build; in development, on every request.
 const cache = new Map<string, Promise<RenderedMarkdown | undefined>>()
 
-function render(slug: string) {
-  let page = cache.get(slug)
+function render(slug: string, lang: Language) {
+  const key = `${lang}/${slug}`
+  let page = cache.get(key)
   if (!page) {
-    page = fileOf(slug).then((file) => {
-      if (!file) return undefined
-      const abs = path.join(docsDir, file)
-      return fs.readFile(abs, "utf8").then(
-        (source) => renderMarkdown(source, abs, { docsDir, repoDir, repoUrl: site.repo }),
+    page = fileOf(slug, lang).then((source) => {
+      if (!source) return undefined
+      return fs.readFile(path.join(source.dir, source.file), "utf8").then(
+        // Links stay in the reader's language, even where a page falls back to English.
+        (text) =>
+          renderMarkdown(text, path.join(source.dir, source.file), {
+            docsDir: source.dir,
+            repoDir,
+            repoUrl: site.repo,
+            basePath: lang === "zh" ? "/zh/docs" : "/docs",
+          }),
         () => undefined
       )
     })
-    if (!import.meta.env.DEV) cache.set(slug, page)
+    if (!import.meta.env.DEV) cache.set(key, page)
   }
   return page
 }
@@ -55,33 +77,37 @@ function render(slug: string) {
  * lists of its README, in their order, under their headings, and the pages
  * of its directory it leaves out.
  */
-export async function loadNav(): Promise<Navs> {
+export async function loadNav(lang: Language = "en"): Promise<Navs> {
   const [docs, ui] = await Promise.all([
-    bookNav("README.md", { title: "Overview", item: { slug: "", title: "Introduction" } }),
-    bookNav("ui/README.md", { title: "Native UI", item: { slug: "ui", title: "Overview" } }),
+    bookNav("README.md", { title: "Overview", item: { slug: "", title: "Introduction" } }, lang),
+    bookNav("ui/README.md", { title: "Native UI", item: { slug: "ui", title: "Overview" } }, lang),
   ])
   return { docs, ui }
 }
 
-async function bookNav(readmeFile: string, overview: { title: string; item: NavItem }): Promise<NavSection[]> {
-  const readme = await fs.readFile(path.join(docsDir, readmeFile), "utf8")
+async function bookNav(readmeFile: string, overview: { title: string; item: NavItem }, lang: Language): Promise<NavSection[]> {
+  const tree = treeOf(lang)
+  const english = treeOf("en")
+  const readme = await fs
+    .readFile(path.join(tree.dir, readmeFile), "utf8")
+    .catch(() => fs.readFile(path.join(english.dir, readmeFile), "utf8"))
   const base = path.dirname(readmeFile)
-  const tree = unified().use(remarkParse).parse(readme) as Root
+  const parsed = unified().use(remarkParse).parse(readme) as Root
   const sections: NavSection[] = [{ title: overview.title, items: [overview.item] }]
   let heading = ""
-  for (const node of tree.children) {
+  for (const node of parsed.children) {
     if (node.type === "heading" && node.depth === 2) heading = toString(node)
     if (node.type === "list" && heading) sections.push({ title: heading, items: navItems(node, base) })
   }
 
   const book = bookOf(overview.item.slug!)
   const listed = new Set(sections.flatMap((s) => s.items.map((i) => i.slug)))
-  const files = (await fs.readdir(docsDir, { recursive: true })).filter((f) => f.endsWith(".md")).sort()
+  const files = (await fs.readdir(tree.dir, { recursive: true })).filter((f) => f.endsWith(".md")).sort()
   const rest: NavItem[] = []
   for (const file of files) {
     const slug = slugOf(file)
     if (listed.has(slug) || bookOf(slug) !== book) continue
-    const page = await render(slug)
+    const page = await render(slug, lang)
     rest.push({ slug, title: page?.title || slug })
   }
   if (rest.length) sections.push({ title: "More", items: rest })
@@ -106,15 +132,15 @@ function navItems(list: List, base: string): NavItem[] {
   })
 }
 
-/** "`: install the tools, then …`" → "Install the tools, then …". */
+/** "`: install the tools, then …`" → "Install the tools, then …", and "：推送…" → "推送…". */
 function sentence(text: string) {
-  const s = text.replace(/^[\s:]+/, "").replace(/\s+/g, " ").trim()
+  const s = text.replace(/^[\s:：]+/, "").replace(/\s+/g, " ").trim()
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-export async function loadDoc(slug: string): Promise<Doc | undefined> {
-  const [page, nav, file] = await Promise.all([render(slug), loadNav(), fileOf(slug)])
-  if (!page || !file) return undefined
+export async function loadDoc(slug: string, lang: Language = "en"): Promise<Doc | undefined> {
+  const [page, nav, source] = await Promise.all([render(slug, lang), loadNav(lang), fileOf(slug, lang)])
+  if (!page || !source) return undefined
   const book: Book = bookOf(slug)
   const sections = nav[book]
   const order = sections.flatMap((s) => s.items).filter((i) => i.slug !== undefined)
@@ -123,6 +149,7 @@ export async function loadDoc(slug: string): Promise<Doc | undefined> {
   const link = (i: NavItem | undefined) => (i?.slug === undefined ? undefined : { slug: i.slug, title: i.title })
   return {
     slug,
+    lang,
     title: page.title,
     description: item?.description || page.lead,
     summary: item?.description,
@@ -131,17 +158,18 @@ export async function loadDoc(slug: string): Promise<Doc | undefined> {
     toc: page.toc,
     prev: index > 0 ? link(order[index - 1]) : undefined,
     next: index >= 0 ? link(order[index + 1]) : undefined,
-    editUrl: `${site.repo}/edit/main/docs/${file}`,
+    markdown: (source.basePath + (slug ? `/${slug}` : "")) + ".md",
+    editUrl: `${site.repo}/edit/main/${source.name}/${source.file}`,
   }
 }
 
-/** Every heading of every page, with its text, for the search of the site. */
-export async function loadSearchIndex(): Promise<SearchEntry[]> {
-  const nav = await loadNav()
+/** Every heading of every page of a language, with its text, for the search of the site. */
+export async function loadSearchIndex(lang: Language = "en"): Promise<SearchEntry[]> {
+  const nav = await loadNav(lang)
   const entries: SearchEntry[] = []
   for (const item of [...nav.docs, ...nav.ui].flatMap((s) => s.items)) {
     if (item.slug === undefined) continue
-    const page = await render(item.slug)
+    const page = await render(item.slug, lang)
     if (!page) continue
     for (const section of page.sections) {
       entries.push({ slug: item.slug, page: page.title, id: section.id, heading: section.heading, text: section.text })

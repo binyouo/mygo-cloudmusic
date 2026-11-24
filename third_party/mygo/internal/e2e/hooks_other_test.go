@@ -1,4 +1,4 @@
-//go:build !darwin && !(linux && (amd64 || arm64)) && !(windows && (amd64 || arm64)) && !js
+//go:build !(darwin && !ios) && !(linux && !android && (amd64 || arm64)) && !(windows && (amd64 || arm64)) && !js
 
 package e2e
 
@@ -149,7 +149,13 @@ func popupItemEnabled(string) (bool, bool)           { return false, false }
 func pressKey(*mygo.Window, uint16, string) bool { return false }
 func pressTab(*mygo.Window, bool) bool           { return false }
 
+func pressKeyComposing(*mygo.Window, uint16, string, string, string) bool { return false }
+
 func dragFiles(*mygo.Window, float64, float64, []string) (bool, bool) { return false, false }
+
+func dropFilesFrom(*mygo.Window, float64, float64, float64, float64, []string) (bool, bool, bool) {
+	return false, false, false
+}
 
 // AppKit's older accessibility API is macOS's.
 func axAttribute(*mygo.Window, string, string) (string, bool, bool, bool) {

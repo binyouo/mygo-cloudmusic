@@ -116,28 +116,51 @@ func LikeProgram(id int64, like bool) error {
 // NetEase lists no episodes a listener likes, but answers of each whether
 // they do.
 func ProgramsLiked(ids []int64) (map[int64]bool, error) {
+	infos, err := CommentInfos("1", ids)
+	if err != nil {
+		return nil, err
+	}
+	liked := make(map[int64]bool, len(infos))
+	for id, info := range infos {
+		liked[id] = info.Liked
+	}
+	return liked, nil
+}
+
+// CommentInfo is what NetEase knows of a resource: how many comment on,
+// like and share it, and whether the listener signed in likes it.
+type CommentInfo struct {
+	CommentCount int  `json:"commentCount"`
+	LikedCount   int  `json:"likedCount"`
+	ShareCount   int  `json:"shareCount"`
+	Liked        bool `json:"liked"`
+}
+
+// CommentInfos returns the comment info of each resource of type, the
+// number a thread is named by: "1" an episode (A_DJ_1), "3" an album
+// (R_AL_3), "4" a song (R_SO_4).
+func CommentInfos(resourceType string, ids []int64) (map[int64]CommentInfo, error) {
 	var res struct {
 		Code int `json:"code"`
 		Data []struct {
-			ID    int64 `json:"resourceId"`
-			Liked bool  `json:"liked"`
+			ID int64 `json:"resourceId"`
+			CommentInfo
 		} `json:"data"`
 	}
 	list := make([]string, len(ids))
 	for i, id := range ids {
 		list[i] = strconv.FormatInt(id, 10)
 	}
-	// Resource type 1 is an episode, whose thread is A_DJ_1.
-	data := map[string]any{"resourceType": "1", "resourceIds": "[" + strings.Join(list, ",") + "]"}
+	data := map[string]any{"resourceType": resourceType, "resourceIds": "[" + strings.Join(list, ",") + "]"}
 	if err := eapiPost("/api/resource/commentInfo/list", data, &res); err != nil {
 		return nil, err
 	}
 	if res.Code != 200 {
-		return nil, fmt.Errorf("netease: episodes liked: code %d", res.Code)
+		return nil, fmt.Errorf("netease: comment info: code %d", res.Code)
 	}
-	liked := make(map[int64]bool, len(res.Data))
+	infos := make(map[int64]CommentInfo, len(res.Data))
 	for _, d := range res.Data {
-		liked[d.ID] = d.Liked
+		infos[d.ID] = d.CommentInfo
 	}
-	return liked, nil
+	return infos, nil
 }

@@ -76,7 +76,8 @@ var lcStyles = [][]func(e *node){
 		func(e *node) { e.ClipInsetPercent(0, 30, 0, 0, 4) }, func(e *node) { e.MaskLinearGradient(LinearGradient{From: RGB(0, 0, 0), Angle: 90}) }},
 	{nil, func(e *node) { e.Direction(RightToLeft) }, func(e *node) { e.Direction(LeftToRight) }},
 	{nil, func(e *node) { e.MaxLines(1) }, func(e *node) { e.NoWrap() }, func(e *node) { e.SingleLine() }, func(e *node) { e.MaxLines(2).Ellipsis("~") },
-		func(e *node) { e.Balance() }},
+		func(e *node) { e.Balance() }, func(e *node) { e.SingleLine().TruncateMiddle() },
+		func(e *node) { e.SingleLine().TruncateStart() }},
 	{nil, func(e *node) { e.ColumnSpan(2) }, func(e *node) { e.ColumnStart(2) }, func(e *node) { e.RowStart(2).RowSpan(2) }},
 	{nil, func(e *node) { e.BorderWidth(3) }, func(e *node) { e.BorderWidth(1, 0, 6, 2) }},
 	{nil, func(e *node) { e.Top(5) }, func(e *node) { e.Left(-3) }, func(e *node) { e.End(4) },
@@ -448,20 +449,21 @@ func TestLayoutCacheReuses(t *testing.T) {
 func TestLayoutInputs(t *testing.T) {
 	// Fields of node that the layout reads besides layoutStyle, compared
 	// or made volatile by sameLayout, and those it writes.
-	read := "flags ts cols rows spans image svg placeOn list form colFit overflow gridFit leaving ghosts attach popover " +
+	read := "flags ts cols rows spans image svg texture placeOn list form colFit overflow gridFit special leaving ghosts attach popover " +
 		"first last next nchild parent st c measured tl lay laid x y w h contentW contentH frags runes paragraph " +
-		"ownText merged spansKey collapsed rowMinW field hidden placed flips originAttached originX originY originSet edgeMargin edgeMarginSet"
+		"ownText merged spansKey collapsed rowMinW field hidden insetSet placed flips originAttached originX originY originSet edgeMargin edgeMarginSet " +
+		"hold"
 	// Fields the layout never reads.
 	other := "epoch key valueInput id depth track transform translatePct world content contentSet " +
 		"pose poseAnim poseSet poseM poseFade reposed ink noCull backface bg fill grad stripes borderC borderStyle radius " +
-		"shadows material effect effecting cache grads blur opacity opacitySet undimmed cursor paintFn hitFn objectFn styleFn paintAfterFn " +
+		"shadows material effect effecting cache grads blur opacity opacitySet undimmed cursor paintFn hitFn objectFn styleFn paintAfterFn faces " +
 		"inputFn observeFn textClient caret takesText noIME copyData webView maximizeButton fit gray objectPos dismissed rotate label widget role " +
-		"checked expanded busy current autoComplete orient tip highlighted focusHighlights keepOpen accValue accRange hasRange accFill accStep barInset scrollBase hideScrollbars keepScrollbars barsFrom snap snapAlign " +
+		"checked expanded busy current autoComplete orient tip highlighted focusHighlights keepOpen accValue accRange hasRange accFill accChildren accStep barInset barStyle scrollBase keepScrollbars hiddenScrollbars barsFrom snap snapAlign " +
 		"listRow rowIndex rowsOf focusGroup groupSelects segment activeDescendant nameFrom nameJoin labelledBy focusTo " +
 		"keyShortcuts accGrid accSet " +
-		"setPos setSize choosesItems search description invalid describedBy errorMessage followX sort level expandable " +
-		"chooseMany serial ignoreInput accessHidden accessDisabled themed lift ringOffset ringColor ringSet clipping zIndex zOrder " +
-		"roleDescription controls hasPopup"
+		"setPos setSize choosesItems search description invalid readOnly multiline describedBy errorMessage followX sort level expandable " +
+		"chooseMany serial ignoreInput handleDoubleClick accessHidden accessDisabled stateRead themed lift ringOffset ringColor ringSet clipping zIndex zOrder " +
+		"roleDescription controls hasPopup popupSet"
 	known := map[string]bool{}
 	for _, f := range strings.Fields(read + " " + other) {
 		known[f] = true
@@ -469,7 +471,9 @@ func TestLayoutInputs(t *testing.T) {
 	ty := reflect.TypeFor[node]()
 	for i := range ty.NumField() {
 		f := ty.Field(i)
-		if f.Name == "layoutStyle" {
+		// The blank field is the padding that keeps the element a whole
+		// number of cache lines (element.go): layout reads no bytes of it.
+		if f.Name == "layoutStyle" || f.Name == "_" {
 			continue
 		}
 		if !known[f.Name] {

@@ -33,13 +33,18 @@ func (a *app) artistEvents(c *ui.Context, d *artistData) {
 func (a *app) event(c *ui.Context, e *netease.Event) {
 	p := a.pal
 	ui.Column(c).Gap(12).Padding(20, 0).BorderWidth(0, 0, 1, 0).BorderColor(p.hairline).Children(func() {
-		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+		who := ui.ButtonBase(c.Key("who")).Gap(12).AlignItems(ui.Center).FocusRing(false).
+			Label(e.User.Nickname).Disabled(e.User.UserID == 0)
+		who.Children(func() {
 			a.cover(c, e.User.AvatarURL, 120, 40, 20)
 			ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
 				ui.Text(c, e.User.Nickname).FontSize(14).FontWeight(600).SingleLine()
 				ui.Text(c, time.UnixMilli(e.Time).Format("2006-01-02 15:04")).FontSize(12).TextColor(p.muted)
 			})
 		})
+		if who.Clicked() {
+			a.open(route{page: pageUser, id: e.User.UserID})
+		}
 		ct := &e.Content
 		if msg := strings.TrimSpace(ct.Msg); msg != "" {
 			ui.Text(c, msg).FontSize(14).LineHeight(1.6)

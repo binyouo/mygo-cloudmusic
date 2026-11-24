@@ -73,6 +73,12 @@ type settings struct {
 	// rising and swelling with the bass: an experiment the listener turns
 	// on.
 	Fog bool `json:"fog"`
+	// The landscape player defaults to the same smoky backdrop as the desktop
+	// presentation. An override keeps that choice separate from portrait.
+	PhoneLandscapeFog *bool `json:"phoneLandscapeFog,omitempty"`
+	// PhoneBackdropMotion turns the phone's Now Playing backdrop into the
+	// cover come alive; off, it stays the still wash. On unless turned off.
+	PhoneBackdropMotion *bool `json:"phoneBackdropMotion,omitempty"`
 	// AppIcon is where the app's icon shows on macOS (appIcons); elsewhere
 	// it is always in the notification area.
 	AppIcon string `json:"appIcon"`
@@ -93,6 +99,17 @@ type settings struct {
 
 func defaultSettings() settings {
 	return settings{AdaptiveMix: true, MotionArtwork: true, CoverTransition: true, LyricsBlur: true, WallpaperIdleSeconds: 120, MenuBarWidth: 180, NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true, StandbyClock: true}
+}
+
+func (s settings) playingFog(phone, wide bool) bool {
+	if phone && wide {
+		return s.PhoneLandscapeFog == nil || *s.PhoneLandscapeFog
+	}
+	return s.Fog
+}
+
+func (s settings) phoneBackdropMotion() bool {
+	return s.PhoneBackdropMotion == nil || *s.PhoneBackdropMotion
 }
 
 func settingsPath() (string, error) {

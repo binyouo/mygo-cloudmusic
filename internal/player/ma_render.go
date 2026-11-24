@@ -202,10 +202,26 @@ func applyMAEffects(pcm []float32, p *maTransitionPlan) {
 
 func prepareFullSmartAudio(ctx context.Context, a, b *pcmTrack, initial mixPlan) (*smartAudio, error) {
 	aa, bb := initial.outAnalysis, initial.inAnalysis
-	if aa == nil || bb == nil || aa.neural == nil || bb.neural == nil {
+	if aa == nil || bb == nil {
 		return nil, errors.New("player: missing MA analysis")
 	}
-	p, err := neuralPlan(ctx, aa.neural, bb.neural, float64(len(aa.tailPCM)/2)/outputRate)
+	buffer := float64(len(aa.tailPCM)/2) / outputRate
+	var p *maTransitionPlan
+	var err error
+	native := aa.deviceTiming != nil && bb.deviceTiming != nil
+	switch {
+	case native:
+		plan, _, ok := chooseDeviceTransition(aa, bb)
+		if !ok {
+			return nil, errors.New("player: Smart Fades not applicable to device analysis")
+		}
+		p = &plan
+		err = p.validate(buffer, bb.deviceTiming.duration)
+	case aa.neural != nil && bb.neural != nil:
+		p, err = neuralPlan(ctx, aa.neural, bb.neural, buffer)
+	default:
+		return nil, errors.New("player: missing MA analysis")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -249,5 +265,45 @@ func prepareFullSmartAudio(ctx context.Context, a, b *pcmTrack, initial mixPlan)
 		}
 	}
 	clock := scheduledTailClock(length, p.Tempo.Steps, frames)
-	return finishSmartAudio(ctx, a, b, out, in, clock, initial.sourceStart, pre, overlap, releaseFrames, enter)
+	start := initial.sourceStart
+	if native && len(p.Tempo.Steps) == 0 {
+		// Play the unmodified prefix from the foreground decoder. A short
+		// track's analysis buffer can start at zero, before its successor
+		// has even loaded, despite the first audible change being much later.
+		skip := deviceMixFirstChange(p, pre)
+		start += skip
+		pre -= skip
+		out = out[skip*2:]
+		clock = scheduledTailClock(length-skip, nil, frames-skip)
+	}
+	return finishSmartAudio(ctx, a, b, out, in, clock, start, pre, overlap, releaseFrames, enter)
+}
+
+func deviceMixFirstChange(p *maTransitionPlan, pre int64) int64 {
+	at := pre
+	include := func(seconds float64) {
+		at = min(at, int64(math.Floor(seconds*outputRate)))
+	}
+	for _, shelf := range []*maShelf{p.EQ.LowOut, p.EQ.HighOut, p.EQ.MidOut} {
+		if shelf == nil {
+			continue
+		}
+		steps := shelf.Steps
+		if steps[0][1] != 0 {
+			return 0
+		}
+		for i := 1; i < len(steps); i++ {
+			if steps[i][1] != 0 {
+				include(steps[i-1][0])
+				break
+			}
+		}
+	}
+	if p.Highpass != nil {
+		include(p.Highpass.Start)
+	}
+	if p.Echo != nil {
+		include(p.Echo.Cut)
+	}
+	return at
 }

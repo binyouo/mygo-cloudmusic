@@ -4,6 +4,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"math"
 	"time"
@@ -13,10 +14,11 @@ import (
 	"github.com/egoist/mygo/ui/chart"
 )
 
-const samples = 15000
-
 type waveform struct {
-	data             [3][samples]float32
+	data             [3][]float32
+	rawX             []float32
+	index            [3]chart.MinMaxIndex
+	samples          int
 	next             int64
 	xs               []float32
 	ys               [3][]float32
@@ -38,10 +40,14 @@ func value(i int64, s int) float32 {
 	return float32(.2 + float64(s)*.3 + v*.55)
 }
 
-func newWaveform(mode string) *waveform {
-	s := &waveform{mode: mode, next: samples, xs: make([]float32, samples)}
+func newWaveform(mode string, samples int) *waveform {
+	s := &waveform{mode: mode, samples: samples, next: int64(samples), xs: make([]float32, samples)}
+	s.rawX = make([]float32, samples, 2*samples)
+	for i := range s.rawX {
+		s.rawX[i] = float32(i)
+	}
 	for k := range 3 {
-		s.ys[k] = make([]float32, samples)
+		s.data[k] = make([]float32, samples, 2*samples)
 		for i := range samples {
 			s.data[k][i] = value(int64(i), k)
 		}
@@ -49,28 +55,57 @@ func newWaveform(mode string) *waveform {
 	return s
 }
 
-// update fills the ring with the samples due by now, and lays the latest
-// 15,000 out as plot fractions.
+// update retains at most two visible windows and indexes only new samples.
 func (s *waveform) update(now time.Time) {
+	samples := s.samples
 	if s.start.IsZero() {
 		s.start = now
 	}
 	elapsed := now.Sub(s.start)
 	target := int64(samples) + elapsed.Milliseconds()
-	// After a long frame, only the samples still visible are made.
-	for i := max(s.next, target-samples); i < target; i++ {
+	// Bound retained history. Rebuild explicitly when old samples expire.
+	if target-int64(s.rawX[0]) > int64(2*samples) {
+		start := target - int64(samples)
+		s.rawX = s.rawX[:0]
 		for k := range 3 {
-			s.data[k][i%samples] = value(i, k)
+			s.index[k].Reset()
+			s.data[k] = s.data[k][:0]
+		}
+		for i := start; i < target; i++ {
+			s.rawX = append(s.rawX, float32(i))
+			for k := range 3 {
+				s.data[k] = append(s.data[k], value(i, k))
+			}
+		}
+		s.next = target
+	}
+	for i := s.next; i < target; i++ {
+		s.rawX = append(s.rawX, float32(i))
+		for k := range 3 {
+			s.data[k] = append(s.data[k], value(i, k))
 		}
 	}
 	s.next = target
-	phase := float32(elapsed%time.Millisecond) / float32(time.Millisecond)
-	for i := range samples {
-		s.xs[i] = (float32(i) - phase) / float32(samples-1)
+	if s.mode == "index" {
 		for k := range 3 {
-			s.ys[k][i] = s.data[k][(target-samples+int64(i))%samples]
+			s.index[k].Update(s.rawX, s.data[k])
 		}
+		return
 	}
+	lo, hi := s.viewport(now)
+	s.xs = s.xs[:0]
+	for _, x := range s.rawX {
+		s.xs = append(s.xs, (x-lo)/(hi-lo))
+	}
+	for k := range 3 {
+		s.ys[k] = s.data[k]
+	}
+}
+
+func (s *waveform) viewport(now time.Time) (float32, float32) {
+	phase := float32(now.Sub(s.start)%time.Millisecond) / float32(time.Millisecond)
+	lo := float32(s.next-int64(s.samples)) + phase
+	return lo, lo + float32(s.samples-1)
 }
 
 var colors = [3]ui.Color{ui.RGB(40, 140, 240), ui.RGB(240, 100, 70), ui.RGB(50, 190, 110)}
@@ -79,10 +114,10 @@ func (s *waveform) view(c *ui.Context) {
 	s.update(c.Now())
 	c.AnimationFrame()
 	t := c.Theme()
-	x := chart.NewLinear(-15, 0)
+	x := chart.NewLinear(-float64(s.samples)/1000, 0)
 	y := chart.NewLinear(0, 1)
 	chart.Plot(c, chart.Axes{Left: y.Ticks(5), Bottom: x.Ticks(5)}, func(area ui.Element) {
-		area.Label("Three live waveforms").Description("15 seconds at 1000 samples per second per series").Draw(func(p *ui.Painter, r ui.Rect) {
+		area.Label("Three live waveforms").Description(fmt.Sprintf("%d samples at 1000 samples per second per series", s.samples)).Draw(func(p *ui.Painter, r ui.Rect) {
 			for _, tick := range y.Ticks(5) {
 				p.Line(r.X, chart.Y(r, tick.At), r.X+r.W, chart.Y(r, tick.At), 1, t.Border)
 			}
@@ -94,7 +129,13 @@ func (s *waveform) view(c *ui.Context) {
 					}
 					// Keep the extremes of each pixel column, into slices
 					// reused every frame.
-					s.bucketX[k], s.bucketY[k] = chart.MinMax(s.bucketX[k], s.bucketY[k], s.xs, s.ys[k], int(math.Ceil(float64(r.W*p.Scale()))))
+					width := int(math.Ceil(float64(r.W * p.Scale())))
+					if s.mode == "index" {
+						lo, hi := s.viewport(c.Now())
+						s.bucketX[k], s.bucketY[k] = s.index[k].Query(s.bucketX[k], s.bucketY[k], lo, hi, width)
+					} else {
+						s.bucketX[k], s.bucketY[k] = chart.MinMax(s.bucketX[k], s.bucketY[k], s.xs, s.ys[k], width)
+					}
 					xs, ys := s.bucketX[k], s.bucketY[k]
 					if s.mode == "path" {
 						p.StrokePath(chart.LineInto(&s.paths[k], r, xs, ys, chart.CurveLinear), 2, colors[k])
@@ -112,14 +153,22 @@ func (s *waveform) view(c *ui.Context) {
 }
 
 func main() {
-	mode := flag.String("mode", "polyline", "how to draw: polyline (MinMax, StrokePolyline), path (MinMax, StrokePath) or raw (every sample, StrokePath)")
+	mode := flag.String("mode", "polyline", "how to draw: index (MinMaxIndex), polyline (MinMax), path (MinMax, StrokePath) or raw (every sample, StrokePath)")
+	samples := flag.Int("samples", 15000, "samples visible per series (at least 2)")
+	duration := flag.Duration("duration", 0, "quit after this duration; zero runs until closed")
 	flag.Parse()
-	if *mode != "polyline" && *mode != "path" && *mode != "raw" {
+	if *mode != "polyline" && *mode != "path" && *mode != "raw" && *mode != "index" {
 		log.Fatal("unknown mode ", *mode)
 	}
-	s := newWaveform(*mode)
+	if *samples < 2 {
+		log.Fatal("samples must be at least 2")
+	}
+	s := newWaveform(*mode, *samples)
 	mygo.App.WhenReady(func() {
-		mygo.NewWindow(mygo.WindowOptions{Title: "Streaming chart", Width: 1000, Height: 600, Content: ui.View(s.view)})
+		mygo.NewWindow(mygo.WindowOptions{Title: "Streaming chart", Width: 1360, Height: 800, Content: ui.View(s.view)})
+		if *duration > 0 {
+			time.AfterFunc(*duration, mygo.App.Quit)
+		}
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

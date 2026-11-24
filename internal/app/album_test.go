@@ -96,7 +96,7 @@ func TestAlbumCommentsTab(t *testing.T) {
 	defer func() { threadComments = old }()
 	a, d := albumApp()
 	a.pl.Cue(d.album.Songs)
-	a.comments = commentState{thread: "R_SO_4_1", track: 1, loaded: true, total: 99}
+	a.comments = &commentState{thread: "R_SO_4_1", track: 1, loaded: true, total: 99}
 	tt := ui.NewTester(a.view, 1200, 800)
 	tt.Frame()
 	if len(requests) != 0 {
@@ -192,7 +192,7 @@ func TestAlbumCommentLike(t *testing.T) {
 	d.tab = 1
 	cm := netease.Comment{ID: 9, Content: "很好听", LikedCount: 41}
 	d.comments.appendPage(&netease.Comments{Hot: []netease.Comment{cm}, Latest: []netease.Comment{cm}, Total: 1})
-	a.comments = commentState{thread: "R_SO_4_1", latest: []netease.Comment{cm}}
+	a.comments = &commentState{thread: "R_SO_4_1", latest: []netease.Comment{cm}}
 	tt := ui.NewTester(a.view, 1200, 1000)
 	tt.Frame()
 	if err := tt.Click("赞"); err != nil {
@@ -265,6 +265,73 @@ func TestAlbumCommentSendAndRetry(t *testing.T) {
 	a.albumCommentSent(&d.comments, &netease.Comment{ID: 10, Content: "同感"}, nil)
 	if d.comments.draft != "" || d.comments.replyID != 0 || d.comments.total != 2 || d.comments.latest[0].ID != 10 || d.comments.offset != 2 {
 		t.Fatal("did not commit the successful reply to the album")
+	}
+}
+
+// The phone loads the album thread when asked and can send a reply with the landscape keyboard covering the bottom.
+func TestPhoneAlbumCommentsSheet(t *testing.T) {
+	type replyRequest struct {
+		thread, text string
+		replyID      int64
+	}
+	loads, sends := make(chan string, 2), make(chan replyRequest, 2)
+	oldLoad, oldSend := threadComments, sendComment
+	threadComments = func(thread string, _, _ int) (*netease.Comments, error) {
+		loads <- thread
+		return &netease.Comments{}, nil
+	}
+	sendComment = func(thread, text string, replyID int64) (*netease.Comment, error) {
+		sends <- replyRequest{thread, text, replyID}
+		return &netease.Comment{ID: 10, Content: text}, nil
+	}
+	defer func() { threadComments, sendComment = oldLoad, oldSend }()
+
+	a, d := albumApp()
+	a.phone = true
+	a.profile = &netease.Profile{UserID: 1}
+	a.pl.Cue(d.album.Songs)
+	a.pl.Hold(18 * time.Second)
+	a.comments = &commentState{track: 1, thread: "R_SO_4_1", loaded: true}
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tt.Frame()
+	if d.comments.loading {
+		t.Fatal("opening the phone album started loading comments")
+	}
+	tapPhone(t, tt, "查看专辑评论")
+	if thread := wait(t, loads, "the album comments"); thread != "R_AL_3_8" {
+		t.Fatalf("requested %q instead of the album thread", thread)
+	}
+	cm := netease.Comment{ID: 9, Content: "很好听"}
+	cm.User.Nickname = "听歌的人"
+	d.comments.loading = false
+	d.comments.appendPage(&netease.Comments{Latest: []netease.Comment{cm}, Total: 1})
+	tt.Frame()
+	tapPhone(t, tt, "回复")
+	if !tt.Focused("专辑评论正文") || d.comments.replyID != 9 {
+		t.Fatal("tapping reply did not focus its composer")
+	}
+	tt.Type("同感")
+	if inset, ok := any(tt).(interface {
+		SetInsets(float32, float32, float32, float32)
+	}); ok {
+		tt.SetSize(844, 390)
+		inset.SetInsets(0, 47, 222, 47)
+		tt.Frame()
+		for _, label := range []string{"专辑评论正文", "发送"} {
+			if box, ok := tt.Find(label); !ok || box.Y+box.H > 168 {
+				t.Fatalf("%s is covered by the landscape keyboard inset: %+v", label, box)
+			}
+		}
+	}
+	tapPhone(t, tt, "发送")
+	if got := wait(t, sends, "the album reply"); got != (replyRequest{"R_AL_3_8", "同感", 9}) {
+		t.Fatalf("sent %+v", got)
+	}
+	tapPhone(t, tt, "关闭专辑评论")
+	if a.phoneAlbumID != 0 || d.tab != 0 || a.route != (route{page: pageAlbum, id: 8}) ||
+		a.pl.Position() != 18*time.Second || !a.pl.Playing() || a.comments.thread != "R_SO_4_1" {
+		t.Fatal("closing the album discussion changed the page, playback, or song thread")
 	}
 }
 

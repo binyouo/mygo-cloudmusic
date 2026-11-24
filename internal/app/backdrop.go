@@ -100,8 +100,9 @@ func Fragment(dst vec4, pos vec2) vec4 {
 
 var fogShader = sync.OnceValue(func() *shader.Shader { return shader.MustCompile(fogSource) })
 
-// backdropFrame is how often the fog is painted while it moves.
-const backdropFrame = time.Second / 30
+// backdropFPS is how often the background is painted while it moves.
+const backdropFPS = 30
+const backdropFrame = time.Second / backdropFPS
 
 // backdropFade is how long another song's backdrop takes to fade in.
 const backdropFade = artworkTransition
@@ -109,92 +110,176 @@ const backdropFade = artworkTransition
 // backdropCache is the backdrop as last painted, and where the fog's
 // drift and its pulse are.
 type backdropCache struct {
-	canvas *ui.Canvas
-	before *ui.Canvas // the song before's, fading out over it
-	fadeAt time.Time  // when it began to
-	art    *artwork
-	tint   ui.Color
-	fog    bool
-	flow   bool
-	at     time.Time // when it was painted
-	drift  float64   // the clouds' time, in seconds, which stops on pause
-	speed  float64   // how fast drift goes: 1 playing, 0 paused
-	level  barState
-	last   time.Time
+	canvas  *ui.Canvas
+	before  *ui.Canvas // the song before's, fading out over it
+	fadeAt  time.Time  // when it began to
+	fadeFor time.Duration
+	art     *artwork
+	tint    ui.Color
+	fog     bool
+	flow    bool
+	living  bool
+	at      time.Time // when it was painted
+	drift   float64   // the clouds' time, in seconds, which stops on pause
+	speed   float64   // how fast drift goes: 1 playing, 0 paused
+	level   barState
+	last    time.Time
 }
 
 // backdrop paints the backdrop behind Now Playing, still or fog.
 func (a *app) backdrop(c *ui.Context, art *artwork, tint ui.Color) {
-	a.backdropWithState(c, art, tint, &a.backdropCache)
+	layer := ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough()
+	a.drawPlayingBackdrop(c, layer, art, tint, nil)
 }
 
-func (a *app) backdropWithState(c *ui.Context, art *artwork, tint ui.Color, bd *backdropCache) {
+// drawPlayingBackdrop paints the backdrop behind the player in layer.
+// shape, on the phone, morphs the sheet the backdrop fills from the mini
+// player's capsule to the window and back: it returns the box to paint,
+// its corner radius, its alpha and whether the sheet is still moving;
+// nil, on the desktop, fills the layer's whole rect, still.
+func (a *app) drawPlayingBackdrop(c *ui.Context, layer ui.Element, art *artwork, tint ui.Color, shape func(r ui.Rect, now time.Time) (box ui.Rect, radius, alpha float32, moving bool)) {
+	bd := &a.backdropCache
 	pl := a.pl
-	fog, still := a.settings.Fog, c.Preferences().ReduceMotion
-	flow := a.settings.MotionArtwork && art != nil && !fog
-	ui.Box(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).PassThrough().Draw(func(p *ui.Painter, r ui.Rect) {
-		// The CPU, drawing the fog for want of a GPU, paints far fewer
-		// pixels, and those once a song: the fog stays still.
+	// On the phone the fog and the flow give way to the living cover.
+	wantFog, still := !a.phone && a.settings.Fog, c.Preferences().ReduceMotion
+	wantFlow := !a.phone && a.settings.MotionArtwork && art != nil && !wantFog
+	layer.Draw(func(p *ui.Painter, r ui.Rect) {
+		now := p.Now()
+		box, radius, alpha, sheetMoving := r, float32(0), float32(1), false
+		if shape != nil {
+			box, radius, alpha, sheetMoving = shape(r, now)
+		}
+		if sheetMoving {
+			p.AnimationFrame()
+		}
+		// The mini player is already underneath this layer. When the
+		// sheet fades, an opaque undercoat here would cover it.
+		if alpha <= 0 || box.W <= 0 || box.H <= 0 {
+			return
+		}
 		gpu := p.Accelerated()
+		// Hold the last living frame through a pull or close. A first
+		// opening can start with the static wash while the shader warms.
+		living := a.livingBackdrop(art, gpu, still, sheetMoving && !bd.living)
+		fog, flow := wantFog && !sheetMoving, wantFlow && !sheetMoving
 		div := float32(8)
 		if fog && gpu {
 			div = 2
 		} else if flow && gpu {
 			div = 4
 		}
+		if a.phone && gpu && (fog || flow) {
+			// Spend fewer pixels on the soft background so it can update
+			// at the same cadence as desktop.
+			div *= 2
+		}
 		cw, ch := int(r.W/div)+1, int(r.H/div)+1
 		if bd.canvas != nil {
-			if w, h := bd.canvas.Size(); w != cw || h != ch {
-				bd.canvas, bd.before = nil, nil
+			newArt := bd.art != art || bd.tint != tint
+			styleChanged := bd.fog != fog || bd.flow != flow || bd.living != living
+			if newArt || styleChanged {
+				bd.canvas, bd.before, bd.fadeAt = bd.before, bd.canvas, now
+				bd.fadeFor = backdropFade
+				if !newArt {
+					bd.fadeFor = 180 * time.Millisecond
+				}
 			}
 		}
-		now := p.Now()
-		if bd.canvas != nil && (bd.art != art || bd.tint != tint) {
-			// Another song: the last one's stays as it was, fading out.
-			bd.canvas, bd.before, bd.fadeAt = bd.before, bd.canvas, now
+		if bd.canvas != nil {
+			if w, h := bd.canvas.Size(); w != cw || h != ch {
+				bd.canvas = nil
+			}
 		}
-		moving := (fog || flow) && gpu && !still
-		lv, live := pl.Levels()
-		moved := bd.step(now, pl.Playing() && moving, lv, live && moving)
+		moving := (fog || flow || living) && gpu && !still && !sheetMoving
 		due := now.Sub(bd.at) >= backdropFrame-2*time.Millisecond
-		if bd.canvas == nil || bd.art != art || bd.tint != tint || bd.fog != fog || bd.flow != flow || moved && due {
+		moved := moving && (pl.Playing() || bd.speed > 0 || bd.level.group(0, 6) > 0.004)
+		if due || !a.phone {
+			// Lyric-only frames keep the cached fog and skip audio
+			// spectrum sampling until a new fog frame is due.
+			var lv [player.Bands]float32
+			var live bool
+			if moving && fog && pl.Playing() {
+				lv, live = pl.Levels()
+			}
+			moved = bd.step(now, pl.Playing() && moving, lv, live && moving)
+		}
+		if bd.canvas == nil || bd.art != art || bd.tint != tint || bd.fog != fog || bd.flow != flow || bd.living != living || moved && due {
 			if bd.canvas == nil {
 				bd.canvas = ui.NewCanvas(cw, ch)
 			}
-			bd.art, bd.tint, bd.fog, bd.at = art, tint, fog, now
+			bd.art, bd.tint, bd.fog, bd.living, bd.at = art, tint, fog, living, now
 			bd.flow = flow
 			bass := bd.level.group(0, 6)
 			bd.canvas.Draw(p, func(cp *ui.Painter) {
 				box := ui.Rect{W: float32(cw), H: float32(ch)}
-				if fog {
+				switch {
+				case living:
+					drawLivingBackdrop(cp, box, art, float32(bd.drift))
+				case fog:
 					drawFog(cp, box, tint, float32(bd.drift), bass)
-				} else if flow {
+				case flow:
 					drawAlbumMesh(cp, box, art, tint, float32(bd.drift))
-				} else {
-					drawBackdrop(cp, box, art, tint)
+				default:
+					drawBackdrop(cp, box, art, tint, a.phone)
 				}
 			})
 		}
-		p.Image(bd.canvas.Bitmap(), r, ui.FillBox)
-		if bd.before != nil {
-			k := clamp01(float32(now.Sub(bd.fadeAt)) / float32(backdropFade))
-			mixing := false
-			if a.npVisual.current == art && a.npVisual.before != nil {
-				k, mixing = a.visualProgress(now)
-			}
-			if k < 1 {
-				p.ImageRegion(bd.before.Bitmap(), ui.Rect{}, r, ui.ImageOptions{Tint: white.Alpha(1 - k)})
-				if !mixing || pl.Playing() {
-					p.AnimationFrame()
+		paint := func() {
+			// The canvas covers box as FillBox covers a rect, so a morphing
+			// sheet shows the middle of it, not a stretched one.
+			src := coverSrc(bd.canvas.Bitmap(), box)
+			p.ImageRegion(bd.canvas.Bitmap(), src, box, ui.ImageOptions{Tint: white.Alpha(alpha)})
+			if bd.before != nil {
+				k := clamp01(float32(now.Sub(bd.fadeAt)) / float32(bd.fadeFor))
+				mixing := false
+				if bd.fadeFor == backdropFade && a.npVisual.current == art && a.npVisual.before != nil {
+					k, mixing = a.visualProgress(now)
 				}
-			} else {
-				bd.before = nil
+				if k < 1 {
+					p.ImageRegion(bd.before.Bitmap(), src, box, ui.ImageOptions{Tint: white.Alpha((1 - k) * alpha)})
+					if !mixing || pl.Playing() {
+						p.AnimationFrame()
+					}
+				} else {
+					bd.before = nil
+				}
 			}
 		}
-		if moved {
-			p.After(backdropFrame)
+		if shape != nil {
+			p.Clip(box, radius, paint)
+		} else {
+			paint()
+		}
+		if moving && moved {
+			if a.phone {
+				p.AnimationFrameRate(backdropFPS)
+			} else {
+				p.After(backdropFrame)
+			}
 		}
 	})
+}
+
+// livingBackdrop reports whether the phone's backdrop is the cover come
+// alive this frame: the setting on, a blurred cover to swirl, a GPU to
+// run the shader on, motion allowed, and the sheet at rest.
+func (a *app) livingBackdrop(art *artwork, gpu, still, sheetMoving bool) bool {
+	return a.phone && a.settings.phoneBackdropMotion() && art != nil && art.backdrop != nil && gpu && !still && !sheetMoving
+}
+
+// coverSrc is the part of bmp, canvas-sized, that covers dst as FillBox
+// would draw it there: the middle of it, keeping its shape.
+func coverSrc(b *ui.Bitmap, dst ui.Rect) ui.Rect {
+	if b == nil {
+		return ui.Rect{}
+	}
+	w, h := b.Size()
+	fw, fh := float32(w), float32(h)
+	if fw <= 0 || fh <= 0 || dst.W <= 0 || dst.H <= 0 {
+		return ui.Rect{W: fw, H: fh}
+	}
+	s := max(dst.W/fw, dst.H/fh)
+	return ui.Rect{X: (fw - dst.W/s) / 2, Y: (fh - dst.H/s) / 2, W: dst.W / s, H: dst.H / s}
 }
 
 // step moves the drift and the pulse on to now, and reports whether
@@ -219,20 +304,23 @@ func (bd *backdropCache) step(now time.Time, playing bool, lv [player.Bands]floa
 	return bd.speed > 0 || bd.level.group(0, 6) > 0.004
 }
 
-// drawBackdrop paints the still backdrop in r.
-func drawBackdrop(p *ui.Painter, r ui.Rect, art *artwork, tint ui.Color) {
+// drawBackdrop paints the still backdrop in r, as Apple's Now Playing
+// does: the cover itself, blown up and blurred to a soft wash of its
+// colors over a deep tint of them, under a vibrancy gradient that dips
+// at the top and goes near black over the controls at the foot
+// (MediaCoreUI's LiveColorAdjustmentsLayer: black .54 at the top, clear
+// by .2, black at the foot).
+func drawBackdrop(p *ui.Painter, r ui.Rect, art *artwork, tint ui.Color, phone bool) {
 	top, foot := backdropColors(tint)
 	p.FillGradient(r, ui.LinearGradient{Angle: 180, Oklab: true, Stops: []ui.GradientStop{
 		{Color: top, At: 0}, {Color: foot, At: 1},
 	}}, 0)
 	if art != nil && art.backdrop != nil {
-		// The cover, blurred, as a faint wash of its own colors.
-		p.ImageRegion(art.backdrop, ui.Rect{W: 48, H: 48}, coverRect(r, 48, 48), ui.ImageOptions{Tint: white.Alpha(0.1)})
+		// The blurred cover is the backdrop, not a tint over it: Apple's
+		// variableBlur radius 50 at this scale reads as a smooth wash.
+		p.ImageRegion(art.backdrop, ui.Rect{W: 48, H: 48}, coverRect(r, 48, 48), ui.ImageOptions{Tint: white.Alpha(0.85)})
 	}
-	// Darker toward the foot, under the controls.
-	p.FillGradient(r, ui.LinearGradient{Angle: 180, Stops: []ui.GradientStop{
-		{Color: ui.RGBA(0, 0, 0, 0), At: 0.55}, {Color: ui.RGBA(0, 0, 0, 0.18), At: 1},
-	}}, 0)
+	drawVibrancy(p, r, phone)
 }
 
 // coverRect returns where an image of w×h goes to cover r, centered.
@@ -250,7 +338,7 @@ func backdropColors(tint ui.Color) (top, foot ui.Color) {
 	if s > 0.12 {
 		s = min(max(s*1.3, 0.45), 0.66)
 	}
-	return hsvColor(h, s, 0.35), hsvColor(h, min(s*1.05, 0.7), 0.24)
+	return hsvColor(h, s, 0.45), hsvColor(h, min(s*1.05, 0.7), 0.3)
 }
 
 // drawFog paints the fog of tint in r at drift seconds, lit by bass.
@@ -269,7 +357,7 @@ func fogColors(tint ui.Color) (deep, fog ui.Color) {
 	if s > 0.12 {
 		s = min(max(s*1.3, 0.6), 0.85)
 	}
-	return hsvColor(h, s, 0.3), hsvColor(h, s*0.6, 0.72)
+	return hsvColor(h, s, 0.38), hsvColor(h, s*0.6, 0.78)
 }
 
 // hsvColor is the color of hue h (degrees), saturation s and value v.

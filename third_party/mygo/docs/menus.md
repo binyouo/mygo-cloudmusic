@@ -47,6 +47,25 @@ A `MenuItem` has:
 - `Subtitle`, a second, smaller line under the label. macOS 14 and browsers
   show it so; earlier macOS, Windows and Linux show it after the label, as
   `Label — Subtitle`;
+- `Badge`, text at the trailing edge of the item, as a count or a latency,
+  and `BadgeAlign`, where it sits in the column the menu's badges share:
+  `BadgeAlignLeft`, `BadgeAlignCenter`, or `BadgeAlignRight` (the default).
+  macOS puts that column after the menu's longest label (and subtitle,
+  where that follows it), and draws the badges in a monospaced-digit font,
+  so a measure keeps its width as its digits change. The column moves when
+  a label, a badge or the visibility of an item changes. `BadgeShape` draws
+  a background behind the badge: `BadgeShapeSquare` on any macOS item, and
+  `BadgeShapeRounded` or `BadgeShapePill` on `KeepOpen` items (other items
+  show a square for any shape). `BadgeColor` (a CSS color) is the
+  background and `BadgeTextColor` the text color, with or without a
+  background. Other platforms show the badge after the label and subtitle,
+  and ignore the shape and colors;
+- `KeepOpen`, which keeps the menu open when the item is chosen on macOS.
+  MyGo draws the item itself, with its label, badge and check mark, in a
+  view that handles the click: the item's menu and the menu above it stay
+  up, so a click can show a state change or start work in place. The view
+  answers the keyboard and VoiceOver as any item does. It does not apply
+  to items with a submenu, or on other platforms;
 - `ID`, to find the item with `Menu.ItemByID`;
 - `Role`, a built-in behavior with its label and accelerator.
 
@@ -106,8 +125,9 @@ the state the app gave them. An item the app disables stays disabled.
 ### Changing items
 
 Change items of a menu in use with their methods, so that the native menu
-follows: `SetLabel`, `SetEnabled`, `SetVisible`, `SetChecked`,
-`SetAccelerator`, `SetSubtitle` and `SetIcon`:
+follows: `SetLabel`, `SetBadge`, `SetBadgeAlign`, `SetBadgeShape`,
+`SetBadgeColor`, `SetBadgeTextColor`, `SetEnabled`, `SetVisible`,
+`SetChecked`, `SetAccelerator`, `SetSubtitle` and `SetIcon`:
 
 ```go
 item := menu.ItemByID("sidebar")
@@ -115,6 +135,25 @@ item.SetChecked(false)
 ```
 
 `Menu.Append` and `Menu.Insert` add items.
+
+### Keeping a menu open
+
+A menu usually closes when the user picks an item. `KeepOpen` keeps the
+item's menu, and the menu above it, open, so a submenu of nodes can show
+which one is chosen without closing and reopening:
+
+```go
+mygo.NewMenu([]*mygo.MenuItem{
+	{Label: "Hong Kong 01", Badge: "45 ms", Type: mygo.MenuItemCheckbox, KeepOpen: true},
+	{Label: "Tokyo IEPL", Badge: "120 ms", Type: mygo.MenuItemCheckbox, KeepOpen: true},
+})
+```
+
+MyGo draws each such item in a view of its own, with its label, badge,
+check mark, and its icon and subtitle where it has them; the view has one
+line, so a subtitle follows the label. `Click` still runs, and `SetLabel`,
+`SetBadge` and `SetChecked` update the view. The item keeps the menu open
+on macOS; other platforms close the menu as they always do.
 
 ### Icons
 
@@ -153,6 +192,27 @@ servers.ItemByID("osaka").SetIcon(nil)
 image take the color of the menu's text, as macOS tints its template
 images: white in a dark menu and on the highlight. Linux shows template
 icons as they are.
+
+`NewMenuIconSVG` makes an icon of an SVG instead, the `*ui.SVG` that
+`ui.ParseSVG` parses, so that an app shows the icons it draws with
+`ui.Icon` in its menus too. It draws the SVG once, with native UI's
+renderer (`ui.SVG`'s `Image`), to an image of 64 pixels on its longer
+side, which stays sharp up to 400% scaling, and returns an error for a nil
+SVG or one without a size. As a template, only its shapes count, whatever
+their colors, as for `ui.Icon`:
+
+```go
+//go:embed icons/trash.svg
+var trashSVG []byte
+
+var trash = ui.MustParseSVG(trashSVG) // ui.Icon(c, trash) in the window
+
+trashIcon, err := mygo.NewMenuIconSVG(trash, true)
+```
+
+In the menus native UI draws, an item's
+[`IconColor`](ui/context-menu.md#items) gives its template icon a color
+of its own.
 
 MyGo decodes and scales each image once, however many items show it and
 however often their menus open or are made again, the icons of the same
@@ -392,10 +452,20 @@ func speed(mbps float64) string {
 tray.SetTitle(speed(rate))
 ```
 
-Only digits are tabular: letters keep their own widths, so a title that
-switches units (`9 KB/s`, then `1.2 MB/s`) changes width with the unit.
-Keeping that steady is the app's choice, by showing the value in one unit
-as above, for one.
+Only digits are tabular: letters and punctuation keep their own widths, so
+a title that switches units (`9 KB/s`, then `1.2 MB/s`) changes width with
+the unit. To keep that steady, show the value in one unit as above, or make
+the tray with `MonospacedTitle`: its title is drawn in the system's
+monospaced font, where every character is as wide as a digit, the figure
+space too.
+
+```go
+tray, err := mygo.NewTray(mygo.TrayOptions{Icon: icon, MonospacedTitle: true})
+
+// "↓  0B ↑ 60K", "↓1.3M ↑999M": all as wide, each rate padded to four
+// characters.
+tray.SetTitle("↓" + pad(down) + " ↑" + pad(up))
+```
 
 An app may show several icons, as a menu bar app showing its measures each
 in an item of its own. On macOS a new icon goes left of those already
@@ -453,7 +523,12 @@ On Linux tray icons use AppIndicator, which needs
 listener answers activation (with a release of the library that has the
 `activate` signal; older ones report no clicks), which GNOME's AppIndicator extension sends on
 a double click and which opens the menu on a single one after the double
-click time. `NewTray` returns an error without the library.
+click time. `NewTray` returns an error without the library. Template tray
+icons are white while the desktop prefers dark, with their alpha kept,
+and redraw when the settings portal's color scheme changes. `Tray.Dark`
+reads that desktop preference, independent of `Theme.SetSource`; without
+a portal it returns false. AppIndicator cannot report the panel's own
+theme, which can differ from the desktop's.
 
 Apps that live in the menu bar usually drop their Dock icon on macOS:
 

@@ -224,6 +224,20 @@ type sidebarScroller struct {
 	d      *diffScene
 	down   bool
 	lo, hi int
+	turns  int // how many times the scrolling has changed direction
+}
+
+// warm steps until the history has scrolled at least 100 times and through
+// its range both ways, so every row it shows has been laid out. How many
+// steps that takes depends on the rows' height, which depends on the fonts
+// the system has.
+func (s *sidebarScroller) warm() {
+	for i := 0; i < 100 || s.turns < 3; i++ {
+		if i == 100000 {
+			panic("the history never scrolled through its range")
+		}
+		s.step()
+	}
 }
 
 func (s *sidebarScroller) step() {
@@ -232,12 +246,17 @@ func (s *sidebarScroller) step() {
 	if hi == 0 {
 		lo, hi = 0, len(s.d.commits)-1
 	}
+	down := s.down
 	switch {
 	case last >= hi:
-		s.down = false
+		down = false
 	case first <= lo:
-		s.down = true
+		down = true
 	}
+	if down != s.down {
+		s.turns++
+	}
+	s.down = down
 	dy := float32(-40)
 	if s.down {
 		dy = 40
@@ -266,8 +285,13 @@ func BenchmarkDiffScrollSidebarWarm(b *testing.B) { benchDiffScroll(b, false, 80
 func benchDiffScroll(b *testing.B, diff bool, lo, hi int) {
 	tt, d := diffSceneTester(diff)
 	s := &sidebarScroller{tt: tt, d: d, lo: lo, hi: hi}
-	for range 100 {
-		s.step()
+	if hi == 0 {
+		// Scrolling the whole history keeps laying out rows it hasn't shown.
+		for range 100 {
+			s.step()
+		}
+	} else {
+		s.warm()
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -292,9 +316,7 @@ func TestDiffFrameAllocs(t *testing.T) {
 	both := testing.AllocsPerRun(100, s.step)
 	tt, d = diffSceneTester(false)
 	s = &sidebarScroller{tt: tt, d: d, lo: 80, hi: 120}
-	for range 100 {
-		s.step()
-	}
+	s.warm()
 	warm := testing.AllocsPerRun(100, s.step)
 	t.Logf("allocations a frame: steady %.0f, scrolling the sidebar %.0f, with the diff %.0f, within rows laid out %.0f", steady, sidebar, both, warm)
 	// Frames that lay nothing out allocate twice on every platform, however
@@ -302,5 +324,25 @@ func TestDiffFrameAllocs(t *testing.T) {
 	// area (raster's team).
 	if steady > 2 || warm > 2 {
 		t.Errorf("a steady frame allocates %.0f times, and one scrolling within rows laid out %.0f, not 2", steady, warm)
+	}
+}
+
+// BenchmarkPainterRichText renders the frames of a view drawing 80 lines
+// with Painter.RichText, as a diff pane does: the same lines, or the next
+// page of them each frame, which lays out every line anew.
+func BenchmarkPainterRichText(b *testing.B) {
+	for _, pages := range []bool{false, true} {
+		b.Run(map[bool]string{false: "steady", true: "pages"}[pages], func(b *testing.B) {
+			rl := newRichLines(4000)
+			rl.shown = 80
+			tt := coreNewTester(rl.view, 400, 80*16)
+			b.ReportAllocs()
+			for b.Loop() {
+				if pages {
+					rl.from += rl.shown
+				}
+				tt.Frame()
+			}
+		})
 	}
 }

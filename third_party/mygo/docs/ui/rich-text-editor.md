@@ -44,6 +44,11 @@ was, sharing with it all they did not change. Keeping a version, to undo,
 to save later or to compare, costs a pointer, and a version can be read
 from any goroutine while others are made.
 
+`ParagraphStyle.QuoteDepth` keeps nested quotations separate from `Indent`,
+the level of a list item. `Quote: true` with zero depth still means one
+quotation. The depth follows paragraph splits and joins and survives undo,
+JSON, HTML and Markdown, including lists inside nested quotations.
+
 ```go
 note := richtext.TextOf(
 	richtext.Paragraph{Style: richtext.ParagraphStyle{Heading: 1}, Runs: []richtext.Run{{Text: "Groceries"}}},
@@ -189,6 +194,21 @@ made through the document. `EditorOptions` set:
 - `OnLink`, to open links itself instead of the system;
 - `OnLinkCommand`, to ask for a link's URL on ⌘K, as in a popover;
 - `TagStyle`, to style the runs that carry a `Tag`.
+- `Menu`, to build the context menu in place of the editor's own, as an app
+  with a menu of its own opens it;
+- `OnKey`, asked about a key before the editor acts on it, as an app's
+  popup over the text (a list of completions, placed at
+  `Document.CaretRect`) takes the arrows, Enter and Escape: true takes the
+  key;
+- `Spans`, given the spans a paragraph is drawn as and returning them
+  split, colored or spaced otherwise, their text the same, as an app colors
+  a block of code by its language or spaces the letters; change
+  `SpansVersion` when what it does changes, for the paragraphs to be laid
+  out again;
+- `Space`, given a paragraph and returning the room in DIPs to leave
+  above it, more than the theme's, as a list opens a place where an item
+  dragged would go; less than zero takes room away from the theme's, down
+  to none, as a rule's paragraph sits closer to the text around it;
 - `Theme`, how the text looks (see [Theme](#theme)).
 
 The keys are those of word processors, with Control in place of Command off
@@ -236,10 +256,10 @@ focus. Paste and Match Style pastes plain text in the typing attributes.
 `EditorOptions.Theme` sets how the text looks: the colors of text, muted
 text, links, the caret and the selection; the font, size and colors of
 code, within text and in blocks, and the corners and room of blocks of
-code; each level of heading's size, weight, color and room above and
-below; the first-line indent of body paragraphs and the room between
-them; the indentation of lists, the colors of their markers and check
-boxes; the bar and text of quotations; and the padding of `Editor`,
+code; each level of heading's size, weight, color, line height and room
+above and below; the first-line indent of body paragraphs and the room
+between them; the indentation of lists, the colors of their markers and
+check boxes; the bar and text of quotations; and the padding of `Editor`,
 which replaces the window theme's. What it leaves zero takes the
 value of `DefaultTheme` for the window's theme, so that a theme sets only
 what it changes, and follows the window into dark mode:
@@ -268,6 +288,23 @@ default, as in notes. For prose, set them apart in either of two ways:
   indented.
 - `ParagraphSpacing` puts room between two body paragraphs, as prose on
   screens does. Headings keep their own room above and below.
+
+A heading's lines take the text's line height, `Font.LineHeight`, times
+its size, unless its `LineHeight` sets another, in ems of its size: a type
+scale gives large headings tighter leading than the text. A line is never
+shorter than its font's ascent and descent, which differ from one
+platform's font to another's: Segoe UI's on Windows are 1.33 ems, so lines
+of 30 under a heading of 24 come out 31.9 there.
+
+```go
+// Text of 15 on lines of 22, a first heading of 24 on lines of 30.
+richtext.Editor(c, doc, richtext.EditorOptions{
+	Font: ui.Font{Size: 15, LineHeight: 22.0 / 15},
+	Theme: &richtext.Theme{Headings: [6]richtext.HeadingStyle{
+		{Size: 24.0 / 15, LineHeight: 30.0 / 24},
+	}},
+})
+```
 
 ```go
 richtext.EditorBase(c, app.doc, richtext.EditorOptions{Theme: &richtext.Theme{
@@ -309,6 +346,89 @@ spacing between paragraphs) is left out of its box, so a mark at its top
 lines up with its first line. `VisibleParagraphs` lays out only what is in
 view, as painting does, so it costs as little in a long document as in a
 short one. It returns nil until an editor showed the document.
+
+## The caret on screen
+
+`Document.CaretRect` returns where the editor shows the caret, focused or
+not: a line as high as the caret's, in DIPs from the top left of the
+editor's element, scrolled, and whether it is in view. Read it as the view
+builds to place a popup at the caret, as completions after a `/` or an `@`,
+whose arrows, Enter and Escape `OnKey` takes. Put the popup in a box with
+the editor, placed at the bottom of the caret:
+
+```go
+caret, ok := app.doc.CaretRect()
+ui.Box(c).Fill().Children(func() {
+	richtext.EditorBase(c, app.doc, richtext.EditorOptions{OnKey: app.completionKey}).Fill()
+	if app.completing && ok {
+		ui.Column(c).Absolute().Left(caret.X).Top(caret.Y + caret.H + 4).Children(func() {
+			for _, s := range app.completions {
+				ui.Text(c, s)
+			}
+		})
+	}
+})
+```
+
+As with the paragraphs, the caret is where the editor paints it in that
+frame: one that moves it from where it was read, as the user types, the
+editor scrolls or its width changes, builds another, so the popup follows
+the caret. `ok` is false until an editor showed the document, and while the
+caret is scrolled out of view, where the popup hides.
+
+## Scrolling
+
+The editor scrolls itself: with the wheel, its scroll bar, a selection
+dragged to its edges, and to keep the caret in view. `Document.ScrollBy`
+and `Document.ScrollToParagraph` scroll the editor that showed the
+document last, as far as its text goes, and ask for a frame to paint it:
+
+| Method | Does |
+|---|---|
+| `ScrollBy(dy)` | scrolls by `dy` DIPs, down when positive, and reports whether it moved |
+| `ScrollToParagraph(i, align)` | lines paragraph `i` up with the editor's top, middle or bottom (`ui.ScrollStart`, `ui.ScrollCenter`, `ui.ScrollEnd`), or scrolls as little as shows it (`ui.ScrollNearest`), as an element's `ScrollIntoView` does |
+
+An app that drags something of its own over the text, as a block by a
+handle beside it, scrolls the editor while the pointer is near its top or
+bottom edge, as the editor does while the user drags a selection there:
+
+```go
+// y is the pointer's height in the editor's element, h the element's.
+if app.dragging {
+	switch y, h := app.dragY, app.editorH; {
+	case y < 24:
+		app.doc.ScrollBy(y - 24)
+		c.After(16 * time.Millisecond)
+	case y > h-24:
+		app.doc.ScrollBy(y - (h - 24))
+		c.After(16 * time.Millisecond)
+	}
+}
+```
+
+Both lay out what is in view as they scroll, so that `VisibleParagraphs`
+and `CaretRect` read after them give where the paragraphs and the caret
+went, and both do nothing until an editor showed the document.
+
+The editor keeps its place by the first paragraph in view: what grows
+above it, as a paragraph laid out for the first time, moves nothing on
+screen, and what grows below its top moves what is below. While the
+editor has the keyboard focus and is scrolled down its text, it keeps its
+place by the caret's paragraph instead, when that is in view, as browsers
+prefer the focused editable element (CSS Scroll Anchoring's priority
+candidates): what grows between the top of the view and the caret, as the
+room `EditorOptions.Space` leaves or an edit, moves the text above it up,
+and the line being typed stays. An editor scrolled to its top stays there.
+An edit of several replacements keeps the place the same way, following
+them one by one: a paragraph moved from above the view into it in one
+`Document.Edit` leaves the paragraphs in view that did not move where they
+were, and so do undoing and redoing the move. What such an edit puts right
+where the first paragraph in view starts goes above the view, as browsers'
+scroll anchoring keeps the first node in view below what is added before
+it, so undoing a move puts the view back; an edit of one replacement shows
+it at the top of the view, as ever. Undo and redo follow a step's
+replacements up to 16 of them; a longer step, as typing a while, is one
+region, and the view goes where it did before.
 
 ## Typing at the edges of formats
 

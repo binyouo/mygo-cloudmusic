@@ -1,0 +1,10 @@
+{
+  "mobile": {
+    "id": "cloudmusic_beat",
+    "ios": {
+      "sources": ["ios/*.swift"],
+      "class": "CloudMusicBeatPlugin",
+      "frameworks": ["CoreML"]
+    }
+  }
+}

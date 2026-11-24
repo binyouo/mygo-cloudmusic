@@ -9,169 +9,166 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as IndexRouteImport } from './routes/index'
-import { Route as R404RouteImport } from './routes/404'
-import { Route as BenchmarksRouteImport } from './routes/benchmarks'
-import { Route as DocsRouteRouteImport } from './routes/docs/route'
 import { Route as MeasuresRouteImport } from './routes/measures'
-import { Route as ShowcaseRouteImport } from './routes/showcase'
-import { Route as DocsIndexRouteImport } from './routes/docs/index'
-import { Route as DocsSplatRouteImport } from './routes/docs/$'
-import { Route as DocsSearchDotjsonRouteImport } from './routes/docs/search[.]json'
+import { Route as Char123LangChar125RouteRouteImport } from './routes/{-$lang}/route'
+import { Route as Char123LangChar125IndexRouteImport } from './routes/{-$lang}/index'
+import { Route as Char123LangChar125404RouteImport } from './routes/{-$lang}/404'
+import { Route as Char123LangChar125BenchmarksRouteImport } from './routes/{-$lang}/benchmarks'
+import { Route as Char123LangChar125DocsRouteRouteImport } from './routes/{-$lang}/docs/route'
+import { Route as Char123LangChar125ShowcaseRouteImport } from './routes/{-$lang}/showcase'
+import { Route as Char123LangChar125SponsorsRouteImport } from './routes/{-$lang}/sponsors'
+import { Route as Char123LangChar125DocsIndexRouteImport } from './routes/{-$lang}/docs/index'
+import { Route as Char123LangChar125DocsSplatRouteImport } from './routes/{-$lang}/docs/$'
+import { Route as Char123LangChar125DocsSearchDotjsonRouteImport } from './routes/{-$lang}/docs/search[.]json'
 
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const R404Route = R404RouteImport.update({
-  id: '/404',
-  path: '/404',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BenchmarksRoute = BenchmarksRouteImport.update({
-  id: '/benchmarks',
-  path: '/benchmarks',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DocsRouteRoute = DocsRouteRouteImport.update({
-  id: '/docs',
-  path: '/docs',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const MeasuresRoute = MeasuresRouteImport.update({
   id: '/measures',
   path: '/measures',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ShowcaseRoute = ShowcaseRouteImport.update({
-  id: '/showcase',
-  path: '/showcase',
+const Char123LangChar125RouteRoute = Char123LangChar125RouteRouteImport.update({
+  id: '/{-$lang}',
+  path: '/{-$lang}',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DocsIndexRoute = DocsIndexRouteImport.update({
+const Char123LangChar125IndexRoute = Char123LangChar125IndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => DocsRouteRoute,
+  getParentRoute: () => Char123LangChar125RouteRoute,
 } as any)
-const DocsSplatRoute = DocsSplatRouteImport.update({
-  id: '/$',
-  path: '/$',
-  getParentRoute: () => DocsRouteRoute,
+const Char123LangChar125404Route = Char123LangChar125404RouteImport.update({
+  id: '/404',
+  path: '/404',
+  getParentRoute: () => Char123LangChar125RouteRoute,
 } as any)
-const DocsSearchDotjsonRoute = DocsSearchDotjsonRouteImport.update({
-  id: '/search.json',
-  path: '/search.json',
-  getParentRoute: () => DocsRouteRoute,
-} as any)
+const Char123LangChar125BenchmarksRoute =
+  Char123LangChar125BenchmarksRouteImport.update({
+    id: '/benchmarks',
+    path: '/benchmarks',
+    getParentRoute: () => Char123LangChar125RouteRoute,
+  } as any)
+const Char123LangChar125DocsRouteRoute =
+  Char123LangChar125DocsRouteRouteImport.update({
+    id: '/docs',
+    path: '/docs',
+    getParentRoute: () => Char123LangChar125RouteRoute,
+  } as any)
+const Char123LangChar125ShowcaseRoute =
+  Char123LangChar125ShowcaseRouteImport.update({
+    id: '/showcase',
+    path: '/showcase',
+    getParentRoute: () => Char123LangChar125RouteRoute,
+  } as any)
+const Char123LangChar125SponsorsRoute =
+  Char123LangChar125SponsorsRouteImport.update({
+    id: '/sponsors',
+    path: '/sponsors',
+    getParentRoute: () => Char123LangChar125RouteRoute,
+  } as any)
+const Char123LangChar125DocsIndexRoute =
+  Char123LangChar125DocsIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => Char123LangChar125DocsRouteRoute,
+  } as any)
+const Char123LangChar125DocsSplatRoute =
+  Char123LangChar125DocsSplatRouteImport.update({
+    id: '/$',
+    path: '/$',
+    getParentRoute: () => Char123LangChar125DocsRouteRoute,
+  } as any)
+const Char123LangChar125DocsSearchDotjsonRoute =
+  Char123LangChar125DocsSearchDotjsonRouteImport.update({
+    id: '/search.json',
+    path: '/search.json',
+    getParentRoute: () => Char123LangChar125DocsRouteRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
-  '/docs': typeof DocsRouteRouteWithChildren
-  '/404': typeof R404Route
-  '/benchmarks': typeof BenchmarksRoute
+  '/{-$lang}': typeof Char123LangChar125RouteRouteWithChildren
   '/measures': typeof MeasuresRoute
-  '/showcase': typeof ShowcaseRoute
-  '/docs/$': typeof DocsSplatRoute
-  '/docs/search.json': typeof DocsSearchDotjsonRoute
-  '/docs/': typeof DocsIndexRoute
+  '/{-$lang}/docs': typeof Char123LangChar125DocsRouteRouteWithChildren
+  '/{-$lang}/404': typeof Char123LangChar125404Route
+  '/{-$lang}/benchmarks': typeof Char123LangChar125BenchmarksRoute
+  '/{-$lang}/showcase': typeof Char123LangChar125ShowcaseRoute
+  '/{-$lang}/sponsors': typeof Char123LangChar125SponsorsRoute
+  '/{-$lang}/': typeof Char123LangChar125IndexRoute
+  '/{-$lang}/docs/$': typeof Char123LangChar125DocsSplatRoute
+  '/{-$lang}/docs/search.json': typeof Char123LangChar125DocsSearchDotjsonRoute
+  '/{-$lang}/docs/': typeof Char123LangChar125DocsIndexRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
-  '/404': typeof R404Route
-  '/benchmarks': typeof BenchmarksRoute
   '/measures': typeof MeasuresRoute
-  '/showcase': typeof ShowcaseRoute
-  '/docs/$': typeof DocsSplatRoute
-  '/docs/search.json': typeof DocsSearchDotjsonRoute
-  '/docs': typeof DocsIndexRoute
+  '/{-$lang}/404': typeof Char123LangChar125404Route
+  '/{-$lang}/benchmarks': typeof Char123LangChar125BenchmarksRoute
+  '/{-$lang}/showcase': typeof Char123LangChar125ShowcaseRoute
+  '/{-$lang}/sponsors': typeof Char123LangChar125SponsorsRoute
+  '/{-$lang}': typeof Char123LangChar125IndexRoute
+  '/{-$lang}/docs/$': typeof Char123LangChar125DocsSplatRoute
+  '/{-$lang}/docs/search.json': typeof Char123LangChar125DocsSearchDotjsonRoute
+  '/{-$lang}/docs': typeof Char123LangChar125DocsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
-  '/docs': typeof DocsRouteRouteWithChildren
-  '/404': typeof R404Route
-  '/benchmarks': typeof BenchmarksRoute
+  '/{-$lang}': typeof Char123LangChar125RouteRouteWithChildren
   '/measures': typeof MeasuresRoute
-  '/showcase': typeof ShowcaseRoute
-  '/docs/$': typeof DocsSplatRoute
-  '/docs/search.json': typeof DocsSearchDotjsonRoute
-  '/docs/': typeof DocsIndexRoute
+  '/{-$lang}/docs': typeof Char123LangChar125DocsRouteRouteWithChildren
+  '/{-$lang}/404': typeof Char123LangChar125404Route
+  '/{-$lang}/benchmarks': typeof Char123LangChar125BenchmarksRoute
+  '/{-$lang}/showcase': typeof Char123LangChar125ShowcaseRoute
+  '/{-$lang}/sponsors': typeof Char123LangChar125SponsorsRoute
+  '/{-$lang}/': typeof Char123LangChar125IndexRoute
+  '/{-$lang}/docs/$': typeof Char123LangChar125DocsSplatRoute
+  '/{-$lang}/docs/search.json': typeof Char123LangChar125DocsSearchDotjsonRoute
+  '/{-$lang}/docs/': typeof Char123LangChar125DocsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | '/'
-    | '/docs'
-    | '/404'
-    | '/benchmarks'
+    | '/{-$lang}'
     | '/measures'
-    | '/showcase'
-    | '/docs/$'
-    | '/docs/search.json'
-    | '/docs/'
+    | '/{-$lang}/docs'
+    | '/{-$lang}/404'
+    | '/{-$lang}/benchmarks'
+    | '/{-$lang}/showcase'
+    | '/{-$lang}/sponsors'
+    | '/{-$lang}/'
+    | '/{-$lang}/docs/$'
+    | '/{-$lang}/docs/search.json'
+    | '/{-$lang}/docs/'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/'
-    | '/404'
-    | '/benchmarks'
     | '/measures'
-    | '/showcase'
-    | '/docs/$'
-    | '/docs/search.json'
-    | '/docs'
+    | '/{-$lang}/404'
+    | '/{-$lang}/benchmarks'
+    | '/{-$lang}/showcase'
+    | '/{-$lang}/sponsors'
+    | '/{-$lang}'
+    | '/{-$lang}/docs/$'
+    | '/{-$lang}/docs/search.json'
+    | '/{-$lang}/docs'
   id:
     | '__root__'
-    | '/'
-    | '/docs'
-    | '/404'
-    | '/benchmarks'
+    | '/{-$lang}'
     | '/measures'
-    | '/showcase'
-    | '/docs/$'
-    | '/docs/search.json'
-    | '/docs/'
+    | '/{-$lang}/docs'
+    | '/{-$lang}/404'
+    | '/{-$lang}/benchmarks'
+    | '/{-$lang}/showcase'
+    | '/{-$lang}/sponsors'
+    | '/{-$lang}/'
+    | '/{-$lang}/docs/$'
+    | '/{-$lang}/docs/search.json'
+    | '/{-$lang}/docs/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
-  DocsRouteRoute: typeof DocsRouteRouteWithChildren
-  R404Route: typeof R404Route
-  BenchmarksRoute: typeof BenchmarksRoute
+  Char123LangChar125RouteRoute: typeof Char123LangChar125RouteRouteWithChildren
   MeasuresRoute: typeof MeasuresRoute
-  ShowcaseRoute: typeof ShowcaseRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/404': {
-      id: '/404'
-      path: '/404'
-      fullPath: '/404'
-      preLoaderRoute: typeof R404RouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/benchmarks': {
-      id: '/benchmarks'
-      path: '/benchmarks'
-      fullPath: '/benchmarks'
-      preLoaderRoute: typeof BenchmarksRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/docs': {
-      id: '/docs'
-      path: '/docs'
-      fullPath: '/docs'
-      preLoaderRoute: typeof DocsRouteRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/measures': {
       id: '/measures'
       path: '/measures'
@@ -179,60 +176,126 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MeasuresRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/showcase': {
-      id: '/showcase'
-      path: '/showcase'
-      fullPath: '/showcase'
-      preLoaderRoute: typeof ShowcaseRouteImport
+    '/{-$lang}': {
+      id: '/{-$lang}'
+      path: '/{-$lang}'
+      fullPath: '/{-$lang}'
+      preLoaderRoute: typeof Char123LangChar125RouteRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/docs/': {
-      id: '/docs/'
+    '/{-$lang}/': {
+      id: '/{-$lang}/'
       path: '/'
-      fullPath: '/docs/'
-      preLoaderRoute: typeof DocsIndexRouteImport
-      parentRoute: typeof DocsRouteRoute
+      fullPath: '/{-$lang}/'
+      preLoaderRoute: typeof Char123LangChar125IndexRouteImport
+      parentRoute: typeof Char123LangChar125RouteRoute
     }
-    '/docs/$': {
-      id: '/docs/$'
+    '/{-$lang}/404': {
+      id: '/{-$lang}/404'
+      path: '/404'
+      fullPath: '/{-$lang}/404'
+      preLoaderRoute: typeof Char123LangChar125404RouteImport
+      parentRoute: typeof Char123LangChar125RouteRoute
+    }
+    '/{-$lang}/benchmarks': {
+      id: '/{-$lang}/benchmarks'
+      path: '/benchmarks'
+      fullPath: '/{-$lang}/benchmarks'
+      preLoaderRoute: typeof Char123LangChar125BenchmarksRouteImport
+      parentRoute: typeof Char123LangChar125RouteRoute
+    }
+    '/{-$lang}/docs': {
+      id: '/{-$lang}/docs'
+      path: '/docs'
+      fullPath: '/{-$lang}/docs'
+      preLoaderRoute: typeof Char123LangChar125DocsRouteRouteImport
+      parentRoute: typeof Char123LangChar125RouteRoute
+    }
+    '/{-$lang}/showcase': {
+      id: '/{-$lang}/showcase'
+      path: '/showcase'
+      fullPath: '/{-$lang}/showcase'
+      preLoaderRoute: typeof Char123LangChar125ShowcaseRouteImport
+      parentRoute: typeof Char123LangChar125RouteRoute
+    }
+    '/{-$lang}/sponsors': {
+      id: '/{-$lang}/sponsors'
+      path: '/sponsors'
+      fullPath: '/{-$lang}/sponsors'
+      preLoaderRoute: typeof Char123LangChar125SponsorsRouteImport
+      parentRoute: typeof Char123LangChar125RouteRoute
+    }
+    '/{-$lang}/docs/': {
+      id: '/{-$lang}/docs/'
+      path: '/'
+      fullPath: '/{-$lang}/docs/'
+      preLoaderRoute: typeof Char123LangChar125DocsIndexRouteImport
+      parentRoute: typeof Char123LangChar125DocsRouteRoute
+    }
+    '/{-$lang}/docs/$': {
+      id: '/{-$lang}/docs/$'
       path: '/$'
-      fullPath: '/docs/$'
-      preLoaderRoute: typeof DocsSplatRouteImport
-      parentRoute: typeof DocsRouteRoute
+      fullPath: '/{-$lang}/docs/$'
+      preLoaderRoute: typeof Char123LangChar125DocsSplatRouteImport
+      parentRoute: typeof Char123LangChar125DocsRouteRoute
     }
-    '/docs/search.json': {
-      id: '/docs/search.json'
+    '/{-$lang}/docs/search.json': {
+      id: '/{-$lang}/docs/search.json'
       path: '/search.json'
-      fullPath: '/docs/search.json'
-      preLoaderRoute: typeof DocsSearchDotjsonRouteImport
-      parentRoute: typeof DocsRouteRoute
+      fullPath: '/{-$lang}/docs/search.json'
+      preLoaderRoute: typeof Char123LangChar125DocsSearchDotjsonRouteImport
+      parentRoute: typeof Char123LangChar125DocsRouteRoute
     }
   }
 }
 
-interface DocsRouteRouteChildren {
-  DocsSplatRoute: typeof DocsSplatRoute
-  DocsSearchDotjsonRoute: typeof DocsSearchDotjsonRoute
-  DocsIndexRoute: typeof DocsIndexRoute
+interface Char123LangChar125DocsRouteRouteChildren {
+  Char123LangChar125DocsSplatRoute: typeof Char123LangChar125DocsSplatRoute
+  Char123LangChar125DocsSearchDotjsonRoute: typeof Char123LangChar125DocsSearchDotjsonRoute
+  Char123LangChar125DocsIndexRoute: typeof Char123LangChar125DocsIndexRoute
 }
 
-const DocsRouteRouteChildren: DocsRouteRouteChildren = {
-  DocsSplatRoute: DocsSplatRoute,
-  DocsSearchDotjsonRoute: DocsSearchDotjsonRoute,
-  DocsIndexRoute: DocsIndexRoute,
+const Char123LangChar125DocsRouteRouteChildren: Char123LangChar125DocsRouteRouteChildren =
+  {
+    Char123LangChar125DocsSplatRoute: Char123LangChar125DocsSplatRoute,
+    Char123LangChar125DocsSearchDotjsonRoute:
+      Char123LangChar125DocsSearchDotjsonRoute,
+    Char123LangChar125DocsIndexRoute: Char123LangChar125DocsIndexRoute,
+  }
+
+const Char123LangChar125DocsRouteRouteWithChildren =
+  Char123LangChar125DocsRouteRoute._addFileChildren(
+    Char123LangChar125DocsRouteRouteChildren,
+  )
+
+interface Char123LangChar125RouteRouteChildren {
+  Char123LangChar125DocsRouteRoute: typeof Char123LangChar125DocsRouteRouteWithChildren
+  Char123LangChar125404Route: typeof Char123LangChar125404Route
+  Char123LangChar125BenchmarksRoute: typeof Char123LangChar125BenchmarksRoute
+  Char123LangChar125ShowcaseRoute: typeof Char123LangChar125ShowcaseRoute
+  Char123LangChar125SponsorsRoute: typeof Char123LangChar125SponsorsRoute
+  Char123LangChar125IndexRoute: typeof Char123LangChar125IndexRoute
 }
 
-const DocsRouteRouteWithChildren = DocsRouteRoute._addFileChildren(
-  DocsRouteRouteChildren,
-)
+const Char123LangChar125RouteRouteChildren: Char123LangChar125RouteRouteChildren =
+  {
+    Char123LangChar125DocsRouteRoute:
+      Char123LangChar125DocsRouteRouteWithChildren,
+    Char123LangChar125404Route: Char123LangChar125404Route,
+    Char123LangChar125BenchmarksRoute: Char123LangChar125BenchmarksRoute,
+    Char123LangChar125ShowcaseRoute: Char123LangChar125ShowcaseRoute,
+    Char123LangChar125SponsorsRoute: Char123LangChar125SponsorsRoute,
+    Char123LangChar125IndexRoute: Char123LangChar125IndexRoute,
+  }
+
+const Char123LangChar125RouteRouteWithChildren =
+  Char123LangChar125RouteRoute._addFileChildren(
+    Char123LangChar125RouteRouteChildren,
+  )
 
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
-  DocsRouteRoute: DocsRouteRouteWithChildren,
-  R404Route: R404Route,
-  BenchmarksRoute: BenchmarksRoute,
+  Char123LangChar125RouteRoute: Char123LangChar125RouteRouteWithChildren,
   MeasuresRoute: MeasuresRoute,
-  ShowcaseRoute: ShowcaseRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

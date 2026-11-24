@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start"
 import { staticFunctionMiddleware } from "@tanstack/start-static-server-functions"
 
 import { loadDoc, loadNav } from "@/lib/docs.server"
+import { stripLang, type Language } from "@/lib/locale"
 
 export interface TocItem {
   id: string
@@ -32,13 +33,15 @@ export function bookOf(slug: string): Book {
   return slug === "ui" || slug.startsWith("ui/") ? "ui" : "docs"
 }
 
-/** The slug of the page at a path: "/docs/ui/button" → "ui/button". */
+/** The slug of the page at a path, in either language: "/zh/docs/ui/button" → "ui/button". */
 export function slugOfPath(pathname: string) {
-  return pathname.replace(/^\/docs\/?/, "").replace(/\/$/, "")
+  return stripLang(pathname).replace(/^\/docs\/?/, "").replace(/\/$/, "")
 }
 
 export interface Doc {
   slug: string
+  /** The language of the page. */
+  lang: Language
   title: string
   /** For search engines: the summary, else the first paragraph. */
   description: string
@@ -50,6 +53,8 @@ export interface Doc {
   toc: TocItem[]
   prev?: { slug: string; title: string }
   next?: { slug: string; title: string }
+  /** The page's Markdown, in its language: /zh/docs/ui.md. */
+  markdown: string
   editUrl: string
 }
 
@@ -71,9 +76,10 @@ export function docHref(slug: string, id = "") {
 
 export const getDocsNav = createServerFn({ method: "GET" })
   .middleware([staticFunctionMiddleware])
-  .handler(() => loadNav())
+  .validator((data: { lang: Language }) => data)
+  .handler(async ({ data }) => loadNav(data.lang))
 
 export const getDoc = createServerFn({ method: "GET" })
   .middleware([staticFunctionMiddleware])
-  .validator((slug: string) => slug)
-  .handler(async ({ data }) => (await loadDoc(data)) ?? null)
+  .validator((data: { slug: string; lang: Language }) => data)
+  .handler(async ({ data }) => (await loadDoc(data.slug, data.lang)) ?? null)

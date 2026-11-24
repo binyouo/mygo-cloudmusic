@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -23,6 +22,8 @@ import (
 
 // These find, download and run the model; tests replace them.
 var (
+	systemCaptions    bool
+	transcriptModel   = speech.ModelName
 	captionsAvailable = speech.Available
 	modelInstalled    = speech.Installed
 	downloadModel     = speech.Download
@@ -52,12 +53,14 @@ const captionLead = 30 * time.Second
 // episode playing's transcript.
 type captionState struct {
 	model modelState
+	store *transcriptStore
 
 	program int64       // the episode the transcript is of, 0 for none
 	tr      *transcript // nil while it loads
 	lines   []lyrics.Line
-	work    *captionWork  // the transcription running, or nil
-	failed  int64         // the episode the transcription failed for
+	work    *captionWork // the transcription running, or nil
+	failed  int64        // the episode the transcription failed for
+	failure string
 	saved   time.Duration // how far the transcript on disk is written down
 }
 
@@ -141,7 +144,10 @@ func (a *app) startModelDownload() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.downloading, m.err, m.cancel = true, "", cancel
-	m.done, m.total = 0, speech.ModelSize()
+	m.done, m.total = 0, 0
+	if !systemCaptions {
+		m.total = speech.ModelSize()
+	}
 	go func() {
 		// Shown in steps of a megabyte: the download reads far smaller
 		// pieces.
@@ -170,6 +176,8 @@ func (a *app) startModelDownload() {
 				a.settings.save()
 				a.syncCaptions()
 			case ctx.Err() != nil:
+			case systemCaptions:
+				m.err = err.Error()
 			default:
 				m.err = "下载失败，请检查网络后重试"
 			}
@@ -222,9 +230,13 @@ func (a *app) syncCaptions() {
 		a.pauseCaptions()
 		a.saveTranscript()
 		cs.program, cs.tr, cs.lines = program, nil, nil
+		cs.saved = 0
 		if program != 0 && a.captionsShown() {
 			a.loadTranscript(program)
 		}
+	}
+	if a.phoneSuspended {
+		return
 	}
 	if program == 0 || !a.captionsOn() || cs.failed == program {
 		a.stopCaptions()
@@ -248,6 +260,11 @@ func (a *app) syncCaptions() {
 		return
 	}
 	a.transcribe(program, from, until)
+}
+
+func (a *app) retryCaptions() {
+	a.captions.failed, a.captions.failure = 0, ""
+	a.syncCaptions()
 }
 
 // stopCaptions stops the transcription, if one runs, and lets the model
@@ -284,10 +301,6 @@ func (a *app) transcribe(program int64, from, until time.Duration) {
 	if err != nil {
 		return
 	}
-	if err := src.SetPosition(int64(from.Seconds() * float64(src.SampleRate()))); err != nil {
-		src.Close()
-		return
-	}
 	dir, err := modelDir()
 	if err != nil {
 		src.Close()
@@ -298,6 +311,14 @@ func (a *app) transcribe(program int64, from, until time.Duration) {
 	a.captions.work = w
 	go func() {
 		defer src.Close()
+		if ctx.Err() != nil {
+			return
+		}
+		// Seeking through a streamed episode can wait for more audio.
+		if err := src.SetPosition(int64(from.Seconds() * float64(src.SampleRate()))); err != nil {
+			a.post(func() { a.captionDone(w, err, ctx.Err() != nil) })
+			return
+		}
 		recognizer.Lock()
 		defer recognizer.Unlock()
 		if ctx.Err() != nil {
@@ -347,14 +368,18 @@ func (a *app) captionHeard(w *captionWork, at time.Duration) {
 // or failed. Then the next of what is not written down follows.
 func (a *app) captionDone(w *captionWork, err error, stopped bool) {
 	cs := &a.captions
-	if cs.work == w {
-		cs.work = nil
+	if cs.work != w {
+		return
 	}
+	cs.work = nil
 	if w.program != cs.program || cs.tr == nil || stopped {
 		return
 	}
 	if err != nil {
 		cs.failed = w.program
+		if systemCaptions {
+			cs.failure = err.Error()
+		}
 		a.saveTranscript()
 		return
 	}
@@ -396,13 +421,14 @@ func (a *app) captionsWriting(pos time.Duration) bool {
 func (a *app) loadTranscript(program int64) {
 	path, err := transcriptPath(program)
 	if err != nil {
-		a.captions.tr = &transcript{Model: speech.ModelName}
+		a.captions.tr = &transcript{Model: transcriptModel}
 		return
 	}
+	store := a.captions.store
 	go func() {
 		tr := &transcript{}
-		if b, err := os.ReadFile(path); err != nil || json.Unmarshal(b, tr) != nil || tr.Model != speech.ModelName {
-			tr = &transcript{Model: speech.ModelName}
+		if b, err := store.read(path); err != nil || json.Unmarshal(b, tr) != nil || tr.Model != transcriptModel {
+			tr = &transcript{Model: transcriptModel}
 		}
 		a.post(func() {
 			cs := &a.captions
@@ -423,29 +449,23 @@ func (a *app) saveTranscript() {
 	}
 }
 
-// transcriptWrite returns what writes the transcript of the episode as
-// it is now, or nil with nothing to write.
+// transcriptWrite queues the current transcript and returns a flush for
+// the pending episodes. Suspend and quit can finish it before returning.
 func (a *app) transcriptWrite() func() {
 	cs := &a.captions
-	if cs.program == 0 || cs.tr == nil || len(cs.tr.Spans) == 0 {
-		return nil
-	}
-	path, err := transcriptPath(cs.program)
-	if err != nil {
-		return nil
-	}
-	b, err := json.Marshal(cs.tr)
-	if err != nil {
-		return nil
-	}
-	return func() {
-		if os.MkdirAll(filepath.Dir(path), 0o755) == nil {
-			tmp := path + ".tmp"
-			if os.WriteFile(tmp, b, 0o644) == nil {
-				os.Rename(tmp, path)
+	if cs.program != 0 && cs.tr != nil && (len(cs.tr.Spans) != 0 || len(cs.tr.Segments) != 0) {
+		path, pathErr := transcriptPath(cs.program)
+		if data, err := json.Marshal(cs.tr); pathErr == nil && err == nil {
+			if cs.store == nil {
+				cs.store = &transcriptStore{}
 			}
+			cs.store.queue(path, data)
 		}
 	}
+	if cs.store == nil {
+		return nil
+	}
+	return cs.store.flush
 }
 
 // captionStart returns where to write down from for a listener at pos of

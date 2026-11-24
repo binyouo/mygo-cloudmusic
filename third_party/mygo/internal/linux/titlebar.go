@@ -1,4 +1,4 @@
-//go:build linux && (amd64 || arm64)
+//go:build linux && !android && (amd64 || arm64)
 
 package linux
 
@@ -141,6 +141,10 @@ func (w *window) measureControls() {
 		if w.opts.TitleBarHeight == 0 {
 			room.Height = max(room.Height, int(height))
 		}
+	}
+	// The bars, which hold the buttons, take the title bar's height.
+	if room.Left > 0 || room.Right > 0 {
+		room.Bottom = room.Height
 	}
 	if room != c.room {
 		c.room = room

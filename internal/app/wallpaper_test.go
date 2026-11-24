@@ -155,7 +155,7 @@ func TestWallpaperCommentsFollowTrack(t *testing.T) {
 	a.settings = defaultSettings()
 	a.pl.Cue([]netease.Track{{ID: 7, Name: "第一首", Duration: 200000}})
 	a.pl.SetLyrics([]lyrics.Line{{Text: "歌词内容"}})
-	a.comments = commentState{track: 7, thread: "R_SO_4_7", loaded: true, total: 1, latest: []netease.Comment{{ID: 1, Content: "评论内容"}}}
+	a.comments = &commentState{track: 7, thread: "R_SO_4_7", loaded: true, total: 1, latest: []netease.Comment{{ID: 1, Content: "评论内容"}}}
 	a.toggleWallpaper()
 	a.wallpaper.revealed = true
 	tester := ui.NewTester(a.wallpaperView, 1180, 780)
@@ -187,7 +187,7 @@ func TestWallpaperKeepsNowPlayingTabs(t *testing.T) {
 	a.settings = defaultSettings()
 	a.pl.Cue([]netease.Track{{ID: 7, Name: "测试歌曲", Duration: 200000}})
 	a.pl.SetLyrics(nil)
-	a.comments = commentState{track: 7, thread: "R_SO_4_7", loaded: true}
+	a.comments = &commentState{track: 7, thread: "R_SO_4_7", loaded: true}
 	a.toggleWallpaper()
 	a.wallpaper.revealed = true
 	tester := ui.NewTester(a.wallpaperView, 1180, 780)

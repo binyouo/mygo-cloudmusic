@@ -29,6 +29,9 @@ const (
 	pagePodcast
 	pagePodcasts
 	pageLocal
+	pageLibrary
+	pageSettings
+	pageFeed
 	pageMessages
 	pageChat
 )
@@ -53,22 +56,90 @@ type app struct {
 	pal     palette
 	menuBar *menuBar
 
+	phone                 bool
+	phoneTab              pageKind
+	phoneRoutes           map[pageKind]phoneNavigation
+	phoneDetails          bool
+	phoneSheet            phonePlayerSheet
+	phonePull             ui.Point
+	phoneSheetHeld        string  // the key of the sheet part the pull's drag began on
+	phoneSheetAxis        int     // that drag's locked direction: 1 down pulls, 2 across skips
+	phoneSheetDX          float32 // its run total
+	phoneSheetDY          float32
+	phoneSheetStart       float32
+	phoneSheetAte         bool    // the press ended as a drag: its click is no tap
+	phoneCoverOff         float32 // how far a track swipe on the cover has slid it
+	phoneOpenPull         float32 // the mini player's upward pull, its open's travel in points
+	phoneMiniHeld         string  // the key of the mini player's part the press dragging it began on
+	phoneMiniAxis         int     // that drag's locked direction: 1 up opens, 2 across skips
+	phoneMiniDX           float32 // its run total
+	phoneMiniDY           float32
+	phoneMiniAte          bool    // the press ended as a drag: its click is no tap
+	phonePlatter          ui.Rect // the mini player's frame, which the sheet morphs from and to
+	phoneMiniArt          ui.Rect // the mini ring cover's frame, one end of the artwork's flight
+	phoneCoverRect        ui.Rect // the big cover's frame, the other end, kept each build
+	phoneMorph            phoneMorph
+	phoneGhostLive        bool // the cover ghost should show this build
+	phoneCoverThumbnail   bool
+	phoneContentIn        bool // the content's entrance pose has been let go
+	phoneControlsIn       bool // the controls' later entrance has been let go
+	phoneClosing          bool
+	phonePaneAnim         bool      // a pane or details swap asked for an entrance
+	phoneOpening          bool      // first build of the full-screen player
+	phonePlayerMoving     bool      // the full-screen player is moving
+	phoneShown            bool      // nowPlaying was open last build
+	phoneMarqueeTitle     string    // the mini title the marquee clock belongs to
+	phoneMarqueeAt        time.Time // when that title started its scroll clock
+	phoneNavDir           int       // 1 push, -1 button pop, 0 tab change or completed swipe
+	phoneEdge             ui.Point
+	phoneScrolls          map[phonePageKey]*phonePageScroll
+	phonePreviewScroll    *phonePageScroll // the previous page while it builds under an edge swipe
+	phoneIslandOpen       bool
+	phoneIslandScrub      scrubState
+	phoneIslandBars       barState
+	phoneMineTab          int    // the 我的 page's playlist tabs: 0 创建, 1 收藏
+	phoneUserTab          int    // a user page's tabs: 0 歌单, then podcasts and artists
+	phoneDesc             string // a detail page's description, open in a sheet while set
+	phoneSheetDrags       map[string]*phoneSheetDrag
+	phoneQueueGrid        bool
+	phoneSuspended        bool
+	phoneWall             ui.ListState
+	phoneAlbumID          int64 // the album whose comments are open
+	phoneProgram          *netease.Track
+	phoneSetting          string        // the settings choice sheet, if any
+	phoneDownload         chan struct{} // closed when saving or exporting finishes
+	phoneSearchEditing    bool
+	phoneSearchPopup      func(bool) // closes the search combobox's popup for 取消
+	phoneSearchBlur       func()     // parks the field's focus on its anchor, ending editing
+	phoneSearchFieldWas   bool       // the field's focus last frame: its rise opens the popup
+	phoneSearchPopupQuery string     // the query the popup last opened for; new text reopens it
+	phonePlaylistSearch   bool
+	phonePlaylistEditing  bool
+
 	route   route
 	history []route
 	forward []route // the pages gone back from, the last first to go to
 
-	profile      *netease.Profile
-	mine, saved  []netease.Playlist // the listener's playlists: made, and saved
-	savingPl     map[int64]bool     // the playlists whose saving or its end is on its way
-	recPlaylists []netease.Playlist // the day's playlists picked for the listener
-	login        loginState
-	accountOpen  bool           // the dropdown of the account row shows
-	naming       nameDialog     // the name of a playlist asked for
-	deleting     deleteDialog   // whether to delete a playlist, asked
-	liked        map[int64]bool // the songs the listener likes
-	likeSync     likeSyncState
-	toast        string   // a message to show once
-	picked       pickedUp // the song a login picked up, waiting to play
+	profile                *netease.Profile
+	accountRevision        uint64
+	sessionChanging        bool
+	accountRestorePending  bool
+	accountRestoreInFlight bool
+	mine, saved            []netease.Playlist // the listener's playlists: made, and saved
+	savingPl               map[int64]bool     // the playlists whose saving or its end is on its way
+	recPlaylists           []netease.Playlist // the day's playlists picked for the listener
+	login                  loginState
+	accountOpen            bool         // the dropdown of the account row shows
+	naming                 nameDialog   // the name of a playlist asked for
+	deleting               deleteDialog // whether to delete a playlist, asked
+	phoneTrackTarget       *trackSelection
+	phonePlaylistTarget    int64
+	phoneAddTo             *trackSelection
+	liked                  map[int64]bool // the songs the listener likes
+	likeSync               likeSyncState
+	toast                  string   // a message to show once
+	iconDark               bool     // the home screen shows the dark icon
+	picked                 pickedUp // the song a login picked up, waiting to play
 
 	// The episodes the listener likes, and doesn't, as far as NetEase has
 	// answered, and those asked about: see ui_like.go.
@@ -105,11 +176,24 @@ type app struct {
 
 	mineCollapsed, savedCollapsed bool
 
-	query       string
-	searchBox   ui.Handle
-	searches    map[route]*searchData // the results of each search, by its page
-	searched    route                 // the search last shown, which the sidebar goes back to
-	suggestions suggestState          // what the search field's query may be after
+	query     string
+	searchBox ui.Handle
+	// The credentials form's fields of the login dialog.
+	loginAccountBox, loginPasswordBox, loginCodeBox ui.Handle
+	searches                                        map[route]*searchData // the results of each search, by its page
+	searched                                        route                 // the search last shown, which the sidebar goes back to
+	suggestions                                     suggestState          // what the search field's query may be after
+	// searchBrowseAsked guards the one search-tab kick that loads charts.
+	searchBrowseAsked bool
+	// The 热搜榜 the phone's idle search shows; hotAsked guards the lazy
+	// load, hotFailed hides the section until the page is shown again.
+	hotSearches                     []netease.HotSearch
+	hotAsked, hotLoading, hotFailed bool
+
+	// The 动态 tab's followed feed, loaded a page at a time.
+	feedEvents []netease.Event
+	feedPage   paged
+	feedBefore int64
 
 	msgs    convsState             // the listener's private-message threads
 	chats   map[int64]*chatState   // each thread's messages, by the other end's ID
@@ -126,11 +210,11 @@ type app struct {
 	lyricPaneState
 	queueList ui.ListState
 	queueAt   int // the row of the queue pane last scrolled to, -1 while it is hidden
-	comments  commentState
+	comments  *commentState
 	tabCount  rollState // the count on the comments' tab, as it rolls
 
-	fmMode        int    // the FM mode chosen, in fmModes
-	radioStarting string // the radio asked for its first songs, or ""
+	fmMode        int // the FM mode chosen, in fmModes
+	radioStarting *radioStart
 
 	scrub      float64
 	scrubbing  bool
@@ -138,7 +222,8 @@ type app struct {
 	volumeOpen bool // the volume popover of the player bar shows
 	mutedFrom  float64
 
-	rowBars barState
+	rowBars   barState
+	barsClock bouncyClock // the fallback bars' playing time
 	// underTop and underBottom say whether the page has content under its
 	// bars, which show their scroll edges then.
 	underTop, underBottom bool
@@ -165,6 +250,7 @@ type app struct {
 	shortcutHandles [6]ui.Handle
 	wallpaper       wallpaperState
 	localTracks     []netease.Track
+	localPicking    bool
 	localImporting  bool
 	localError      string
 
@@ -223,6 +309,12 @@ func (a *app) showMain() {
 // upstream data migration and updater; local builds have their own identity.
 var localBuild string
 
+// phonePreviewRoot is set by the macOS preview build. Its data directory
+// and window are independent of the desktop app.
+var phonePreviewRoot string
+
+var connectNativePlayback func(*player.Player, func()) func()
+
 // Keep the local profile stable when its visible app name changes.
 func setLocalPaths() error {
 	const profile = "MyGo 云音乐（本地）"
@@ -254,12 +346,19 @@ func setLocalPaths() error {
 
 // Run runs the app until it quits.
 func Run() error {
+	preview := runtime.GOOS == "darwin" && phonePreviewRoot != ""
+	if preview {
+		if err := setPhonePreviewPaths(phonePreviewRoot); err != nil {
+			return err
+		}
+	}
 	if localBuild == "1" {
 		if err := setLocalPaths(); err != nil {
 			return err
 		}
 	}
 	a := &app{
+		phone:          runtime.GOOS == "ios" || preview,
 		playlists:      map[int64]*netease.Playlist{},
 		loadingPl:      map[int64]bool{},
 		plErr:          map[int64]string{},
@@ -274,10 +373,11 @@ func Run() error {
 		queueAt:        -1,
 		cacheUsed:      -1,
 	}
-	if localBuild != "1" {
+	if !a.phone && localBuild != "1" {
 		moveOldData()
 		a.useUpdater()
 	}
+	var launchErr error
 	mygo.App.WhenReady(func() {
 		a.settings = loadSettings()
 		a.settings.applyAppearance()
@@ -288,7 +388,12 @@ func Run() error {
 		// Before the window: on Windows it lays out its content as it is
 		// made, and the view asks the player what plays.
 		a.art = newArtCache(a.post)
+		a.art.thumbnailTint = runtime.GOOS == "darwin" && !a.phone
 		a.pl = player.New(a.post)
+		var syncNativePlayback func()
+		if connectNativePlayback != nil {
+			syncNativePlayback = connectNativePlayback(a.pl, a.nativePlaybackChanged)
+		}
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
 		a.pl.AutoMix = func() bool { return a.settings.AdaptiveMix }
@@ -301,7 +406,13 @@ func Run() error {
 			a.scrob.stop()
 		}
 		a.pl.Changed = func() {
-			a.wallpaperPlaybackChanged()
+			if syncNativePlayback != nil {
+				syncNativePlayback()
+			}
+			if !a.phone {
+				a.wallpaperPlaybackChanged()
+			}
+			a.syncCaptions()
 			a.keepSession()
 			a.noteScrobble()
 			a.keepScrobble()
@@ -309,11 +420,10 @@ func Run() error {
 				a.menuBar.stopTimer()
 			}
 			a.syncMenuBar()
-			a.syncCaptions()
 		}
 		a.volume = a.settings.Volume
 		a.pl.SetVolume(a.volume)
-		a.win = mygo.NewWindow(mygo.WindowOptions{
+		window := mygo.WindowOptions{
 			Title:         mygo.App.Name(),
 			Width:         1180,
 			Height:        780,
@@ -329,13 +439,51 @@ func Run() error {
 			Vibrancy:             mygo.VibrancySidebar,
 			BackgroundColor:      "light-dark(#ffffff, #141416)",
 			Content:              ui.View(a.view),
-		})
-		a.setMenu()
+		}
+		if a.phone {
+			window = mygo.WindowOptions{
+				Title: mygo.App.Name(), Width: 390, Height: 804,
+				BackgroundColor: window.BackgroundColor, Content: window.Content,
+			}
+		}
+		if preview {
+			launchErr = placePhonePreview(&window)
+			if launchErr != nil {
+				mygo.App.Quit()
+				return
+			}
+		}
+		a.win = mygo.NewWindow(window)
 		a.loadLocalLibrary()
+		a.boot()
+		if a.phone {
+			// Start compiling before the first visit to the landscape player.
+			go fogShader()
+			mygo.Power.OnSuspend(func() {
+				a.phoneSuspended = true
+				a.setLoginPollingActive(false)
+				a.pauseCaptions()
+				if write := a.transcriptWrite(); write != nil {
+					write()
+				}
+				a.noteScrobble()
+				a.saveSession()
+			})
+			mygo.Power.OnResume(func() {
+				a.phoneSuspended = false
+				a.setLoginPollingActive(true)
+				a.restoreAccount()
+				a.retryCaptions()
+				a.freshenHome()
+				a.refreshLikedSongs()
+			})
+			a.loadAppIcon()
+			return
+		}
+		a.setMenu()
 		a.watchWallpaper()
 		a.win.OnFileDrop(func(e *mygo.FileDropEvent) { a.importLocalFiles(e.Paths) })
 		a.registerPlaybackShortcuts()
-		a.boot()
 		// The notch player is macOS's, over its menu bar: elsewhere it would
 		// hang at the top of the screen as a black box.
 		if runtime.GOOS == "darwin" {
@@ -348,6 +496,7 @@ func Run() error {
 		a.win.OnHide(a.syncDock)
 		// Shown or switched to the morning after, it shows the new day's.
 		a.win.OnFocus(func() {
+			a.restoreAccount()
 			a.freshenHome()
 			a.refreshLikedSongs()
 		})
@@ -373,6 +522,9 @@ func Run() error {
 		})
 	})
 	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
+		if a.win == nil {
+			return
+		}
 		if a.quitting {
 			if !a.scrobbleQuitReady {
 				e.PreventDefault()
@@ -418,6 +570,11 @@ func Run() error {
 		}
 	})
 	mygo.App.OnWindowAllClosed(func() {})
-	mygo.App.OnActivate(func(bool) { a.showMain() })
-	return mygo.App.Run()
+	if !a.phone {
+		mygo.App.OnActivate(func(bool) { a.showMain() })
+	}
+	if err := mygo.App.Run(); err != nil {
+		return err
+	}
+	return launchErr
 }

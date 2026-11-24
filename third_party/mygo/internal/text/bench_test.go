@@ -33,6 +33,16 @@ func BenchmarkLayoutTruncated(b *testing.B) {
 	benchLayout(b, Params{Text: "fix the list scroll when rows change height and keep focus", Style: Style{Size: 12}, Width: 160, MaxLines: 1})
 }
 
+func BenchmarkLayoutTruncatedMiddle(b *testing.B) {
+	Shared().UseTruncateMiddle()
+	benchLayout(b, Params{Text: "src/components/settings/appearance/theme/picker.go", Style: Style{Size: 12}, Width: 160, MaxLines: 1, TruncateMiddle: true})
+}
+
+func BenchmarkLayoutTruncatedStart(b *testing.B) {
+	Shared().UseTruncateStart()
+	benchLayout(b, Params{Text: "src/components/settings/appearance/theme/picker.go", Style: Style{Size: 12}, Width: 160, MaxLines: 1, TruncateStart: true})
+}
+
 func benchLayout(b *testing.B, p Params) {
 	s := Shared()
 	s.Layout(p)

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image/png"
@@ -39,7 +40,10 @@ func wait[T any](t *testing.T, ch chan T, what string) T {
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(time.Second):
+	case <-t.Context().Done():
+		// Any shorter deadline false-fails under CPU load, as when the
+		// whole suite runs in parallel: the download test's channel can
+		// lag well past a second while its goroutine is starved.
 		t.Fatalf("%s wasn't asked for", what)
 		panic("unreachable")
 	}
@@ -195,8 +199,12 @@ func TestSearchHistoryChoice(t *testing.T) {
 // its page, remembering the query.
 func TestSuggestionOpensPage(t *testing.T) {
 	asked := make(chan string, 4)
-	searchSuggest = func(q string) (netease.Suggestions, error) { asked <- q; return netease.Suggestions{}, nil }
-	defer func() { searchSuggest = netease.SearchSuggest }()
+	old := searchSuggest
+	searchSuggest = func(_ context.Context, q string) (netease.Suggestions, error) {
+		asked <- q
+		return netease.Suggestions{}, nil
+	}
+	defer func() { searchSuggest = old }()
 	a := newTestApp()
 	a.settings = defaultSettings()
 	tt := ui.NewTester(a.view, 1200, 800)
@@ -220,6 +228,156 @@ func TestSuggestionOpensPage(t *testing.T) {
 	tt.Frame()
 	if a.route != (route{page: pageAlbum, id: 8}) || !slices.Equal(a.settings.SearchHistory, []string{"迷跡"}) {
 		t.Fatalf("opened %+v, history %q", a.route, a.settings.SearchHistory)
+	}
+}
+
+// Editing the phone search and leaving its tab cancel the suggestions already in flight.
+func TestPhoneSearchCancelsSuggestions(t *testing.T) {
+	type request struct {
+		query string
+		ctx   context.Context
+	}
+	requests := make(chan request, 3)
+	old := searchSuggest
+	searchSuggest = func(ctx context.Context, q string) (netease.Suggestions, error) {
+		requests <- request{q, ctx}
+		<-ctx.Done()
+		return netease.Suggestions{}, ctx.Err()
+	}
+	defer func() { searchSuggest = old }()
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	defer a.dismissSuggestions()
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	tt.Type("迷跡")
+	first := wait(t, requests, "the first suggestions")
+	tt.Type("波")
+	if first.query != "迷跡" || !errors.Is(first.ctx.Err(), context.Canceled) {
+		t.Fatalf("editing left suggestions running for %q: %v", first.query, first.ctx.Err())
+	}
+	second := wait(t, requests, "the next suggestions")
+	tapPhone(t, tt, "我的")
+	if second.query != "迷跡波" || !errors.Is(second.ctx.Err(), context.Canceled) || a.route.page != pageLibrary {
+		t.Fatalf("leaving Search left suggestions running for %q: %v", second.query, second.ctx.Err())
+	}
+}
+
+// With the keyboard open, a phone listener can still reach and rerun a search from the history chips.
+func TestPhoneSearchHistoryScrollsAboveKeyboard(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.settings = defaultSettings()
+	for i := range searchHistoryLimit {
+		a.settings.SearchHistory = append(a.settings.SearchHistory, fmt.Sprintf("搜索记录 %02d", i+1))
+	}
+	ask := fakeSearch(t)
+	const height, keyboard = 844, 392
+	tt := ui.NewTester(a.view, 390, height)
+	insets, ok := any(tt).(interface {
+		SetInsets(float32, float32, float32, float32)
+	})
+	if !ok {
+		t.Skip("the desktop MyGo snapshot has no keyboard insets")
+	}
+	insets.SetInsets(48, 0, keyboard, 0)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tapPhone(t, tt, "搜索")
+	// The body stays under the keyboard: a chip fully above it is the
+	// reachable one.
+	var last string
+	for _, q := range a.settings.SearchHistory {
+		box, ok := tt.Find(q)
+		if ok && box.W > 0 && box.Y+box.H <= height-keyboard {
+			last = q
+		}
+	}
+	if last == "" {
+		t.Fatal("no history chip showed above the keyboard")
+	}
+	tapPhone(t, tt, last)
+	if got := wait(t, ask, "the search from history"); got.query != last || a.route.query != last {
+		t.Fatalf("searched %+v, opened %+v after tapping %q", got, a.route, last)
+	}
+	tapPhone(t, tt, "清除搜索")
+	if a.route.query != "" {
+		t.Fatal("clearing the field left its results open")
+	}
+	tapPhone(t, tt, last)
+	if a.route.query != last {
+		t.Fatalf("history after clearing opened %+v instead of %q", a.route, last)
+	}
+}
+
+// Choosing a history chip in the phone search's body runs the search and leaves editing.
+func TestPhoneSearchHistoryChoiceEndsEditing(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.settings = defaultSettings()
+	a.settings.SearchHistory = []string{"旧搜索"}
+	ask := fakeSearch(t)
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	tapPhone(t, tt, "旧搜索")
+	if got := wait(t, ask, "the search from history"); got.query != "旧搜索" {
+		t.Fatalf("searched %+v", got)
+	}
+	tt.Frame()
+	tt.Frame()
+	if a.phoneSearchEditing {
+		t.Fatal("choosing a history chip left the field editing")
+	}
+}
+
+// Submitting from the phone keyboard or suggestions releases text focus and leaves the last search category tappable on a narrow screen.
+func TestPhoneSearchDismissesKeyboardAndSwitchesKind(t *testing.T) {
+	for _, method := range []string{"keyboard", "suggestion"} {
+		t.Run(method, func(t *testing.T) {
+			a := newTestApp()
+			a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+			asked := fakeSearch(t)
+			oldSuggest := searchSuggest
+			searchSuggest = func(context.Context, string) (netease.Suggestions, error) { return netease.Suggestions{}, nil }
+			defer func() { searchSuggest = oldSuggest }()
+			defer a.dismissSuggestions()
+			tt := ui.NewTester(a.view, 320, 670)
+			tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+			insets, hasInsets := any(tt).(interface {
+				SetInsets(float32, float32, float32, float32)
+			})
+			if hasInsets {
+				insets.SetInsets(28, 0, 280, 0)
+			}
+			tapPhone(t, tt, "搜索")
+			tt.Type("春日")
+			tapPhone(t, tt, "清除搜索")
+			if a.query != "" || !tt.Focused("搜索") {
+				t.Fatalf("clear left query %q, focus = %t", a.query, tt.Focused("搜索"))
+			}
+			tt.Type("春日影")
+			if method == "keyboard" {
+				tt.Key(0, ui.KeyEnter)
+			} else {
+				tapPhone(t, tt, "搜索“春日影”")
+			}
+			if got := wait(t, asked, "the phone search"); got != (searchRequest{"春日影", netease.SearchSongs, 0}) || tt.Focused("搜索") {
+				t.Fatalf("searched %+v, text focus = %t", got, tt.Focused("搜索"))
+			}
+			if hasInsets {
+				insets.SetInsets(28, 0, 18, 0)
+			}
+			// The bleeding row of kinds puts the last one off the narrow
+			// screen, so it is scrolled into view before being tapped.
+			if first, ok := tt.Find("单曲"); ok {
+				dragPhone(t, tt, 320-10, first.Y+first.H/2, -240, 0)
+			}
+			tapPhone(t, tt, "播客")
+			if got := wait(t, asked, "the podcast results"); got != (searchRequest{"春日影", netease.SearchPodcasts, 0}) || a.route.kind != netease.SearchPodcasts {
+				t.Fatalf("searched %+v, route = %+v", got, a.route)
+			}
+		})
 	}
 }
 
@@ -585,5 +743,266 @@ func TestCatalogFrameBudget(t *testing.T) {
 		if tt.FramePending() {
 			t.Errorf("%s asks for frames while idle", s.name)
 		}
+	}
+}
+
+// Back on the phone's pushed search ends editing, blurs the field and pops to where it opened, in one tap.
+func TestPhoneSearchBackEndsEditing(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.history = []route{{page: pageHome}}
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	if !a.phoneSearchEditing {
+		t.Fatal("tapping the field did not start editing")
+	}
+	tapPhone(t, tt, "返回")
+	tt.Frame()
+	tt.Frame()
+	if a.phoneSearchEditing {
+		t.Fatal("back left the field editing")
+	}
+	if a.route.page != pageHome || len(a.history) != 0 {
+		t.Fatalf("back left route %+v, history %d", a.route, len(a.history))
+	}
+	if tt.Focused("搜索") {
+		t.Fatal("back left the field focused")
+	}
+}
+
+// With text typed and the suggestion popup open, one tap on 返回 does the whole job: it ends editing and pops, not just closes the popup.
+func TestPhoneSearchBackWithPopupEndsEditing(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.history = []route{{page: pageHome}}
+	oldSuggest := searchSuggest
+	searchSuggest = func(context.Context, string) (netease.Suggestions, error) { return netease.Suggestions{}, nil }
+	defer func() { searchSuggest = oldSuggest }()
+	defer a.dismissSuggestions()
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	tt.Type("春日")
+	tt.Frame()
+	if _, found := tt.Find("搜索“春日”"); !found {
+		t.Fatal("the suggestion popup did not open")
+	}
+	tapPhone(t, tt, "返回")
+	tt.Frame()
+	tt.Frame()
+	if a.phoneSearchEditing {
+		t.Fatal("返回 only closed the popup and left the field editing")
+	}
+	if a.query != "" {
+		t.Fatalf("返回 left %q in the field", a.query)
+	}
+	if a.route.page != pageHome {
+		t.Fatalf("返回 left route %+v instead of popping", a.route)
+	}
+}
+
+// 返回 over shown results restores the field to their query before popping.
+func TestPhoneSearchBackRestoresShownQuery(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab = true, pageHome
+	r := route{page: pageSearch, query: "春日影", kind: netease.SearchSongs}
+	a.searched, a.query, a.route = r, "春日影", r
+	a.history = []route{{page: pageHome}}
+	a.searches[r] = &searchData{res: netease.SearchResult{Songs: []netease.Track{{ID: 1, Name: "春日影"}}}, page: paged{loaded: true}}
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	if !a.phoneSearchEditing {
+		t.Fatal("tapping the field over results did not start editing")
+	}
+	tt.Type("xyz")
+	tapPhone(t, tt, "返回")
+	tt.Frame()
+	tt.Frame()
+	if a.phoneSearchEditing {
+		t.Fatal("返回 left the field editing")
+	}
+	if a.query != "春日影" {
+		t.Fatalf("返回 left the field %q instead of the shown query", a.query)
+	}
+	if a.route.page != pageHome {
+		t.Fatalf("返回 left route %+v instead of popping", a.route)
+	}
+}
+
+// 返回 on the empty search the 推荐 capsule pushed goes back to 推荐, which stays the selected tab.
+func TestPhoneSearchBackReturnsToHome(t *testing.T) {
+	a := newTestApp()
+	a.phone = true
+	a.featured = []netease.Playlist{{ID: 9, Name: "精选歌单"}}
+	tt := ui.NewTester(a.view, 390, 844)
+	tapPhone(t, tt, "搜索歌曲、歌手、播客")
+	if a.route.page != pageSearch || a.phoneTab != pageHome || !a.phoneSearchEditing {
+		t.Fatalf("the capsule left route %+v, tab %v, editing %v", a.route, a.phoneTab, a.phoneSearchEditing)
+	}
+	tapPhone(t, tt, "返回")
+	tt.Frame()
+	tt.Frame()
+	if a.phoneSearchEditing {
+		t.Fatal("返回 left the field editing")
+	}
+	if a.phoneTab != pageHome || a.route.page != pageHome || len(a.history) != 0 {
+		t.Fatalf("返回 left tab %v, route %+v, history %d instead of 推荐", a.phoneTab, a.route, len(a.history))
+	}
+}
+
+// A user page's tabs on the phone switch sections, and tapping an artist row opens the artist.
+func TestPhoneUserPageArtistTabOpensArtist(t *testing.T) {
+	a := newTestApp()
+	a.phone = true
+	a.profile = &netease.Profile{UserID: 9, Nickname: "听友"}
+	a.users[9] = &userData{
+		user:          &netease.User{UserID: 9, Nickname: "听友", Signature: "签名"},
+		playlists:     []netease.Playlist{{ID: 30, Name: "通勤路上", TrackCount: 40}},
+		artists:       []netease.ArtistProfile{{Artist: netease.Artist{ID: 7, Name: "MyGO!!!!!"}}},
+		artistsShown:  true,
+		podcastsShown: true,
+	}
+	a.route = route{page: pageUser, id: 9}
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "关注的歌手")
+	tapPhone(t, tt, "MyGO!!!!!")
+	if a.route != (route{page: pageArtist, id: 7}) {
+		t.Fatalf("the artist row opened %+v", a.route)
+	}
+}
+
+// A history chip tapped while editing runs its search and leaves editing, with the field's focus gone.
+func TestPhoneSearchHistoryChipRunsSearch(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.settings = defaultSettings()
+	a.settings.SearchHistory = []string{"春日影"}
+	ask := fakeSearch(t)
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	if !a.phoneSearchEditing {
+		t.Fatal("tapping the field did not start editing")
+	}
+	tapPhone(t, tt, "春日影")
+	if got := wait(t, ask, "the search from the chip"); got.query != "春日影" {
+		t.Fatalf("searched %+v", got)
+	}
+	tt.Frame()
+	tt.Frame()
+	if a.phoneSearchEditing {
+		t.Fatal("the chip left the field editing")
+	}
+	if tt.Focused("搜索") {
+		t.Fatal("the chip left the field focused")
+	}
+	if a.route != (route{page: pageSearch, query: "春日影", kind: netease.SearchSongs}) {
+		t.Fatalf("the chip opened %+v", a.route)
+	}
+}
+
+// A 热搜榜 row tapped while editing runs its search and leaves editing.
+func TestPhoneSearchHotRowRunsSearch(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.settings = defaultSettings()
+	a.hotAsked, a.hotSearches = true, []netease.HotSearch{{Word: "哪里都是你"}, {Word: "我不难过"}}
+	ask := fakeSearch(t)
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	tapPhone(t, tt, "我不难过")
+	if got := wait(t, ask, "the search from the hot row"); got.query != "我不难过" {
+		t.Fatalf("searched %+v", got)
+	}
+	tt.Frame()
+	tt.Frame()
+	if a.phoneSearchEditing || tt.Focused("搜索") {
+		t.Fatal("the hot row left the field editing")
+	}
+	if a.route != (route{page: pageSearch, query: "我不难过", kind: netease.SearchSongs}) {
+		t.Fatalf("the hot row opened %+v", a.route)
+	}
+}
+
+// Tapping the empty body of the phone search ends editing, once, with no popup or content flapping after.
+func TestPhoneSearchTapOutsideEndsEditing(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.settings = defaultSettings()
+	a.settings.SearchHistory = []string{"旧搜索"}
+	a.hotAsked, a.hotSearches = true, []netease.HotSearch{{Word: "热词"}}
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	if !a.phoneSearchEditing {
+		t.Fatal("tapping the field did not start editing")
+	}
+	// A spot under every section: no element takes the touch.
+	if _, found := tt.Find("重新搜索：旧搜索"); found {
+		t.Fatal("an empty query opened the history popup")
+	}
+	fingerTap(t, tt, 195, 700)
+	if a.phoneSearchEditing {
+		t.Fatal("a tap on the empty body left the field editing")
+	}
+	stable := true
+	for range 10 {
+		tt.Frame()
+		if a.phoneSearchEditing {
+			stable = false
+		}
+		if _, found := tt.Find("重新搜索：旧搜索"); found {
+			stable = false
+		}
+		if tt.Focused("搜索") {
+			stable = false
+		}
+	}
+	if !stable {
+		t.Fatal("the search flapped editing, focus or the popup after the tap")
+	}
+}
+
+// With the suggestion popup open, one tap outside closes it and ends editing, without reopening.
+func TestPhoneSearchPopupOutsideTapEndsEditing(t *testing.T) {
+	a := newTestApp()
+	a.phone, a.phoneTab, a.route = true, pageHome, route{page: pageSearch}
+	a.settings = defaultSettings()
+	oldSuggest := searchSuggest
+	searchSuggest = func(context.Context, string) (netease.Suggestions, error) { return netease.Suggestions{}, nil }
+	defer func() { searchSuggest = oldSuggest }()
+	defer a.dismissSuggestions()
+	a.hotAsked, a.hotSearches = true, []netease.HotSearch{{Word: "热词"}}
+	tt := ui.NewTester(a.view, 390, 844)
+	tt.Frame()
+	tapPhone(t, tt, "搜索")
+	tt.Type("春日")
+	tt.Frame()
+	if _, found := tt.Find("搜索“春日”"); !found {
+		t.Fatal("the suggestion popup did not open")
+	}
+	fingerTap(t, tt, 195, 700)
+	stable := !a.phoneSearchEditing
+	for range 10 {
+		tt.Frame()
+		if a.phoneSearchEditing {
+			stable = false
+		}
+		if _, found := tt.Find("搜索“春日”"); found {
+			stable = false
+		}
+		if tt.Focused("搜索") {
+			stable = false
+		}
+	}
+	if !stable {
+		t.Fatalf("the outside tap left editing %t, the popup or focus flapping", a.phoneSearchEditing)
+	}
+	if a.query != "春日" {
+		t.Fatalf("the outside tap changed the field to %q", a.query)
 	}
 }

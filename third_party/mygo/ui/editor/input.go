@@ -39,9 +39,11 @@ func (ed *editor) offer(ev ui.InputEvent) bool {
 
 // retry runs fn, which edits the text as the editor shows it, again on
 // the text as it is when another goroutine edited the buffer meanwhile,
-// rather than leaving the edit out (apply).
+// rather than leaving the edit out (apply), as many times as it takes:
+// each run that comes too late found another goroutine's edit in, so the
+// buffer moves on, and a letter typed is never lost.
 func (ed *editor) retry(fn func() bool) bool {
-	for range 4 {
+	for {
 		ed.sync()
 		ed.stale = false
 		ok := fn()
@@ -49,7 +51,6 @@ func (ed *editor) retry(fn func() bool) bool {
 			return ok
 		}
 	}
-	return false
 }
 
 func (ed *editor) dispatch(ev ui.InputEvent) bool {
@@ -153,10 +154,10 @@ const (
 
 func (ed *editor) regionAt(x, y float32) region {
 	vertical, horizontal := ed.scrollbars()
-	if vertical && x >= ed.r.W-scrollbarWidth {
+	if vertical && x >= ed.r.W-ed.barWidth() {
 		return regionVScroll
 	}
-	if horizontal && y >= ed.hbarY && y < ed.hbarY+scrollbarWidth {
+	if horizontal && y >= ed.hbarY && y < ed.hbarY+ed.barWidth() {
 		return regionHScroll
 	}
 	if x < ed.gutterW {
@@ -214,7 +215,7 @@ func (ed *editor) pointerDown(ev ui.InputEvent) bool {
 		ed.gesture.colStart = ui.Point{X: cx, Y: float32(cy)}
 		ed.columnSelect(cx, cy)
 		return true
-	case mods == ui.Cmd && ed.o.onDefinition != nil && ev.Clicks == 1:
+	case ed.clickGoesToDefinition(mods) && ev.Clicks == 1:
 		ed.gesture.active = false
 		ed.setSels([]sel{ed.newSel(off, off)}, revealNone)
 		ed.o.onDefinition(off)
@@ -257,6 +258,45 @@ func (ed *editor) pointerDown(ev ui.InputEvent) bool {
 	}
 	ed.extendGesture(off)
 	return true
+}
+
+// textAt returns the offset of the text at a point of the element, or -1
+// past the end of a line, below the last, or off the text.
+func (ed *editor) textAt(x, y float32) int {
+	if ed.regionAt(x, y) != regionText {
+		return -1
+	}
+	cx, cy := ed.toContent(x, y)
+	off := ed.offsetAt(cx, cy)
+	if cr, ok := ed.caretRect(off); !ok || float64(cy) > float64(cr.Y+cr.H) ||
+		off == ed.view.text.LineEnd(ed.view.text.LineOf(off)) && cx > cr.X+ed.view.charWidth/2 {
+		return -1
+	}
+	return off
+}
+
+// clickGoesToDefinition reports whether a click with mods goes to the
+// definition of the word under it, which the press and the link both ask.
+func (ed *editor) clickGoesToDefinition(mods ui.Modifiers) bool {
+	return mods == ui.Cmd && ed.o.onDefinition != nil && !ed.o.noDefinitionClick
+}
+
+// linkAt returns the word under the pointer that a click with mods would
+// go to the definition of, as the editor's link holds it.
+func (ed *editor) linkAt(mods ui.Modifiers) [2]int {
+	if !ed.clickGoesToDefinition(mods) || ed.o.noDefinitionLink || !ed.pointerIn || ed.gesture.active || ed.scrollbar.active {
+		return [2]int{}
+	}
+	off := ed.textAt(ed.pointer.X, ed.pointer.Y)
+	if off < 0 {
+		return [2]int{}
+	}
+	extra := ed.wordChars()
+	a, z := wordAt(ed.view.text, off, extra)
+	if z <= a || classOf(firstRune(ed.view.text.Slice(a, z)), extra) != classWord {
+		return [2]int{}
+	}
+	return [2]int{a, z}
 }
 
 // extendGesture extends the selection being dragged to off.
@@ -360,15 +400,18 @@ func (ed *editor) pointerMove(ev ui.InputEvent) bool {
 		ed.hoverLine = line
 		changed = true
 	}
+	if l := ed.linkAt(ev.Mods); l != ed.link {
+		ed.link = l
+		changed = true
+	}
 	h := &ed.hover
-	off := -1
-	if ed.regionAt(ev.X, ev.Y) == regionText {
-		cx, cy := ed.toContent(ev.X, ev.Y)
-		off = ed.offsetAt(cx, cy)
-		// Past the end of a line, or below the last, is over no text.
-		if cr, ok := ed.caretRect(off); !ok || float64(cy) > float64(cr.Y+cr.H) ||
-			off == ed.view.text.LineEnd(ed.view.text.LineOf(off)) && cx > cr.X+ed.view.charWidth/2 {
-			off = -1
+	off := ed.textAt(ev.X, ev.Y)
+	// Trailing inlays are the exception: their caret deliberately stays
+	// before them, but their rendered text is still a hover target. Not a
+	// link's, which would underline the line's last word.
+	if off < 0 && ed.regionAt(ev.X, ev.Y) == regionText {
+		if cx, cy := ed.toContent(ev.X, ev.Y); ed.overTrailingInlay(cx, float64(cy)) {
+			off = ed.offsetAt(cx, cy)
 		}
 	}
 	if off < 0 {
@@ -424,8 +467,12 @@ func (ed *editor) trackWidth() float32 {
 	if ed.o.fitContent || ed.o.hideScrollbars {
 		return 0
 	}
-	return scrollbarWidth
+	return ed.barWidth()
 }
+
+// barWidth is how wide the editor's scroll bars are, as State.Scrollbar
+// says and its theme fills in: 10 DIPs unless it says otherwise.
+func (ed *editor) barWidth() float32 { return ed.barStyle.TrackWidth }
 
 // scrollbars reports which scroll bars the editor shows, and takes
 // presses on: the vertical one while it scrolls, as it does past the end
@@ -437,7 +484,7 @@ func (ed *editor) scrollbars() (vertical, horizontal bool) {
 		return false, false
 	}
 	vertical = !ed.o.noScrollbar && !ed.o.fitContent && ed.scrollMax() > 0
-	return vertical, !ed.view.wrap && ed.view.maxLine > ed.hTrack()
+	return vertical, !ed.view.wrap && ed.contentWidth() > ed.hTrack()
 }
 
 // hTrack is the length of the horizontal scroll bar's track: the text's
@@ -446,8 +493,17 @@ func (ed *editor) hTrack() float32 {
 	return ed.r.W - ed.textX - ed.trackWidth()
 }
 
+// contentWidth is how wide the lines are that scroll sideways: the
+// widest the view knows, or as the last frame painted them, while an edit
+// since may have left the widest unmeasured until the next frame lays
+// out the lines in view, and brings the offset into their range.
+func (ed *editor) contentWidth() float32 {
+	return max(ed.paintedW, ed.view.measured.widest())
+}
+
+// maxScrollX is how far the content scrolls right.
 func (ed *editor) maxScrollX() float32 {
-	return max(0, ed.view.maxLine+ed.view.charWidth*4-(ed.r.W-ed.textX))
+	return max(0, ed.contentWidth()+ed.view.charWidth*4-(ed.r.W-ed.textX))
 }
 
 // scrollbarPress grabs a thumb, or jumps to where the track was pressed.
@@ -493,16 +549,19 @@ func (ed *editor) setScrollShared(y float64) {
 // one along its right edge, the horizontal one under the text, at the
 // bottom of what shows (hbarY), short of the vertical one's track.
 func (ed *editor) bar(horizontal bool) ui.Scrollbar {
+	style := ed.barStyle
 	if horizontal {
 		return ui.Scrollbar{
-			Box:        ui.Rect{X: ed.textX, W: ed.hTrack(), H: ed.hbarY + scrollbarWidth},
+			Box:        ui.Rect{X: ed.textX, W: ed.hTrack(), H: ed.hbarY + style.TrackWidth},
 			Horizontal: true,
-			View:       ed.r.W - ed.textX, Content: ed.view.maxLine + ed.view.charWidth*4, Offset: ed.scrollX,
+			View:       ed.r.W - ed.textX, Content: ed.contentWidth() + ed.view.charWidth*4, Offset: ed.scrollX,
+			Style: style,
 		}
 	}
 	return ui.Scrollbar{
 		Box:  ui.Rect{W: ed.r.W, H: ed.viewH},
 		View: ed.viewH, Content: float32(ed.scrollMax()) + ed.viewH, Offset: float32(ed.scrollY),
+		Style: style,
 	}
 }
 
@@ -590,7 +649,7 @@ func (ed *editor) foldPlaceholderAt(x float32, y float64) (int, bool) {
 	last := &l.rows[len(l.rows)-1]
 	end := last.indent + last.width
 	g := v.heights.geometry(line)
-	rowTop := g.rows + float64(len(l.rows)-1)*float64(v.lineHeight)
+	rowTop := g.rows + float64(len(l.rows)-1)*float64(l.rowHeight)
 	if y >= rowTop && x >= end+4 && x <= end+4+v.charWidth*3+8 {
 		return line, true
 	}
@@ -678,6 +737,7 @@ func (ed *editor) replaceText(r *ui.TextInputRange, s string) {
 	}
 	ts := ed.targets(r)
 	ed.markedActive, ed.marked = false, nil
+	s = lf(s)
 	ed.replaceRanges(ts, s, editCompose, -1, -1)
 	if b := ed.buf(); b != nil {
 		b.endGroup()

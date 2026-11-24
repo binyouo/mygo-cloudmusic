@@ -92,9 +92,13 @@ func spaceWords(shapes []wordShape, widths []float32, gap float32) {
 
 // stage shows the lyrics of tr on the whole stage.
 func (a *app) stage(c *ui.Context, tr *netease.Track, accent ui.Color) {
+	w, h := c.Size()
+	a.stageIn(c, tr, accent, w, h)
+}
+
+func (a *app) stageIn(c *ui.Context, tr *netease.Track, accent ui.Color, w, h float32) {
 	pl := a.pl
 	lines, loaded := pl.Lyrics()
-	w, h := c.Size()
 	f := min(64, max(36, w*0.045))
 	box := ui.Box(c.Key("stage")).Grow(1)
 	a.npRise(box, 1)
